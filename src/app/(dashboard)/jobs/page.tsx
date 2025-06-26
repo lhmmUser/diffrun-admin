@@ -1,0 +1,190 @@
+"use client";
+
+import { useEffect, useState } from "react";
+
+// Types for the API response
+type RawOrder = {
+    order_id: string;
+    job_id: string;
+    previewUrl: string;
+    bookId?: string;
+    book_id?: string;
+    createdAt?: string;
+    created_at?: any;
+    name?: string;
+    processed_at?: any;
+    paymentDate?: string;
+    approvalDate?: string;
+};
+
+type Order = {
+    orderId: string;
+    jobId: string;
+    previewUrl: string;
+    bookId: string;
+    createdAt: string;
+    name: string;
+    paymentDate: string;
+    approvalDate: string;
+};
+
+const formatDate = (dateInput: any) => {
+    if (!dateInput) return "";
+    try {
+        if (typeof dateInput === "object" && dateInput.$date && dateInput.$date.$numberLong) {
+            const dt = new Date(Number(dateInput.$date.$numberLong));
+            return dt.toLocaleString("en-IN", {
+                day: "2-digit",
+                month: "short",
+                hour: "2-digit",
+                minute: "2-digit",
+                hour12: true,
+            });
+        }
+        if (typeof dateInput === "string" && dateInput.trim() !== "") {
+            const dt = new Date(dateInput);
+            return dt.toLocaleString("en-IN", {
+                day: "2-digit",
+                month: "short",
+                hour: "2-digit",
+                minute: "2-digit",
+                hour12: true,
+            });
+        }
+    } catch {
+        return "";
+    }
+    return "";
+};
+
+export default function JobsPage() {
+    const [orders, setOrders] = useState<Order[]>([]);
+    const [filterBookStyle, setFilterBookStyle] = useState<string>("all");
+    const [sortBy, setSortBy] = useState<string>("created_at");
+    const [sortDir, setSortDir] = useState<string>("desc");
+
+    useEffect(() => {
+        const fetchOrders = async () => {
+            try {
+                const params = new URLSearchParams();
+                if (filterBookStyle !== "all") params.append("filter_book_style", filterBookStyle);
+                params.append("sort_by", sortBy);
+                params.append("sort_dir", sortDir);
+
+                const res = await fetch(`http://127.0.0.1:8000/jobs?${params.toString()}`);
+                const rawData: RawOrder[] = await res.json();
+
+                // Transform the data to match our Order type
+                const transformed: Order[] = rawData.map(order => ({
+                    orderId: order.order_id || "N/A",
+                    jobId: order.job_id || "N/A",
+                    previewUrl: order.previewUrl || "",
+                    bookId: order.bookId || "N/A",
+                    createdAt: order.createdAt || "",
+                    name: order.name || "",
+                    paymentDate: formatDate(order.processed_at) || order.paymentDate || "",
+                    approvalDate: order.approvalDate || ""
+                }));
+
+                console.log("Transformed orders:", transformed); // Debug log
+                setOrders(transformed);
+            } catch (error) {
+                console.error("Failed to fetch orders:", error);
+            }
+        };
+
+        fetchOrders();
+    }, [filterBookStyle, sortBy, sortDir]);
+
+    return (
+        <div>
+            <h2 className="text-2xl font-semibold mb-4">Jobs</h2>
+
+            {/* Filters */}
+            <div className="flex gap-4 mb-6">
+                <select
+                    className="border px-3 py-1 rounded text-sm"
+                    value={filterBookStyle}
+                    onChange={(e) => setFilterBookStyle(e.target.value)}
+                >
+                    <option value="all">All Book Types</option>
+                    <option value="wigu">WIGU</option>
+                    <option value="astro">Astro</option>
+                    <option value="abcd">ABCD</option>
+                </select>
+
+                <select
+                    className="border px-3 py-1 rounded text-sm"
+                    value={sortBy}
+                    onChange={(e) => setSortBy(e.target.value)}
+                >
+                    <option value="created_at">Sort by: Created At</option>
+                    <option value="book_id">Sort by: Book Type</option>
+                </select>
+
+                <select
+                    className="border px-3 py-1 rounded text-sm"
+                    value={sortDir}
+                    onChange={(e) => setSortDir(e.target.value)}
+                >
+                    <option value="desc">↓ Descending</option>
+                    <option value="asc">↑ Ascending</option>
+                </select>
+            </div>
+
+            {/* Table */}
+            <div className="overflow-x-auto bg-white rounded shadow overflow-visible relative">
+                <table className="min-w-full table-auto text-sm text-left">
+                    <thead className="bg-gray-100 text-gray-700 font-semibold">
+                        <tr>
+                            <th className="p-3">Job ID</th>
+                            <th className="p-3">Preview URL</th>
+                            <th className="p-3">Book ID</th>
+                            <th className="p-3">Created At</th>
+                            <th className="p-3">Name</th>
+                            <th className="p-3">Paid</th>
+                            <th className="p-3">Approved</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {orders.map((order) => (
+                            <tr
+                                key={order.jobId}
+                                className="border-t hover:bg-gray-50"
+                            >
+                                <td className="p-3">{order.jobId}</td>
+                                <td className="p-3">
+                                    {order.previewUrl ? (
+                                        <a
+                                            href={order.previewUrl}
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            className="text-blue-600 hover:text-blue-800"
+                                        >
+                                            Preview Book
+                                        </a>
+                                    ) : (
+                                        <span className="text-gray-400">-</span>
+                                    )}
+                                </td>
+                                <td className="p-3">{order.bookId}</td>
+                                <td className="p-3">{order.createdAt}</td>
+                                <td className="p-3">{order.name}</td>
+                                <td className="p-3">
+                                    <span className={`px-2 py-1 rounded text-xs ${order.paymentDate ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
+                                        {order.paymentDate ? 'Yes' : 'No'}
+                                    </span>
+                                </td>
+                                <td className="p-3">
+                                    <span className={`px-2 py-1 rounded text-xs ${order.approvalDate ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
+                                        {order.approvalDate ? 'Yes' : 'No'}
+                                    </span>
+                                </td>
+                            </tr>
+                        ))}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    );
+}

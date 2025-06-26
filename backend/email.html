@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+ <html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="color-scheme" content="light">
+  <meta name="supported-color-schemes" content="light">
+  <title>We'd love your feedback</title>
+  <style>
+  @media only screen and (max-width: 480px) {
+    h2 { font-size: 15px !important; }
+    p { font-size: 15px !important; }
+    a { font-size: 15px !important; }
+    .title-text { font-size: 18px !important; }
+    .small-text { font-size: 12px !important; }
+    .logo-img { max-width: 300px !important; }
+    .review-btn { font-size: 14px !important; padding: 12px 20px; font-size: 8px !important; }
+  }
+</style>
+
+</head>
+<body style="font-family: Arial, sans-serif; background-color: #f7f7f7; padding: 20px; margin: 0;">
+  <table width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#ffffff" style="max-width: 600px; margin: 0 auto; border-radius: 8px; box-shadow: 0 0 10px rgba(0,0,0,0.1);">
+    <tr>
+      <td style="padding: 20px;">
+        <div style="text-align: left; margin-bottom: 20px;">
+          <img src="https://diffrungenerations.s3.ap-south-1.amazonaws.com/Diffrun_logo+(1).png" alt="Diffrun" class="logo-img" style="max-width: 100px;">
+        </div>
+
+        <h2 style="color: #333; font-size: 15px;">Hey there {order.get("user_name")},</h2>
+
+        <p style="font-size: 14px; color: #555;">
+          We truly hope {order.get("name", "").upper()} is enjoying their magical storybook! 
+          At Diffrun, we are dedicated to crafting personalized storybooks that inspire joy, imagination, and lasting memories for every child. 
+          Your feedback means the world to us. We'd be grateful if you could share your experience.
+        </p>
+
+        <p style="font-size: 14px; color: #555;">Please share your feedback with us:</p>
+
+        <p style="text-align: left; margin: 30px 0;">
+          <a href="https://search.google.com/local/writereview?placeid=ChIJn5mGENoTrjsRPHxH86vgui0"
+            class="review-btn"
+             style="background-color: #5784ba; color: #ffffff; text-decoration: none; padding: 10px 20px; border-radius: 20px; font-weight: bold; font-size: 16px;">
+            Leave a Review
+          </a>
+        </p>
+
+        <p style="font-size: 14px; color: #555; text-align: left;">
+          Thanks,<br>Team Diffrun
+        </p>
+
+        <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
+
+        <!-- Explore More Row -->
+        <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top: 30px;">
+          <tr>
+            <td colspan="2" style="padding: 10px 0; text-align: left;">
+              <p class="title-text" style="font-size: 18px; margin: 0; font-weight: bold; color: #000;">
+                      {generate_book_title(order.get("book_id"), order.get("name"))}
+                    </p>
+            </td>
+          </tr>
+
+          <!-- Order reference -->
+          <tr>
+            <td style="padding: 0; vertical-align: top; font-size: 12px; color: #333; font-weight: 500;">
+              Order reference ID: <span>{order.get("order_id", "N/A")}</span>
+            </td>
+            <td style="padding: 0; text-align: right; font-size: 12px; color: #333; font-weight: 500;">
+              Ordered: <span>{format_booking_date(order.get("approved_at", ""))}</span>
+            </td>
+          </tr>
+
+          <!-- Book title and image block -->
+          <tr>
+            <td colspan="2" style="padding: 0; margin: 0; background-color: #f7f6cf;">
+              <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse: collapse; padding: 0; margin: 0;">
+                <tr>
+                  <!-- Left Title -->
+                  <td style="padding: 20px; vertical-align: middle; margin: 0;">
+                    
+                    <p style="font-size: 15px; margin: 0; ">
+                Explore more magical books in our growing collection &nbsp;
+                <button style="background-color:#5784ba; margin-top: 20px; border-radius: 30px;border: none;padding:10px 15px"><a href="https://diffrun.com" style="color:white; font-weight: bold; text-decoration: none;">
+                  Browse Now
+                </a></button>
+              </p>
+                  </td>
+
+                  <!-- Right Image -->
+                  <td width="300" style="padding: 0; margin: 0; vertical-align: middle;">
+                    <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse: collapse;">
+                      <tr>
+                        <td align="right" style="padding: 0; margin: 0;">
+                          <img src="https://diffrungenerations.s3.ap-south-1.amazonaws.com/email_image+(2).jpg" 
+                               alt="Cover Image" 
+                               width="300" 
+                               style="display: block; border-radius: 0; margin: 0; padding: 0;">
+                        </td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+        </table>
+
+      </td>
+    </tr>
+  </table>
+</body>
+</html>
