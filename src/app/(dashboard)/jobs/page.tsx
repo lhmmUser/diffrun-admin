@@ -63,6 +63,24 @@ export default function JobsPage() {
     const [sortBy, setSortBy] = useState<string>("created_at");
     const [sortDir, setSortDir] = useState<string>("desc");
     const baseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || "";
+    const [currentPage, setCurrentPage] = useState(1);
+    const [itemsPerPage, setItemsPerPage] = useState(12);
+
+    useEffect(() => {
+        const calculateItemsPerPage = () => {
+            const windowHeight = window.innerHeight;
+            const headerHeight = 200;
+            const footerHeight = 80;
+            const rowHeight = 45;
+            const usableHeight = windowHeight - headerHeight ;
+            const visibleRows = Math.floor(usableHeight / rowHeight);
+            setItemsPerPage(Math.max(4, visibleRows));
+        };
+
+        calculateItemsPerPage();
+        window.addEventListener("resize", calculateItemsPerPage);
+        return () => window.removeEventListener("resize", calculateItemsPerPage);
+    }, []);
     
     useEffect(() => {
         const fetchOrders = async () => {
@@ -97,6 +115,10 @@ export default function JobsPage() {
 
         fetchOrders();
     }, [filterBookStyle, sortBy, sortDir]);
+
+    const totalPages = Math.ceil(orders.length / itemsPerPage);
+    const startIdx = (currentPage - 1) * itemsPerPage;
+    const currentOrders = orders.slice(startIdx, startIdx + itemsPerPage);
 
     return (
         <div>
@@ -149,7 +171,7 @@ export default function JobsPage() {
                         </tr>
                     </thead>
                     <tbody>
-                        {orders.map((order) => (
+                        {currentOrders.map((order) => (
                             <tr
                                 key={order.jobId}
                                 className="border-t hover:bg-gray-50"
@@ -186,6 +208,62 @@ export default function JobsPage() {
                         ))}
                     </tbody>
                 </table>
+                </div>
+                 {/* Pagination */}
+            <div className="flex justify-center items-center gap-2 py-4">
+                <button
+                    onClick={() => setCurrentPage(p => Math.max(p - 1, 1))}
+                    disabled={currentPage === 1}
+                    className="px-3 py-1 rounded border bg-white text-sm disabled:opacity-50"
+                >
+                    Prev
+                </button>
+
+                {currentPage > 2 && (
+                    <>
+                        <button
+                            onClick={() => setCurrentPage(1)}
+                            className={`px-3 py-1 rounded border text-sm ${currentPage === 1 ? "bg-blue-600 text-white" : "bg-white"}`}
+                        >
+                            1
+                        </button>
+                        {currentPage > 3 && <span className="px-2 text-sm text-gray-500">...</span>}
+                    </>
+                )}
+
+                {[-1, 0, 1].map(offset => {
+                    const page = currentPage + offset;
+                    if (page < 1 || page > totalPages) return null;
+                    return (
+                        <button
+                            key={page}
+                            onClick={() => setCurrentPage(page)}
+                            className={`px-3 py-1 rounded border text-sm ${currentPage === page ? "bg-blue-600 text-white" : "bg-white"}`}
+                        >
+                            {page}
+                        </button>
+                    );
+                })}
+
+                {currentPage < totalPages - 1 && (
+                    <>
+                        {currentPage < totalPages - 2 && <span className="px-2 text-sm text-gray-500">...</span>}
+                        <button
+                            onClick={() => setCurrentPage(totalPages)}
+                            className={`px-3 py-1 rounded border text-sm ${currentPage === totalPages ? "bg-blue-600 text-white" : "bg-white"}`}
+                        >
+                            {totalPages}
+                        </button>
+                    </>
+                )}
+
+                <button
+                    onClick={() => setCurrentPage(p => Math.min(p + 1, totalPages))}
+                    disabled={currentPage === totalPages}
+                    className="px-3 py-1 rounded border bg-white text-sm disabled:opacity-50"
+                >
+                    Next
+                </button>
             </div>
         </div>
     );
