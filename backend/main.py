@@ -483,6 +483,11 @@ def get_jobs(
     result = []
 
     for doc in records:
+        shipping_address = doc.get("shipping_address", {})
+        if isinstance(shipping_address, dict):
+            city = shipping_address.get("city", "")
+        else:
+            city = ""
         result.append({
             "order_id": doc.get("order_id", ""),
             "job_id": doc.get("job_id", ""),
@@ -490,7 +495,7 @@ def get_jobs(
             "interiorPdf": doc.get("book_url", ""),
             "previewUrl": doc.get("preview_url", ""),
             "name": doc.get("name", ""),
-            "city": doc.get("shipping_address", {}).get("city", ""),
+            "city": city,
             "price": doc.get("price", doc.get("total_price", doc.get("amount", doc.get("total_amount", 0)))),
             "createdAt": format_date(jsonable_encoder(doc.get("created_at", ""))),
             "paymentDate": doc.get("processed_at", ""),
@@ -523,6 +528,17 @@ def jobs_timeline(interval: str = Query("day", enum=["day", "week", "month"])):
     data = list(orders_collection.aggregate(pipeline))
     # Format for frontend
     return [{"date": d["_id"], "count": d["count"]} for d in data]
+
+def format_approved_date_for_email(raw):
+    try:
+        if isinstance(raw, dict) and "$date" in raw:
+            timestamp = int(raw["$date"]["$numberLong"])
+            return datetime.fromtimestamp(timestamp / 1000).strftime("%d %b, %Y")
+        elif isinstance(raw, str) and raw.strip():
+            return datetime.fromisoformat(raw).strftime("%d %b, %Y")
+    except Exception as e:
+        print(f"Error formatting approved_at: {e}")
+    return "N/A"
 
 @app.post("/send-feedback-email/{job_id}")
 def send_feedback_email(job_id: str, background_tasks: BackgroundTasks):
@@ -607,7 +623,7 @@ def send_feedback_email(job_id: str, background_tasks: BackgroundTasks):
               Order reference ID: <span>{order.get("order_id", "N/A")}</span>
             </td>
             <td style="padding: 0; text-align: right; font-size: 12px; color: #333; font-weight: 500;">
-              Ordered: <span>{format_booking_date(order.get("approved_at", ""))}</span>
+              Ordered: <span>{format_approved_date_for_email(order.get("approved_at", ""))}</span>
             </td>
           </tr>
 

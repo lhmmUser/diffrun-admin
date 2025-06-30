@@ -62,7 +62,8 @@ export default function JobsPage() {
     const [filterBookStyle, setFilterBookStyle] = useState<string>("all");
     const [sortBy, setSortBy] = useState<string>("created_at");
     const [sortDir, setSortDir] = useState<string>("desc");
-
+    const baseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || "";
+    
     useEffect(() => {
         const fetchOrders = async () => {
             try {
@@ -71,7 +72,8 @@ export default function JobsPage() {
                 params.append("sort_by", sortBy);
                 params.append("sort_dir", sortDir);
 
-                const res = await fetch(`http://127.0.0.1:8000/jobs?${params.toString()}`);
+                const res = await fetch(`${baseUrl}/jobs?${params.toString()}`);
+                console.log(baseUrl,'baseUrl');
                 const rawData: RawOrder[] = await res.json();
 
                 // Transform the data to match our Order type

@@ -1,65 +1,69 @@
+"use client";
+import { useState } from 'react';
 import './globals.css';
 import type { Metadata } from 'next';
 import { Inter } from 'next/font/google';
 import { ClerkProvider, SignedIn, SignedOut, RedirectToSignIn } from '@clerk/nextjs';
 import Link from 'next/link';
-
-const inter = Inter({ subsets: ['latin'] });
-
-export const metadata: Metadata = {
-  title: 'Diffrun Admin Dashboard',
-  description: 'Manage orders, approvals, and admin workflows.',
-};
+import { HiMenu, HiX } from "react-icons/hi";
 
 export default function RootLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
-  return (
-    <ClerkProvider>
-      <html lang="en">
-        <body className={inter.className}>
-          {/* If signed in, show admin layout */}
-          <SignedIn>
-            <div className="flex min-h-screen">
-              {/* Sidebar */}
-              <aside className="w-64 bg-gray-900 text-white p-6">
-                <h1 className="text-xl font-bold mb-6">Diffrun Admin</h1>
-                <nav>
-                  <ul className="space-y-4">
-                    <li>
-                      <Link href="/dashboard" className="block hover:text-blue-300">
-                        Dashboard
-                      </Link>
-                    </li>
-                    <li>
-                      <Link href="/orders" className="block hover:text-blue-300">
-                        Orders
-                      </Link>
-                    </li>
-                    <li>
-                      <Link href="/jobs" className="block hover:text-blue-300">
-                        Jobs
-                      </Link>
-                    </li>
-                  </ul>
-                </nav>
-              </aside>
+    const [sidebarOpen, setSidebarOpen] = useState(false);
+    return (
+   <>
+      <SignedIn>
+        {/* Mobile navbar */}
+        <div className="md:hidden flex justify-between items-center bg-gray-900 text-white p-4">
+          <h1 className="text-lg font-bold">Diffrun Admin</h1>
+          <button onClick={() => setSidebarOpen(!sidebarOpen)}>
+            {sidebarOpen ? <HiX className="h-6 w-6" /> : <HiMenu className="h-6 w-6" />}
+          </button>
+        </div>
 
-              {/* Main content */}
-              <main className="flex-1 bg-gray-50 p-6">
-                {children}
-              </main>
+        <div className="flex min-h-screen">
+          {/* Sidebar */}
+          <aside
+            className={`bg-gray-900 text-white w-60 p-6 fixed top-0 left-0 h-screen z-50 transform md:translate-x-0 transition-transform duration-200 ease-in-out
+              ${sidebarOpen ? "translate-x-0" : "-translate-x-full"} md:relative md:block`}
+          >
+            <div className="mb-8 pt-4">
+              <h2 className="text-xl font-bold mb-2">Diffrun Admin</h2>
+              <p className="text-sm text-gray-400">Manage your books</p>
             </div>
-          </SignedIn>
+            <nav>
+              <ul className="space-y-2">
+                <li>
+                  <Link href="/dashboard" className="block px-3 py-2 rounded hover:bg-gray-800 hover:text-blue-300">📊 Dashboard</Link>
+                </li>
+                <li>
+                  <Link href="/orders" className="block px-3 py-2 rounded hover:bg-gray-800 hover:text-blue-300">📦 Orders</Link>
+                </li>
+                <li>
+                  <Link href="/jobs" className="block px-3 py-2 rounded hover:bg-gray-800 hover:text-blue-300">🧾 Jobs</Link>
+                </li>
+              </ul>
+            </nav>
+          </aside>
 
-          {/* If not signed in, redirect to sign-in */}
-          <SignedOut>
-            <RedirectToSignIn />
-          </SignedOut>
-        </body>
-      </html>
-    </ClerkProvider>
+          {/* Main content wrapper with left margin */}
+         <main
+  className={`flex-1 bg-gray-50 overflow-y-auto p-4 md:p-2 min-h-screen transition-all duration-300 ${
+    sidebarOpen ? "md:ml-64" : "ml-0"
+  }`}
+>
+  {children}
+</main>
+
+        </div>
+      </SignedIn>
+
+      <SignedOut>
+        <RedirectToSignIn />
+      </SignedOut>
+    </>
   );
 }
