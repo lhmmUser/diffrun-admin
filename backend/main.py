@@ -673,7 +673,7 @@ def send_feedback_email(job_id: str, background_tasks: BackgroundTasks):
 
         msg = EmailMessage()
         msg["Subject"] = f"We'd love your feedback on {order.get("name", "")}'s Storybook!"
-        msg["From"] = os.getenv("EMAIL_ADDRESS")
+        msg["From"] = f"Diffrun Team <{os.getenv('EMAIL_ADDRESS')}>"
         msg["To"] = order.get("email", "")
         msg.set_content("This email contains HTML content.")
         msg.add_alternative(html_content, subtype="html")
