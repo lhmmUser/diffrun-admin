@@ -174,7 +174,7 @@ def get_orders(
     result = []
 
     for doc in records:
-        print(f"Debug - Order {doc.get('order_id')} full document: {doc}")  # Debug log
+        
         result.append({
             "order_id": doc.get("order_id", ""),
             "job_id": doc.get("job_id", ""),
@@ -532,13 +532,25 @@ def jobs_timeline(interval: str = Query("day", enum=["day", "week", "month"])):
 def format_approved_date_for_email(raw):
     try:
         if isinstance(raw, dict) and "$date" in raw:
+            print(f"Raw approved_at value: {raw}")
             timestamp = int(raw["$date"]["$numberLong"])
+            print(f"Timestamp: {timestamp}")
             return datetime.fromtimestamp(timestamp / 1000).strftime("%d %b, %Y")
         elif isinstance(raw, str) and raw.strip():
             return datetime.fromisoformat(raw).strftime("%d %b, %Y")
     except Exception as e:
         print(f"Error formatting approved_at: {e}")
     return "N/A"
+
+def personalize_pronoun( gender: str) -> str:
+    gender = gender.strip().lower()
+    if gender == "boy":
+        return "his"
+    elif gender == "girl":
+        return "her"
+    else:
+        return "their"  # fallback to original if gender is unknown
+
 
 @app.post("/send-feedback-email/{job_id}")
 def send_feedback_email(job_id: str, background_tasks: BackgroundTasks):
@@ -586,7 +598,7 @@ def send_feedback_email(job_id: str, background_tasks: BackgroundTasks):
         <h2 style="color: #333; font-size: 15px;">Hey there {order.get("user_name")},</h2>
 
         <p style="font-size: 14px; color: #555;">
-          We truly hope {order.get("name", "").upper()} is enjoying their magical storybook! 
+          We truly hope {order.get("name", "")} is enjoying {personalize_pronoun(order.get("gender","   "))} magical storybook, <strong>{generate_book_title(order.get("book_id"), order.get("name"))}</strong>! 
           At Diffrun, we are dedicated to crafting personalized storybooks that inspire joy, imagination, and lasting memories for every child. 
           Your feedback means the world to us. We'd be grateful if you could share your experience.
         </p>
@@ -623,7 +635,7 @@ def send_feedback_email(job_id: str, background_tasks: BackgroundTasks):
               Order reference ID: <span>{order.get("order_id", "N/A")}</span>
             </td>
             <td style="padding: 0; text-align: right; font-size: 12px; color: #333; font-weight: 500;">
-              Ordered: <span>{format_approved_date_for_email(order.get("approved_at", ""))}</span>
+              Ordered: <span>{format_date(order.get("approved_at", ""))}</span>
             </td>
           </tr>
 
