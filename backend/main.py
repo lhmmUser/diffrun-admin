@@ -349,7 +349,7 @@ async def approve_printing(order_ids: List[str]):
                     "city": order.get("shipping_address", {}).get("city", ""),
                     "state": order.get("shipping_address", {}).get("province", ""),
                     "country": country_code,
-                    "email": order.get("customer_email", ""),
+                    "email": order.get("email", ""),
                     "phone": order.get("shipping_address", {}).get("phone", "")
                 }],
                 "items": [{
