@@ -1,2 +1,6 @@
 dnspython==2.7.0
 pymongo==4.13.0
+fastapi
+uvicorn
+dotenv
+requests

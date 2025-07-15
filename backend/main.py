@@ -17,12 +17,16 @@ import smtplib
 from email.message import EmailMessage
 import logging
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 # Setup logger
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 load_dotenv()
+
+EMAIL_USER = os.getenv("EMAIL_USER")
+EMAIL_PASS = os.getenv("EMAIL_PASS")
 
 app = FastAPI()
 
@@ -102,6 +106,17 @@ MONGO_URI = os.getenv("MONGO_URI")
 client = MongoClient(MONGO_URI)
 db = client["candyman"]
 orders_collection = db["user_details"]  # Changed back to user_details as that might be the correct collection
+
+class ItemShippedPayload(BaseModel):
+    apikey: str
+    type: str
+    order: str
+    item: str
+    order_reference: str
+    item_reference: str
+    tracking: str
+    shipping_option: str
+    datetime: str
 
 def generate_book_title(book_id, child_name):
     if not child_name:
@@ -433,7 +448,86 @@ async def approve_printing(order_ids: List[str]):
 
     return results
 
+@app.post("/api/item_shipped")
+async def item_shipped(payload: ItemShippedPayload, request: Request):
+    logger.info(f"📦 Received Cloudprinter webhook: {payload.dict()}")
 
+    expected_api_key = os.getenv("CLOUDPRINTER_WEBHOOK_KEY")
+    if payload.apikey != expected_api_key:
+        logger.warning("❌ Invalid webhook API key")
+        raise HTTPException(status_code=403, detail="Invalid API key")
+
+    existing = orders_collection.find_one({
+        "order_id": payload.order_reference,
+        "tracking_code": payload.tracking
+    })
+    if existing:
+        logger.info(f"🔁 Duplicate tracking info already exists for order {payload.order_reference}")
+        return {"status": "already_processed"}
+
+    result = orders_collection.update_one(
+        {"order_id": payload.order_reference},
+        {
+            "$set": {
+                "tracking_code": payload.tracking,
+                "shipping_option": payload.shipping_option,
+                "shipped_at": payload.datetime
+            }
+        }
+    )
+
+    if result.modified_count:
+        logger.info(f"✅ Order {payload.order_reference} updated with tracking info")
+        send_tracking_email(payload.order_reference)
+        return {"status": "success"}
+    else:
+        logger.warning(f"⚠️ Order not found for reference: {payload.order_reference}")
+        return {"status": "not_found"}
+
+def send_tracking_email(order_id: str):
+    order = orders_collection.find_one({"order_id": order_id})
+    if not order:
+        logger.error(f"❌ No order found for tracking email: {order_id}")
+        return
+
+    # recipient = order.get("email")
+    name = order.get("name", "").title()
+    user_name = order.get("user_name", "")
+    tracking_code = order.get("tracking_code", "")
+    shipping_option = order.get("shipping_option", "")
+    carrier = shipping_option.lower().replace(" ", "-")
+    tracking_link = f"https://track.aftership.com/{carrier}/{tracking_code}"
+
+    html_content = f"""
+    <html>
+      <body style="font-family: Arial, sans-serif;">
+        <h2>📦 Your storybook has been shipped!</h2>
+        <p>Hi {user_name},</p>
+        <p>We're excited to let you know that <strong>{name}'s storybook</strong> is on its way.</p>
+        <p><strong>Tracking ID:</strong> {tracking_code}</p>
+        <p><strong>Carrier:</strong> {shipping_option}</p>
+        <p>You can track your shipment here:</p>
+        <p><a href="{tracking_link}" target="_blank">{tracking_link}</a></p>
+        <br/>
+        <p>Thank you for choosing Diffrun!</p>
+      </body>
+    </html>
+    """
+
+    msg = EmailMessage()
+    msg["Subject"] = f"{name}'s Storybook is on the way! 📬"
+    msg["From"] = f"Team Diffrun <{EMAIL_USER}>"
+    msg["To"] = "support@diffrun.com"
+    msg.set_content("This email contains HTML content.")
+    msg.add_alternative(html_content, subtype="html")
+
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+            smtp.login(EMAIL_USER, EMAIL_PASS)
+            smtp.send_message(msg)
+            logger.info(f"✅ Tracking email sent to {recipient}")
+    except Exception as e:
+        logger.error(f"❌ Failed to send tracking email: {e}")
 
 @app.get("/jobs")
 def get_jobs(
@@ -551,7 +645,6 @@ def personalize_pronoun( gender: str) -> str:
     else:
         return "their"  # fallback to original if gender is unknown
 
-
 @app.post("/send-feedback-email/{job_id}")
 def send_feedback_email(job_id: str, background_tasks: BackgroundTasks):
     order = orders_collection.find_one({"job_id": job_id})
@@ -565,135 +658,134 @@ def send_feedback_email(job_id: str, background_tasks: BackgroundTasks):
     try:
         html_content = f"""
         <html>
-<head>
-  <meta charset="UTF-8">
-  <meta name="color-scheme" content="light">
-  <meta name="supported-color-schemes" content="light">
-  <title>We'd love your feedback</title>
-  <style>
-  @media only screen and (max-width: 480px) {{
-    h2 {{ font-size: 15px !important; }}
-    p {{ font-size: 15px !important; }}
-    a {{ font-size: 15px !important; }}
-    .title-text {{ font-size: 18px !important; }}
-    .small-text {{ font-size: 12px !important; }}
-    .logo-img {{ width: 300px !important; }}
-    .review-btn {{ font-size: 14px !important; padding: 12px 20px ; font-size: 8px !important; }}
-    .browse-now-btn {{
-    font-size: 12px !important;
-    padding: 8px 12px !important;
-  }}
-  }}
-</style>
+        <head>
+        <meta charset="UTF-8">
+        <meta name="color-scheme" content="light">
+        <meta name="supported-color-schemes" content="light">
+        <title>We'd love your feedback</title>
+        <style>
+        @media only screen and (max-width: 480px) {{
+            h2 {{ font-size: 15px !important; }}
+            p {{ font-size: 15px !important; }}
+            a {{ font-size: 15px !important; }}
+            .title-text {{ font-size: 18px !important; }}
+            .small-text {{ font-size: 12px !important; }}
+            .logo-img {{ width: 300px !important; }}
+            .review-btn {{ font-size: 14px !important; padding: 12px 20px ; font-size: 8px !important; }}
+            .browse-now-btn {{
+            font-size: 12px !important;
+            padding: 8px 12px !important;
+        }}
+        }}
+        </style>
 
-</head>
-<body style="font-family: Arial, sans-serif; background-color: #f7f7f7; padding: 20px; margin: 0;">
-  <table width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#ffffff" style="max-width: 600px; margin: 0 auto; border-radius: 8px; box-shadow: 0 0 10px rgba(0,0,0,0.1);">
-    <tr>
-      <td style="padding: 20px;">
-        <div style="text-align: left; margin-bottom: 20px;">
-          <img src="https://diffrungenerations.s3.ap-south-1.amazonaws.com/Diffrun_logo+(1).png" alt="Diffrun" class="logo-img" style="max-width: 100px;">
-        </div>
+        </head>
+        <body style="font-family: Arial, sans-serif; background-color: #f7f7f7; padding: 20px; margin: 0;">
+        <table width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#ffffff" style="max-width: 600px; margin: 0 auto; border-radius: 8px; box-shadow: 0 0 10px rgba(0,0,0,0.1);">
+            <tr>
+            <td style="padding: 20px;">
+                <div style="text-align: left; margin-bottom: 20px;">
+                <img src="https://diffrungenerations.s3.ap-south-1.amazonaws.com/Diffrun_logo+(1).png" alt="Diffrun" class="logo-img" style="max-width: 100px;">
+                </div>
 
-        <h2 style="color: #333; font-size: 15px;">Hey there {order.get("user_name")},</h2>
+                <h2 style="color: #333; font-size: 15px;">Hey there {order.get("user_name")},</h2>
 
-        <p style="font-size: 14px; color: #555;">
-          We truly hope {order.get("name", "")} is enjoying {personalize_pronoun(order.get("gender","   "))} magical storybook, <strong>{generate_book_title(order.get("book_id"), order.get("name"))}</strong>! 
-          At Diffrun, we are dedicated to crafting personalized storybooks that inspire joy, imagination, and lasting memories for every child. 
-          Your feedback means the world to us. We'd be grateful if you could share your experience.
-        </p>
+                <p style="font-size: 14px; color: #555;">
+                We truly hope {order.get("name", "")} is enjoying {personalize_pronoun(order.get("gender","   "))} magical storybook, <strong>{generate_book_title(order.get("book_id"), order.get("name"))}</strong>! 
+                At Diffrun, we are dedicated to crafting personalized storybooks that inspire joy, imagination, and lasting memories for every child. 
+                Your feedback means the world to us. We'd be grateful if you could share your experience.
+                </p>
 
-        <p style="font-size: 14px; color: #555;">Please share your feedback with us:</p>
+                <p style="font-size: 14px; color: #555;">Please share your feedback with us:</p>
 
-        <p style="text-align: left; margin: 30px 0;">
-          <a href="https://search.google.com/local/writereview?placeid=ChIJn5mGENoTrjsRPHxH86vgui0"
-            class="review-btn"
-             style="background-color: #5784ba; color: #ffffff; text-decoration: none; padding: 10px 20px; border-radius: 20px; font-weight: bold; font-size: 16px;">
-            Leave a Review
-          </a>
-        </p>
+                <p style="text-align: left; margin: 30px 0;">
+                <a href="https://search.google.com/local/writereview?placeid=ChIJn5mGENoTrjsRPHxH86vgui0"
+                    class="review-btn"
+                    style="background-color: #5784ba; color: #ffffff; text-decoration: none; padding: 10px 20px; border-radius: 20px; font-weight: bold; font-size: 16px;">
+                    Leave a Review
+                </a>
+                </p>
 
-        <p style="font-size: 14px; color: #555; text-align: left;">
-          Thanks,<br>Team Diffrun
-        </p>
+                <p style="font-size: 14px; color: #555; text-align: left;">
+                Thanks,<br>Team Diffrun
+                </p>
 
-        <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
+                <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
 
-        <!-- Explore More Row -->
-        <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top: 30px;">
-          <tr>
-            <td colspan="2" style="padding: 10px 0; text-align: left;">
-              <p class="title-text" style="font-size: 18px; margin: 0; font-weight: bold; color: #000;">
-                      {generate_book_title(order.get("book_id"), order.get("name"))}
-                    </p>
-            </td>
-          </tr>
-
-          <!-- Order reference -->
-          <tr>
-            <td style="padding: 0; vertical-align: top; font-size: 12px; color: #333; font-weight: 500;">
-              Order reference ID: <span>{order.get("order_id", "N/A")}</span>
-            </td>
-            <td style="padding: 0; text-align: right; font-size: 12px; color: #333; font-weight: 500;">
-              Ordered: <span>{format_date(order.get("approved_at", ""))}</span>
-            </td>
-          </tr>
-
-          <!-- Book title and image block -->
-          <tr>
-            <td colspan="2" style="padding: 0; margin: 0; background-color: #f7f6cf;">
-              <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse: collapse; padding: 0; margin: 0;">
+                <!-- Explore More Row -->
+                <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top: 30px;">
                 <tr>
-                  <!-- Left Title -->
-                  <td style="padding: 20px; vertical-align: middle; margin: 0;">
-                    
-                    <p style="font-size: 15px; margin: 0; ">
-                Explore more magical books in our growing collection &nbsp;
-                <button class="browse-now-btn" style="background-color:#5784ba; margin-top: 20px; border-radius: 30px;border: none;padding:10px 15px"><a href="https://diffrun.com" style="color:white; font-weight: bold; text-decoration: none;">
-                  Browse Now
-                </a></button>
-              </p>
-                  </td>
-
-                  <!-- Right Image -->
-                  <td width="300" style="padding: 0; margin: 0; vertical-align: middle;">
-                    <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse: collapse;">
-                      <tr>
-                        <td align="right" style="padding: 0; margin: 0;">
-                          <img src="https://diffrungenerations.s3.ap-south-1.amazonaws.com/email_image+(2).jpg" 
-                               alt="Cover Image" 
-                               width="300" 
-                               style="display: block; border-radius: 0; margin: 0; padding: 0;">
-                        </td>
-                      </tr>
-                    </table>
-                  </td>
+                    <td colspan="2" style="padding: 10px 0; text-align: left;">
+                    <p class="title-text" style="font-size: 18px; margin: 0; font-weight: bold; color: #000;">
+                            {generate_book_title(order.get("book_id"), order.get("name"))}
+                            </p>
+                    </td>
                 </tr>
-              </table>
+
+                <!-- Order reference -->
+                <tr>
+                    <td style="padding: 0; vertical-align: top; font-size: 12px; color: #333; font-weight: 500;">
+                    Order reference ID: <span>{order.get("order_id", "N/A")}</span>
+                    </td>
+                    <td style="padding: 0; text-align: right; font-size: 12px; color: #333; font-weight: 500;">
+                    Ordered: <span>{format_date(order.get("approved_at", ""))}</span>
+                    </td>
+                </tr>
+
+                <!-- Book title and image block -->
+                <tr>
+                    <td colspan="2" style="padding: 0; margin: 0; background-color: #f7f6cf;">
+                    <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse: collapse; padding: 0; margin: 0;">
+                        <tr>
+                        <!-- Left Title -->
+                        <td style="padding: 20px; vertical-align: middle; margin: 0;">
+                            
+                            <p style="font-size: 15px; margin: 0; ">
+                        Explore more magical books in our growing collection &nbsp;
+                        <button class="browse-now-btn" style="background-color:#5784ba; margin-top: 20px; border-radius: 30px;border: none;padding:10px 15px"><a href="https://diffrun.com" style="color:white; font-weight: bold; text-decoration: none;">
+                        Browse Now
+                        </a></button>
+                    </p>
+                        </td>
+
+                        <!-- Right Image -->
+                        <td width="300" style="padding: 0; margin: 0; vertical-align: middle;">
+                            <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse: collapse;">
+                            <tr>
+                                <td align="right" style="padding: 0; margin: 0;">
+                                <img src="https://diffrungenerations.s3.ap-south-1.amazonaws.com/email_image+(2).jpg" 
+                                    alt="Cover Image" 
+                                    width="300" 
+                                    style="display: block; border-radius: 0; margin: 0; padding: 0;">
+                                </td>
+                            </tr>
+                            </table>
+                        </td>
+                        </tr>
+                    </table>
+                    </td>
+                </tr>
+
+                </table>
+
             </td>
-          </tr>
-
+            </tr>
         </table>
-
-      </td>
-    </tr>
-  </table>
-</body>
-</html>
-
+        </body>
+        </html>
         """
 
         msg = EmailMessage()
         msg["Subject"] = f"We'd love your feedback on {order.get("name", "")}'s Storybook!"
-        msg["From"] = f"Diffrun Team <{os.getenv('EMAIL_ADDRESS')}>"
+        msg["From"] = f"Diffrun Team <{os.getenv('EMAIL_USER')}>"
         msg["To"] = order.get("email", "")
         msg.set_content("This email contains HTML content.")
         msg.add_alternative(html_content, subtype="html")
 
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
-            EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS")
+            EMAIL_USER = os.getenv("EMAIL_USER")
             EMAIL_PASS = os.getenv("EMAIL_PASSWORD")
-            smtp.login(EMAIL_ADDRESS, EMAIL_PASS)
+            smtp.login(EMAIL_USER, EMAIL_PASS)
             smtp.send_message(msg)
 
         logger.info(f"✅ Feedback email sent to {order.get("email", "")}")
@@ -719,11 +811,11 @@ def send_email(to_email: str, subject: str, body: str):
 
     try:
         # OPTION A – Port 465 (SSL from the start)
-        EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS")
+        EMAIL_USER = os.getenv("EMAIL_USER")
         EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
         
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
-            smtp.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
+            smtp.login(EMAIL_USER, EMAIL_PASSWORD)
             smtp.send_message(msg)
 
         print(f"✅ Sent email to {to_email}")
