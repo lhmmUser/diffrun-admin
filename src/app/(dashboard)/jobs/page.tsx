@@ -176,7 +176,7 @@ export default function JobsPage() {
                                 key={order.jobId}
                                 className="border-t hover:bg-gray-50"
                             >
-                                <td className="p-3">{order.jobId}</td>
+                                <td className="p-3 text-black">{order.jobId}</td>
                                 <td className="p-3">
                                     {order.previewUrl ? (
                                         <a
@@ -191,9 +191,9 @@ export default function JobsPage() {
                                         <span className="text-gray-400">-</span>
                                     )}
                                 </td>
-                                <td className="p-3">{order.bookId}</td>
-                                <td className="p-3">{order.createdAt}</td>
-                                <td className="p-3">{order.name}</td>
+                                <td className="p-3 text-black">{order.bookId}</td>
+                                <td className="p-3 text-black">{order.createdAt}</td>
+                                <td className="p-3 text-black">{order.name}</td>
                                 <td className="p-3">
                                     <span className={`px-2 py-1 rounded text-xs ${order.paymentDate ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
                                         {order.paymentDate ? 'Yes' : 'No'}

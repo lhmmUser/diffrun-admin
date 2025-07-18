@@ -23,6 +23,7 @@ type RawOrder = {
   approved_at?: { $date?: { $numberLong?: string } } | string | null;
   feedback_email: boolean;
   print_approval?: boolean;
+  discount_code?: string;
 };
 
 type Order = {
@@ -42,6 +43,7 @@ type Order = {
   printStatus: string;
   feedback_email: boolean;
   printApproval: boolean | "not found";
+  discountCode: string;
 };
 
 type PrinterResponse = {
@@ -67,7 +69,7 @@ export default function OrdersPage() {
   const [currentPage, setCurrentPage] = useState(1);
   const [ordersPerPage, setOrdersPerPage] = useState(12);
   const [filterPrintApproval, setFilterPrintApproval] = useState("all");
-
+  const [filterDiscountCode, setFilterDiscountCode] = useState("all");
 
   const totalPages = Math.ceil(orders.length / ordersPerPage);
 
@@ -115,6 +117,7 @@ export default function OrdersPage() {
         if (filterStatus !== "all") params.append("filter_status", filterStatus);
         if (filterBookStyle !== "all") params.append("filter_book_style", filterBookStyle);
         if (filterPrintApproval !== "all") params.append("filter_print_approval", filterPrintApproval);
+        if (filterDiscountCode !== "all") params.append("filter_discount_code", filterDiscountCode);
         params.append("sort_by", sortBy);
         params.append("sort_dir", sortDir);
 
@@ -159,7 +162,8 @@ export default function OrdersPage() {
             bookStyle: order.bookStyle || "",
             printStatus: order.printStatus || "",
             feedback_email: order.feedback_email === true,
-            printApproval: typeof order.print_approval === "boolean" ? order.print_approval : "not found"
+            printApproval: typeof order.print_approval === "boolean" ? order.print_approval : "not found",
+            discountCode: order.discount_code || ""
           };
         });
 
@@ -173,7 +177,7 @@ export default function OrdersPage() {
    
 
     fetchOrders();
-  }, [filterStatus,filterPrintApproval, filterBookStyle, sortBy, sortDir]);
+  }, [filterStatus,filterPrintApproval,filterDiscountCode, filterBookStyle, sortBy, sortDir]);
 
   const handleSelectOrder = (orderId: string) => {
     const newSelected = new Set(selectedOrders);
@@ -290,11 +294,11 @@ export default function OrdersPage() {
               if (typeof order.print_approval === "boolean") return order.print_approval;
               console.warn(`⚠️ print_approval missing or invalid for order:`, order);
               return "not found";
-            })()
+            })(),
 
-              
-            };
-          });
+            discountCode: order.discount_code || ""
+          };
+        });
 
         setOrders(transformed);
 
@@ -475,7 +479,20 @@ function convertToIST24HourFormat(utcDateStr: string): string {
       <option value="yes">Yes</option>
       <option value="no">No</option>
       <option value="not_found">Not Found</option>
-  </select>
+    </select>
+
+    <select
+      value={filterDiscountCode}
+      onChange={(e) => setFilterDiscountCode(e.target.value)}
+      className="border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring focus:ring-blue-200 text-black"
+    >
+      <option value="all">All Discount Codes</option>
+      <option value="LHMM">LHMM</option>
+      <option value="TEST">TEST</option>
+      <option value="SPECIAL10">SPECIAL10</option>
+      <option value="none">None</option>
+    </select>
+
 
   </div>
 
@@ -495,9 +512,8 @@ function convertToIST24HourFormat(utcDateStr: string): string {
             />
           </th>
           {[
-            "Order ID", "Cover PDF", "Interior PDF", "Preview", "Name",
-            "City", "Book ID", "Book Style", "Price", "Payment Date",
-            "Approval Date", "Status", "Print Status", "Feedback Email", "Print Approval"
+            "Order ID", "Name","City", "Book ID", "Book Style", "Price", "Payment Date",
+            "Approval Date", "Status","Print Approval","Preview","Cover PDF","Interior PDF", "Print Status","Discount Code", "Feedback Email",  
           ].map((heading, i) => (
             <th key={i} className="p-3 whitespace-nowrap">{heading}</th>
           ))}
@@ -526,15 +542,7 @@ function convertToIST24HourFormat(utcDateStr: string): string {
                 </Link>
               ) : <span>N/A</span>}
             </td>
-            <td className="px-3 py-2">
-              {order.coverPdf ? (
-                <a href={order.coverPdf} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">
-                  View
-                </a>
-              ) : <span className="text-gray-400">-</span>}
-            </td>
-            <td className="px-3 py-2">{order.interiorPdf ? <a href={order.interiorPdf} target="_blank" className="text-blue-600 hover:underline">View PDF</a> : "-"}</td>
-            <td className="px-3 py-2">{order.previewUrl ? <a href={order.previewUrl} target="_blank" className="text-blue-600 hover:underline">Preview</a> : "-"}</td>
+            
             <td className="px-3 py-2 text-black">{order.name}</td>
             <td className="px-3 py-2 text-black">{order.city}</td>
             <td className="px-3 py-2 text-black">{order.bookId}</td>
@@ -548,16 +556,6 @@ function convertToIST24HourFormat(utcDateStr: string): string {
               </span>
             </td>
             <td className="px-3 py-2">
-              <span className={`px-2 py-1 rounded text-xs font-medium ${order.printStatus === "sent_to_printer" ? "bg-blue-100 text-blue-800" : "bg-gray-100 text-gray-800"}`}>
-                {order.printStatus === "sent_to_printer" ? "Sent" : "-"}
-              </span>
-            </td>
-            <td className="px-3 py-2">
-              <span className={`px-2 py-1 rounded text-xs font-medium ${order.feedback_email ? "bg-green-100 text-green-800" : "bg-gray-100 text-gray-800"}`}>
-                {order.feedback_email ? "Sent" : "-"}
-              </span>
-            </td>
-            <td className="px-3 py-2">
               {order.printApproval === true && (
                 <span className="px-2 py-1 rounded text-xs font-medium bg-green-100 text-green-800">Yes</span>
               )}
@@ -568,7 +566,37 @@ function convertToIST24HourFormat(utcDateStr: string): string {
                 <span className="px-2 py-1 rounded text-xs font-medium bg-gray-100 text-gray-800">Not Found</span>
               )}
             </td>
-
+            <td className="px-3 py-2">{order.previewUrl ? <a href={order.previewUrl} target="_blank" className="text-blue-600 hover:underline">Preview</a> : "-"}</td>
+            <td className="px-3 py-2">
+              {order.coverPdf ? (
+                <a href={order.coverPdf} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">
+                  View
+                </a>
+              ) : <span className="text-gray-400">-</span>}
+            </td>
+            <td className="px-3 py-2">{order.interiorPdf ? <a href={order.interiorPdf} target="_blank" className="text-blue-600 hover:underline">View PDF</a> : "-"}</td>
+           
+            <td className="px-3 py-2">
+              <span className={`px-2 py-1 rounded text-xs font-medium ${order.printStatus === "sent_to_printer" ? "bg-blue-100 text-blue-800" : "bg-gray-100 text-gray-800"}`}>
+                {order.printStatus === "sent_to_printer" ? "Sent" : "-"}
+              </span>
+            </td>
+            <td className="px-3 py-2">
+              {order.discountCode ? (
+                <span className="px-2 py-1 rounded text-xs font-medium bg-blue-100 text-blue-800">
+                  {order.discountCode}
+                </span>
+              ) : (
+                <span className="text-gray-400">-</span>
+              )}
+            </td>
+            <td className="px-3 py-2">
+              <span className={`px-2 py-1 rounded text-xs font-medium ${order.feedback_email ? "bg-green-100 text-green-800" : "bg-gray-100 text-gray-800"}`}>
+                {order.feedback_email ? "Sent" : "-"}
+              </span>
+            </td>
+            
+            
           </tr>
         ))}
       </tbody>

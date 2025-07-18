@@ -145,6 +145,8 @@ def get_orders(
     filter_status: Optional[str] = Query(None),
     filter_book_style: Optional[str] = Query(None),
     filter_print_approval: Optional[str] = Query(None),
+    filter_discount_code: Optional[str] = Query(None),
+
 ):
     # Base query: only show paid orders
     query = {"paid": True}
@@ -164,6 +166,13 @@ def get_orders(
         query["print_approval"] = False
     elif filter_print_approval == "not_found":
         query["print_approval"] = {"$exists": False}
+
+    if filter_discount_code:
+        if filter_discount_code == "none":
+            query["discount_code"] = {"$exists": False}
+        else:
+            query["discount_code"] = filter_discount_code.upper()
+
 
     # Fetch and sort records
     sort_field = sort_by if sort_by else "created_at"
@@ -191,6 +200,7 @@ def get_orders(
         "total_amount": 1,
         "feedback_email": 1,
         "print_approval": 1,
+        "discount_code": 1,
         "_id": 0
     }
 
@@ -215,7 +225,8 @@ def get_orders(
             "bookStyle": doc.get("book_style", ""),
             "printStatus": doc.get("print_status", ""),
             "feedback_email": doc.get("feedback_email", False),
-            "print_approval": doc.get("print_approval", None)
+            "print_approval": doc.get("print_approval", None),
+            "discount_code": doc.get("discount_code", "")
 
         })
 

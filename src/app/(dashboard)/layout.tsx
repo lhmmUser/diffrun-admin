@@ -27,23 +27,24 @@ export default function RootLayout({
         <div className="flex min-h-screen">
           {/* Sidebar */}
           <aside
-            className={`bg-gray-900 text-white w-60 p-6 fixed top-0 left-0 h-screen z-50 transform md:translate-x-0 transition-transform duration-200 ease-in-out
+            style={{ backgroundColor: "#5784ba" }}
+            className={` text-white w-60 p-6 fixed top-0 left-0 h-screen z-50 transform md:translate-x-0 transition-transform duration-200 ease-in-out
               ${sidebarOpen ? "translate-x-0" : "-translate-x-full"} md:relative md:block`}
           >
             <div className="mb-8 pt-4">
-              <h2 className="text-xl font-bold mb-2">Diffrun Admin</h2>
-              <p className="text-sm text-gray-400">Manage your books</p>
+              <h2 className="text-xl font-bold mb-2 ">Diffrun Admin</h2>
+              <p className="text-sm text-white">Manage your books</p>
             </div>
             <nav>
               <ul className="space-y-2">
                 <li>
-                  <Link href="/dashboard" className="block px-3 py-2 rounded hover:bg-gray-800 hover:text-blue-300">📊 Dashboard</Link>
+                  <Link href="/dashboard" className="block px-3 py-2 rounded hover:bg-gray-800 hover:text-blue-300 font-bold">Dashboard</Link>
                 </li>
                 <li>
-                  <Link href="/orders" className="block px-3 py-2 rounded hover:bg-gray-800 hover:text-blue-300">📦 Orders</Link>
+                  <Link href="/orders" className="block px-3 py-2 rounded hover:bg-gray-800 hover:text-blue-300 font-bold">Orders</Link>
                 </li>
                 <li>
-                  <Link href="/jobs" className="block px-3 py-2 rounded hover:bg-gray-800 hover:text-blue-300">🧾 Jobs</Link>
+                  <Link href="/jobs" className="block px-3 py-2 rounded hover:bg-gray-800 hover:text-blue-300 font-bold">Jobs</Link>
                 </li>
               </ul>
             </nav>
