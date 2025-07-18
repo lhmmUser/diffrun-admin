@@ -144,6 +144,7 @@ def get_orders(
     sort_dir: Optional[str] = Query("asc", description="asc or desc"),
     filter_status: Optional[str] = Query(None),
     filter_book_style: Optional[str] = Query(None),
+    filter_print_approval: Optional[str] = Query(None),
 ):
     # Base query: only show paid orders
     query = {"paid": True}
@@ -156,6 +157,13 @@ def get_orders(
 
     if filter_book_style:
         query["book_style"] = filter_book_style
+
+    if filter_print_approval == "yes":
+        query["print_approval"] = True
+    elif filter_print_approval == "no":
+        query["print_approval"] = False
+    elif filter_print_approval == "not_found":
+        query["print_approval"] = {"$exists": False}
 
     # Fetch and sort records
     sort_field = sort_by if sort_by else "created_at"
@@ -182,6 +190,7 @@ def get_orders(
         "amount": 1,
         "total_amount": 1,
         "feedback_email": 1,
+        "print_approval": 1,
         "_id": 0
     }
 
@@ -205,7 +214,8 @@ def get_orders(
             "bookId": doc.get("book_id", ""),
             "bookStyle": doc.get("book_style", ""),
             "printStatus": doc.get("print_status", ""),
-            "feedback_email": doc.get("feedback_email", False)
+            "feedback_email": doc.get("feedback_email", False),
+            "print_approval": doc.get("print_approval", None)
 
         })
 
@@ -490,7 +500,7 @@ def send_tracking_email(order_id: str):
         logger.error(f"❌ No order found for tracking email: {order_id}")
         return
 
-    # recipient = order.get("email")
+    recipient = order.get("email")
     name = order.get("name", "").title()
     user_name = order.get("user_name", "")
     tracking_code = order.get("tracking_code", "")

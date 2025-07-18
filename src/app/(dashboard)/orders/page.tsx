@@ -22,6 +22,7 @@ type RawOrder = {
   printStatus: string;
   approved_at?: { $date?: { $numberLong?: string } } | string | null;
   feedback_email: boolean;
+  print_approval?: boolean;
 };
 
 type Order = {
@@ -40,6 +41,7 @@ type Order = {
   bookStyle: string;
   printStatus: string;
   feedback_email: boolean;
+  printApproval: boolean | "not found";
 };
 
 type PrinterResponse = {
@@ -64,6 +66,8 @@ export default function OrdersPage() {
   const baseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || "";
   const [currentPage, setCurrentPage] = useState(1);
   const [ordersPerPage, setOrdersPerPage] = useState(12);
+  const [filterPrintApproval, setFilterPrintApproval] = useState("all");
+
 
   const totalPages = Math.ceil(orders.length / ordersPerPage);
 
@@ -110,6 +114,7 @@ export default function OrdersPage() {
         const params = new URLSearchParams();
         if (filterStatus !== "all") params.append("filter_status", filterStatus);
         if (filterBookStyle !== "all") params.append("filter_book_style", filterBookStyle);
+        if (filterPrintApproval !== "all") params.append("filter_print_approval", filterPrintApproval);
         params.append("sort_by", sortBy);
         params.append("sort_dir", sortDir);
 
@@ -132,7 +137,9 @@ export default function OrdersPage() {
                 hour12: true,
                 timeZone: 'Asia/Kolkata'
               });
-            }
+            };
+            
+
             return "";
           };
 
@@ -151,8 +158,8 @@ export default function OrdersPage() {
             bookId: order.bookId || "",
             bookStyle: order.bookStyle || "",
             printStatus: order.printStatus || "",
-            feedback_email: order.feedback_email === true
-
+            feedback_email: order.feedback_email === true,
+            printApproval: typeof order.print_approval === "boolean" ? order.print_approval : "not found"
           };
         });
 
@@ -166,7 +173,7 @@ export default function OrdersPage() {
    
 
     fetchOrders();
-  }, [filterStatus, filterBookStyle, sortBy, sortDir]);
+  }, [filterStatus,filterPrintApproval, filterBookStyle, sortBy, sortDir]);
 
   const handleSelectOrder = (orderId: string) => {
     const newSelected = new Set(selectedOrders);
@@ -278,9 +285,16 @@ export default function OrdersPage() {
             bookId: order.bookId || "",
             bookStyle: order.bookStyle || "",
             printStatus: order.printStatus || "",
-            feedback_email: false
-          };
-        });
+            feedback_email: false,
+            printApproval: (() => {
+              if (typeof order.print_approval === "boolean") return order.print_approval;
+              console.warn(`⚠️ print_approval missing or invalid for order:`, order);
+              return "not found";
+            })()
+
+              
+            };
+          });
 
         setOrders(transformed);
 
@@ -356,7 +370,7 @@ function convertToIST24HourFormat(utcDateStr: string): string {
   return (
     <div className="py-1 px-2  space-y-3 bg-white rounded shadow-md">
   {/* Header */}
-  <h2 className="text-2xl font-semibold">Orders</h2>
+  <h2 className="text-2xl font-semibold text-black">Orders</h2>
 
   {/* Action Buttons */}
   <div className="flex flex-wrap gap-2 items-center">
@@ -414,7 +428,7 @@ function convertToIST24HourFormat(utcDateStr: string): string {
   {/* Filters */}
   <div className="flex flex-wrap gap-2">
     <select
-      className="border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring focus:ring-blue-200"
+      className="border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring focus:ring-blue-200 text-black"
       value={filterStatus}
       onChange={(e) => setFilterStatus(e.target.value)}
     >
@@ -424,7 +438,7 @@ function convertToIST24HourFormat(utcDateStr: string): string {
     </select>
 
     <select
-      className="border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring focus:ring-blue-200"
+      className="border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring focus:ring-blue-200 text-black"
       value={filterBookStyle}
       onChange={(e) => setFilterBookStyle(e.target.value)}
     >
@@ -434,7 +448,7 @@ function convertToIST24HourFormat(utcDateStr: string): string {
     </select>
 
     <select
-      className="border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring focus:ring-blue-200"
+      className="border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring focus:ring-blue-200 text-black"
       value={sortBy}
       onChange={(e) => setSortBy(e.target.value)}
     >
@@ -444,14 +458,28 @@ function convertToIST24HourFormat(utcDateStr: string): string {
     </select>
 
     <select
-      className="border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring focus:ring-blue-200"
+      className="border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring focus:ring-blue-200 text-black"
       value={sortDir}
       onChange={(e) => setSortDir(e.target.value)}
     >
       <option value="desc">↓ Descending</option>
       <option value="asc">↑ Ascending</option>
     </select>
+
+    <select
+      className="border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring focus:ring-blue-200 text-black"
+      value={filterPrintApproval}
+      onChange={(e) => setFilterPrintApproval(e.target.value)}
+    >
+      <option value="all">All Print Approvals</option>
+      <option value="yes">Yes</option>
+      <option value="no">No</option>
+      <option value="not_found">Not Found</option>
+  </select>
+
   </div>
+
+
 
   {/* Table */}
   <div className="overflow-auto rounded border border-gray-200">
@@ -469,7 +497,7 @@ function convertToIST24HourFormat(utcDateStr: string): string {
           {[
             "Order ID", "Cover PDF", "Interior PDF", "Preview", "Name",
             "City", "Book ID", "Book Style", "Price", "Payment Date",
-            "Approval Date", "Status", "Print Status", "Feedback Email"
+            "Approval Date", "Status", "Print Status", "Feedback Email", "Print Approval"
           ].map((heading, i) => (
             <th key={i} className="p-3 whitespace-nowrap">{heading}</th>
           ))}
@@ -507,13 +535,13 @@ function convertToIST24HourFormat(utcDateStr: string): string {
             </td>
             <td className="px-3 py-2">{order.interiorPdf ? <a href={order.interiorPdf} target="_blank" className="text-blue-600 hover:underline">View PDF</a> : "-"}</td>
             <td className="px-3 py-2">{order.previewUrl ? <a href={order.previewUrl} target="_blank" className="text-blue-600 hover:underline">Preview</a> : "-"}</td>
-            <td className="px-3 py-2">{order.name}</td>
-            <td className="px-3 py-2">{order.city}</td>
-            <td className="px-3 py-2">{order.bookId}</td>
-            <td className="px-3 py-2">{order.bookStyle}</td>
-            <td className="px-3 py-2">₹{order.price.toLocaleString("en-IN")}</td>
-            <td className="px-3 py-2">{order.paymentDate && convertToIST24HourFormat(order.paymentDate)}</td>
-            <td className="px-3 py-2">{order.approvalDate && convertToIST24HourFormat(order.approvalDate)}</td>
+            <td className="px-3 py-2 text-black">{order.name}</td>
+            <td className="px-3 py-2 text-black">{order.city}</td>
+            <td className="px-3 py-2 text-black">{order.bookId}</td>
+            <td className="px-3 py-2 text-black">{order.bookStyle}</td>
+            <td className="px-3 py-2 text-black">₹{order.price.toLocaleString("en-IN")}</td>
+            <td className="px-3 py-2 text-black">{order.paymentDate && convertToIST24HourFormat(order.paymentDate)}</td>
+            <td className="px-3 py-2 text-black">{order.approvalDate && convertToIST24HourFormat(order.approvalDate)}</td>
             <td className="px-3 py-2">
               <span className={`px-2 py-1 rounded text-xs font-medium ${order.status === "Approved" ? "bg-green-100 text-green-800" : "bg-yellow-100 text-yellow-800"}`}>
                 {order.status}
@@ -529,6 +557,18 @@ function convertToIST24HourFormat(utcDateStr: string): string {
                 {order.feedback_email ? "Sent" : "-"}
               </span>
             </td>
+            <td className="px-3 py-2">
+              {order.printApproval === true && (
+                <span className="px-2 py-1 rounded text-xs font-medium bg-green-100 text-green-800">Yes</span>
+              )}
+              {order.printApproval === false && (
+                <span className="px-2 py-1 rounded text-xs font-medium bg-red-100 text-red-800">No</span>
+              )}
+              {order.printApproval === "not found" && (
+                <span className="px-2 py-1 rounded text-xs font-medium bg-gray-100 text-gray-800">Not Found</span>
+              )}
+            </td>
+
           </tr>
         ))}
       </tbody>
@@ -537,7 +577,7 @@ function convertToIST24HourFormat(utcDateStr: string): string {
   <button
     onClick={() => setCurrentPage((p) => Math.max(p - 1, 1))}
     disabled={currentPage === 1}
-    className="px-3 py-1 rounded border bg-white text-sm disabled:opacity-50"
+    className="px-3 py-1 rounded border bg-white text-sm disabled:opacity-50 text-black"
   >
     Prev
   </button>
@@ -565,7 +605,7 @@ function convertToIST24HourFormat(utcDateStr: string): string {
         key={page}
         onClick={() => setCurrentPage(page)}
         className={`px-3 py-1 rounded border text-sm ${
-          currentPage === page ? "bg-blue-600 text-white" : "bg-white"
+          currentPage === page ? "bg-blue-600 text-white" : "bg-white text-gray-800"
         }`}
       >
         {page}
@@ -582,7 +622,7 @@ function convertToIST24HourFormat(utcDateStr: string): string {
       <button
         onClick={() => setCurrentPage(totalPages)}
         className={`px-3 py-1 rounded border text-sm ${
-          currentPage === totalPages ? "bg-blue-600 text-white" : "bg-white"
+          currentPage === totalPages ? "bg-blue-600 text-white" : "bg-white text-gray-800"
         }`}
       >
         {totalPages}
@@ -594,7 +634,7 @@ function convertToIST24HourFormat(utcDateStr: string): string {
   <button
     onClick={() => setCurrentPage((p) => Math.min(p + 1, totalPages))}
     disabled={currentPage === totalPages}
-    className="px-3 py-1 rounded border bg-white text-sm disabled:opacity-50"
+    className="px-3 py-1 rounded border bg-white text-sm disabled:opacity-50 text-black"
   >
     Next
   </button>

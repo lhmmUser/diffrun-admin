@@ -122,12 +122,12 @@ export default function JobsPage() {
 
     return (
         <div>
-            <h2 className="text-2xl font-semibold mb-4">Jobs</h2>
+            <h2 className="text-2xl font-semibold mb-4 text-black">Jobs</h2>
 
             {/* Filters */}
             <div className="flex gap-4 mb-6">
                 <select
-                    className="border px-3 py-1 rounded text-sm"
+                    className="border px-3 py-1 rounded text-sm text-black"
                     value={filterBookStyle}
                     onChange={(e) => setFilterBookStyle(e.target.value)}
                 >
@@ -138,7 +138,7 @@ export default function JobsPage() {
                 </select>
 
                 <select
-                    className="border px-3 py-1 rounded text-sm"
+                    className="border px-3 py-1 rounded text-sm text-black"
                     value={sortBy}
                     onChange={(e) => setSortBy(e.target.value)}
                 >
@@ -147,7 +147,7 @@ export default function JobsPage() {
                 </select>
 
                 <select
-                    className="border px-3 py-1 rounded text-sm"
+                    className="border px-3 py-1 rounded text-sm text-black"
                     value={sortDir}
                     onChange={(e) => setSortDir(e.target.value)}
                 >
@@ -214,7 +214,7 @@ export default function JobsPage() {
                 <button
                     onClick={() => setCurrentPage(p => Math.max(p - 1, 1))}
                     disabled={currentPage === 1}
-                    className="px-3 py-1 rounded border bg-white text-sm disabled:opacity-50"
+                    className="px-3 py-1 rounded border bg-white text-sm disabled:opacity-50 text-black"
                 >
                     Prev
                 </button>
@@ -260,7 +260,7 @@ export default function JobsPage() {
                 <button
                     onClick={() => setCurrentPage(p => Math.min(p + 1, totalPages))}
                     disabled={currentPage === totalPages}
-                    className="px-3 py-1 rounded border bg-white text-sm disabled:opacity-50"
+                    className="px-3 py-1 rounded border bg-white text-sm disabled:opacity-50 text-black"
                 >
                     Next
                 </button>
