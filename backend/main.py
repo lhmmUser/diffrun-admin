@@ -25,8 +25,8 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 
-EMAIL_USER = os.getenv("EMAIL_USER")
-EMAIL_PASS = os.getenv("EMAIL_PASS")
+EMAIL_USER = os.getenv("EMAIL_ADDRESS")
+EMAIL_PASS = os.getenv("EMAIL_PASSWORD")
 
 app = FastAPI()
 
@@ -391,7 +391,7 @@ async def approve_printing(order_ids: List[str]):
                 "items": [{
                     "reference": reference,
                     "product": product_code,
-                    "shipping_level": "cp_saver",
+                    "shipping_level": "cp_ground",
                     "title": f"{order.get('order_id', '')}_{order.get('name', 'Book')}",
                     "count": "1",
                     "files": [
@@ -798,14 +798,15 @@ def send_feedback_email(job_id: str, background_tasks: BackgroundTasks):
 
         msg = EmailMessage()
         msg["Subject"] = f"We'd love your feedback on {order.get("name", "")}'s Storybook!"
-        msg["From"] = f"Diffrun Team <{os.getenv('EMAIL_USER')}>"
+        msg["From"] = f"Diffrun Team <{os.getenv('EMAIL_ADDRESS')}>"
         msg["To"] = order.get("email", "")
         msg.set_content("This email contains HTML content.")
         msg.add_alternative(html_content, subtype="html")
 
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
-            EMAIL_USER = os.getenv("EMAIL_USER")
+            EMAIL_USER = os.getenv("EMAIL_ADDRESS")
             EMAIL_PASS = os.getenv("EMAIL_PASSWORD")
+            print(f"email, password: {EMAIL_USER}, {EMAIL_PASS}")
             smtp.login(EMAIL_USER, EMAIL_PASS)
             smtp.send_message(msg)
 
@@ -832,7 +833,7 @@ def send_email(to_email: str, subject: str, body: str):
 
     try:
         # OPTION A – Port 465 (SSL from the start)
-        EMAIL_USER = os.getenv("EMAIL_USER")
+        EMAIL_USER = os.getenv("EMAIL_ADDRESS")
         EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
         
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
