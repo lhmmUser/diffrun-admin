@@ -1,25 +1,23 @@
-from fastapi import FastAPI, BackgroundTasks
+from fastapi import FastAPI, BackgroundTasks, Request, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pymongo import MongoClient
-from bson import ObjectId
 from dotenv import load_dotenv
 import os
 from fastapi.encoders import jsonable_encoder
-from fastapi import Request, Query, HTTPException
 from typing import Optional, List
 from datetime import datetime, timezone, timedelta
 import requests
 import hashlib
 import PyPDF2
 import io
-from collections import defaultdict
 import smtplib
 from email.message import EmailMessage
 import logging
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from fastapi import BackgroundTasks
 from pydantic import ValidationError
+from contextlib import asynccontextmanager
+from apscheduler.schedulers.background import BackgroundScheduler
 
 # Setup logger
 logging.basicConfig(level=logging.INFO)
@@ -30,9 +28,20 @@ load_dotenv()
 EMAIL_USER = os.getenv("EMAIL_ADDRESS")
 EMAIL_PASS = os.getenv("EMAIL_PASSWORD")
 
-print("✅ API KEY =", os.getenv("CLOUDPRINTER_WEBHOOK_KEY"))
+scheduler = BackgroundScheduler()
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    scheduler.add_job(send_nudge_email, "cron", hour=14)
+    scheduler.start()
+    logger.info("✅ Nudge email scheduler started")
+    yield
+    scheduler.shutdown(wait=False)
+    logger.info("🛑 Scheduler shut down on app exit")
+
+
+# Now define FastAPI instance
+app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -343,7 +352,6 @@ def get_shipping_level(country_code: str) -> str:
     elif country_code in {"US", "GB"}:
         return "cp_ground"
     return "cp_ground"  # default fallback
-
 
 @app.post("/orders/approve-printing")
 async def approve_printing(order_ids: List[str]):
@@ -987,3 +995,168 @@ def send_email(to_email: str, subject: str, body: str):
         print(f"✅ Sent email to {to_email}")
     except Exception as e:
         print(f"❌ Error sending email to {to_email}: {e}")
+
+def send_nudge_email():
+    try:
+        now = datetime.now(timezone.utc)
+        start_of_today = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
+        start_of_yesterday = start_of_today - timedelta(days=1)
+
+        query = {
+            "paid": False,
+            "nudge_sent": {"$ne": False},
+            "created_at": {
+                "$gte": start_of_yesterday,
+                "$lt": start_of_today
+            },
+            "workflows": {"$exists": True}
+        }
+
+        users = list(orders_collection.find(query))
+
+        latest_per_email = {}
+
+        for u in users:
+            email = u.get("email")
+            if not email or "lhmm.in" in email:
+                continue
+
+            if len(u.get("workflows", {})) != 10:
+                continue
+
+            if email not in latest_per_email or u["created_at"] > latest_per_email[email]["created_at"]:
+                latest_per_email[email] = u
+
+        for user in latest_per_email.values():
+            try:
+                send_nudge_email_to_user(
+                    email=user["email"],
+                    user_name=user.get("user_name", "there"),
+                    child_name=user.get("name", "your child"),
+                    job_id=user["job_id"]
+                )
+
+                orders_collection.update_one(
+                    {"_id": user["_id"]},
+                    {"$set": {"nudge_sent": True}}
+                )
+
+                logger.info(f"✅ Sent nudge email to {user['email']}")
+
+            except Exception as e:
+                logger.error(f"❌ Error sending email to {user.get('email')}: {str(e)}")
+
+    except Exception as e:
+        logger.error(f"❌ Nudge email task failed: {str(e)}")
+
+def send_nudge_email_to_user(email: str, user_name: str, child_name: str, job_id: str):
+   
+    order = orders_collection.find_one({"job_id": job_id})
+    if not order:
+        logger.warning(f"⚠️ Could not find order for job_id={job_id}")
+        return
+
+    preview_link = order.get("preview_url", f"https://diffrun.com/preview/{job_id}")
+    user_name = user_name.strip().title() or "there"
+    child_name = child_name.strip().title() or "your child"
+    
+    html_content = f"""
+    <html>
+        <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+            <p>Hi <strong>{user_name}</strong>,</p>
+
+            <p>We noticed you began crafting a personalized storybook for <strong>{child_name}</strong> — and it’s already looking magical!</p>
+
+            <p>Just one more step to bring it to life: preview the story and place your order whenever you’re ready.</p>
+
+            <p style="margin: 32px 0;">
+            <a href="{preview_link}" 
+                style="background-color: #5784ba;
+                    color: white;
+                    padding: 14px 28px;
+                    border-radius: 6px;
+                    text-decoration: none;
+                    font-weight: bold;">
+                Preview & Continue
+            </a>
+            </p>
+
+            <p>Your story is safe and waiting. We’d love for <strong>{child_name}</strong> to see themselves in a story made just for them. 💫</p>
+
+            <p>Warm wishes,<br><strong>The Diffrun Team</strong></p>
+        </body>
+    </html>
+    """
+    
+    msg = EmailMessage()
+    msg["Subject"] = f"{child_name}'s Diffrun Storybook is waiting!"
+    msg["From"] = f"Diffrun Team <{os.getenv('EMAIL_ADDRESS')}>"
+    msg["To"] = email
+    msg.add_alternative(html_content, subtype="html")
+   
+    EMAIL_USER = os.getenv("EMAIL_ADDRESS")
+    EMAIL_PASS = os.getenv("EMAIL_PASSWORD")
+    
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+        smtp.login(EMAIL_USER, EMAIL_PASS)
+        smtp.send_message(msg)
+
+@app.post("/trigger-nudge-emails")
+async def trigger_nudge_emails(background_tasks: BackgroundTasks):
+    try:
+        background_tasks.add_task(send_nudge_email)
+        return {"status": "success", "message": "Nudge email process started"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error starting task: {str(e)}")
+
+def schedule_nudge_emails():
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(send_nudge_email, 'cron', hour=14) 
+    scheduler.start()
+
+@app.get("/debug/nudge-candidates")
+def debug_nudge_candidates():
+    now = datetime.now(timezone.utc)
+    start_of_today = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
+    start_of_yesterday = start_of_today - timedelta(days=1)
+
+    query = {
+        "paid": False,
+        "nudge_sent": {"$ne": False},
+        "created_at": {
+            "$gte": start_of_yesterday,
+            "$lt": start_of_today
+        },
+        "workflows": {"$exists": True}
+    }
+
+    users = list(orders_collection.find(query, {
+        "email": 1,
+        "user_name": 1,
+        "name": 1,
+        "job_id": 1,
+        "created_at": 1,
+        "workflows": 1,  
+        "_id": 0
+    }))
+
+    latest_per_email = {}
+
+    for u in users:
+        email = u.get("email") or ""
+        if not email or "lhmm.in" in email:
+            continue
+
+        if len(u.get("workflows", {})) != 10:
+            continue
+
+        if email not in latest_per_email or u["created_at"] > latest_per_email[email]["created_at"]:
+            latest_per_email[email] = {
+                "email": email,
+                "name": u.get("name"),
+                "user_name": u.get("user_name"),
+                "job_id": u.get("job_id"),
+                "created_at": u.get("created_at")
+            }
+
+    return list(latest_per_email.values())
