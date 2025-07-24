@@ -61,7 +61,7 @@ def split_full_name(full_name: str) -> tuple[str, str]:
     return (" ".join(parts[:-1]), parts[-1])
 
 def format_date(date_input: any) -> str:
-    print(f"[DEBUG] Raw created_at value: {date_input}, type: {type(date_input)}")
+    
     if not date_input:
         return ""
     try:
@@ -71,7 +71,7 @@ def format_date(date_input: any) -> str:
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
             formatted = dt.astimezone(IST).strftime("%d %b, %I:%M %p")
-            print(f"[DEBUG] Formatted Python datetime: {formatted}")
+            
             return formatted
         # If it's a MongoDB extended JSON
         if isinstance(date_input, dict):
@@ -79,13 +79,13 @@ def format_date(date_input: any) -> str:
                 timestamp = int(date_input['$date']['$numberLong']) / 1000
                 dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
                 formatted = dt.astimezone(IST).strftime("%d %b, %I:%M %p")
-                print(f"[DEBUG] Formatted MongoDB extended JSON: {formatted}")
+                
                 return formatted
             elif 'date' in date_input:
                 timestamp = int(date_input['date']['$numberLong']) / 1000 if '$numberLong' in date_input['date'] else int(date_input['date']) / 1000
                 dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
                 formatted = dt.astimezone(IST).strftime("%d %b, %I:%M %p")
-                print(f"[DEBUG] Formatted alternate MongoDB date: {formatted}")
+                
                 return formatted
         # If it's an ISO string
         elif isinstance(date_input, str):
@@ -93,7 +93,7 @@ def format_date(date_input: any) -> str:
                 return ""
             dt = datetime.fromisoformat(date_input.replace('Z', '+00:00'))
             formatted = dt.astimezone(IST).strftime("%d %b, %I:%M %p")
-            print(f"[DEBUG] Formatted ISO string: {formatted}")
+            
             return formatted
         else:
             print(f"[DEBUG] Unknown date format")
@@ -168,10 +168,12 @@ def get_orders(
         query["print_approval"] = {"$exists": False}
 
     if filter_discount_code:
-        if filter_discount_code == "none":
-            query["discount_code"] = {"$exists": False}
+        if filter_discount_code.lower() == "none":
+            query["discount_amount"] = 0
+            query["paid"] = True  # already set by default, but explicit is good
         else:
             query["discount_code"] = filter_discount_code.upper()
+
 
 
     # Fetch and sort records
@@ -312,6 +314,14 @@ def get_product_details(book_style: str) -> tuple[str, str]:
         return ("Hardcover", "photobook_cw_s210_s_fc")
     else:  # Fallback to hardcover if unknown
         return ("Hardcover", "photobook_cw_s210_s_fc")
+    
+def get_shipping_level(country_code: str) -> str:
+    if country_code == "IN":
+        return "cp_saver"
+    elif country_code in {"US", "GB"}:
+        return "cp_ground"
+    return "cp_ground"  # default fallback
+
 
 @app.post("/orders/approve-printing")
 async def approve_printing(order_ids: List[str]):
@@ -369,6 +379,9 @@ async def approve_printing(order_ids: List[str]):
             reference, product_code = get_product_details(book_style)
             print(f"Selected product: {reference} ({product_code})")
 
+            shipping_level = get_shipping_level(country_code)
+            print(f"Selected shipping level: {shipping_level} for {country_code}")
+
             # Prepare the request payload
             print(f"Preparing CloudPrinter payload for order {order_id}...")
             payload = {
@@ -391,7 +404,7 @@ async def approve_printing(order_ids: List[str]):
                 "items": [{
                     "reference": reference,
                     "product": product_code,
-                    "shipping_level": "cp_ground",
+                    "shipping_level": shipping_level,
                     "title": f"{order.get('order_id', '')}_{order.get('name', 'Book')}",
                     "count": "1",
                     "files": [
