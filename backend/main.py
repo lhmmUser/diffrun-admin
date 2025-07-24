@@ -18,6 +18,8 @@ from email.message import EmailMessage
 import logging
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from fastapi import BackgroundTasks
+from pydantic import ValidationError
 
 # Setup logger
 logging.basicConfig(level=logging.INFO)
@@ -28,11 +30,13 @@ load_dotenv()
 EMAIL_USER = os.getenv("EMAIL_ADDRESS")
 EMAIL_PASS = os.getenv("EMAIL_PASSWORD")
 
+print("✅ API KEY =", os.getenv("CLOUDPRINTER_WEBHOOK_KEY"))
+
 app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # replace with specific domains if needed
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -105,18 +109,39 @@ def format_date(date_input: any) -> str:
 MONGO_URI = os.getenv("MONGO_URI")
 client = MongoClient(MONGO_URI)
 db = client["candyman"]
-orders_collection = db["user_details"]  # Changed back to user_details as that might be the correct collection
+orders_collection = db["user_details"] 
 
-class ItemShippedPayload(BaseModel):
+class CloudprinterWebhookBase(BaseModel):
     apikey: str
     type: str
-    order: str
-    item: str
+    order: Optional[str] = None
+    item: Optional[str] = None
     order_reference: str
-    item_reference: str
+    item_reference: Optional[str] = None
+    datetime: str
+
+class ItemProducedPayload(CloudprinterWebhookBase):
+    pass 
+
+class ItemErrorPayload(CloudprinterWebhookBase):
+    error_code: str
+    error_message: str
+
+class ItemValidatedPayload(CloudprinterWebhookBase):
+    pass
+
+class ItemCanceledPayload(CloudprinterWebhookBase):
+    pass
+
+class CloudprinterOrderCanceledPayload(CloudprinterWebhookBase):
+    pass
+
+class ItemDeletePayload(CloudprinterWebhookBase):
+    pass
+
+class ItemShippedPayload(CloudprinterWebhookBase):
     tracking: str
     shipping_option: str
-    datetime: str
 
 def generate_book_title(book_id, child_name):
     if not child_name:
@@ -136,7 +161,6 @@ def generate_book_title(book_id, child_name):
         return f"Many Dreams of {child_name}"
     else:
         return f"{child_name}'s Storybook"
-
 
 @app.get("/orders")
 def get_orders(
@@ -234,7 +258,6 @@ def get_orders(
 
     return result
 
-
 def format_booking_date(processed_at):
     
     try:
@@ -252,7 +275,6 @@ def format_booking_date(processed_at):
     except Exception as e:
         print(f"Error formatting processed_at: {e}")
         return "N/A"
-
 
 @app.get("/orders/{order_id}")
 def get_order_detail(order_id: str):
@@ -429,7 +451,7 @@ async def approve_printing(order_ids: List[str]):
             }
 
             print(f"Sending request to CloudPrinter for order {order_id}...")
-            # Make the API call to CloudPrinter
+           
             response = requests.post(
                 CLOUDPRINTER_API_URL,
                 json=payload,
@@ -439,7 +461,6 @@ async def approve_printing(order_ids: List[str]):
 
             print(f"CloudPrinter API Response (Status {response.status_code}): {response_data}")
 
-            # Update order status in MongoDB if successful
             if response.status_code in [200, 201]:
                 print(f"Updating order status in database for {order_id}...")
                 orders_collection.update_one(
@@ -481,78 +502,188 @@ async def approve_printing(order_ids: List[str]):
             })
 
     return results
+    
+async def handle_item_shipped(payload: ItemShippedPayload, background_tasks: BackgroundTasks):
 
-@app.post("/api/item_shipped")
-async def item_shipped(payload: ItemShippedPayload, request: Request):
-    logger.info(f"📦 Received Cloudprinter webhook: {payload.dict()}")
+    order = orders_collection.find_one({"order_id": payload.order_reference})
+    
+    if not order:
+        logger.warning(f"⚠️ Order not found: {payload.order_reference}")
+        return {"status": "not_found"}
+    
+    if order.get("print_status") != "produced":
+        logger.warning(f"⚠️ Order {payload.order_reference} shipped without production status")
+      
+    update_data = {
+        "tracking_code": payload.tracking,
+        "shipping_option": payload.shipping_option,
+        "shipped_at": payload.datetime,
+        "print_status": "shipped"
+    }
+    
+    result = orders_collection.update_one(
+        {"order_id": payload.order_reference},
+        {"$set": update_data}
+    )
+    
+    if result.modified_count:
+        if order.get("email"):
+            background_tasks.add_task(
+                send_tracking_email, 
+                payload.order_reference,
+                payload.tracking,
+                payload.shipping_option
+            )
+        return {"status": "success"}
+    return {"status": "no_changes"}
 
+async def handle_item_produced(payload: ItemProducedPayload):
+    update_result = orders_collection.update_one(
+        {"order_id": payload.order_reference},
+        {"$set": {
+            "print_status": "produced",
+            "produced_at": payload.datetime,
+            "production_details": {
+                "cloudprinter_order_id": payload.order,
+                "item_id": payload.item,
+                "timestamp": payload.datetime
+            }
+        }}
+    )
+    
+    if update_result.modified_count:
+        logger.info(f"🏭 Item produced: {payload.order_reference}")
+        return {"status": "success", "message": "Production status updated"}
+    else:
+        logger.warning(f"⚠️ Order not found: {payload.order_reference}")
+        return {"status": "not_found"}
+
+async def handle_item_error(payload: ItemErrorPayload):
+    orders_collection.update_one(
+        {"order_id": payload.order_reference},
+        {"$set": {
+            "print_status": "error",
+            "error_info": {
+                "code": payload.error_code,
+                "message": payload.error_message,
+                "timestamp": payload.datetime
+            }
+        }}
+    )
+    logger.error(f"❌ Production error: {payload.error_code} - {payload.error_message}")
+    return {"status": "recorded"}
+
+@app.get("/orders/{order_id}/status")
+def get_order_status(order_id: str):
+    order = orders_collection.find_one(
+        {"order_id": order_id},
+        {
+            "print_status": 1,
+            "produced_at": 1,
+            "shipped_at": 1,
+            "tracking_code": 1,
+            "_id": 0
+        }
+    )
+    
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    
+    return {
+        "order_id": order_id,
+        "status": order.get("print_status", "unknown"),
+        "produced_at": order.get("produced_at"),
+        "shipped_at": order.get("shipped_at"),
+        "tracking_available": "tracking_code" in order
+    }
+
+@app.post("/api/webhook/cloudprinter")
+async def cloudprinter_webhook(
+    request: Request, 
+    background_tasks: BackgroundTasks
+):
+    payload_data = await request.json()
+    if not payload_data.get("order_reference"):
+        logger.warning("❌ Webhook payload missing order_reference")
+        raise HTTPException(status_code=400, detail="Missing order_reference")
+
+    event_type = payload_data.get("type")
+    
+    event_models = {
+        "ItemShipped": ItemShippedPayload,
+        "ItemProduced": ItemProducedPayload,
+        "ItemError": ItemErrorPayload,
+        "ItemValidated": ItemValidatedPayload,
+        "ItemCanceled": ItemCanceledPayload,
+        "CloudprinterOrderCanceled": CloudprinterOrderCanceledPayload,
+        "Delete": ItemDeletePayload
+    }
+    
+    if event_type not in event_models:
+        logger.warning(f"⚠️ Unsupported event type: {event_type}")
+        raise HTTPException(status_code=400, detail="Unsupported event type")
+    
+    try:
+        payload = event_models[event_type](**payload_data)
+    except ValidationError as e:
+        logger.error(f"❌ Payload validation failed: {e}")
+        raise HTTPException(status_code=422, detail="Invalid payload structure")
+    
+    # Verify API key
     expected_api_key = os.getenv("CLOUDPRINTER_WEBHOOK_KEY")
     if payload.apikey != expected_api_key:
         logger.warning("❌ Invalid webhook API key")
         raise HTTPException(status_code=403, detail="Invalid API key")
-
-    existing = orders_collection.find_one({
-        "order_id": payload.order_reference,
-        "tracking_code": payload.tracking
-    })
-    if existing:
-        logger.info(f"🔁 Duplicate tracking info already exists for order {payload.order_reference}")
-        return {"status": "already_processed"}
-
-    result = orders_collection.update_one(
-        {"order_id": payload.order_reference},
-        {
-            "$set": {
-                "tracking_code": payload.tracking,
-                "shipping_option": payload.shipping_option,
-                "shipped_at": payload.datetime
-            }
-        }
-    )
-
-    if result.modified_count:
-        logger.info(f"✅ Order {payload.order_reference} updated with tracking info")
-        send_tracking_email(payload.order_reference)
-        return {"status": "success"}
+   
+    order_ref = payload.order_reference
+    if event_type == "ItemShipped":
+        return await handle_item_shipped(payload, background_tasks)
+    elif event_type == "ItemProduced":
+        return await handle_item_produced(payload)
+    elif event_type == "ItemError":
+        return await handle_item_error(payload)
     else:
-        logger.warning(f"⚠️ Order not found for reference: {payload.order_reference}")
-        return {"status": "not_found"}
+        logger.info(f"🔔 Received {event_type} for order {order_ref}")
+        return {"status": "received"}
 
-def send_tracking_email(order_id: str):
+def send_tracking_email(order_id: str, tracking_code: str, shipping_option: str):
     order = orders_collection.find_one({"order_id": order_id})
     if not order:
-        logger.error(f"❌ No order found for tracking email: {order_id}")
+        logger.error(f"❌ Order {order_id} not found for email")
         return
 
-    recipient = order.get("email")
-    name = order.get("name", "").title()
-    user_name = order.get("user_name", "")
-    tracking_code = order.get("tracking_code", "")
-    shipping_option = order.get("shipping_option", "")
+    recipient = "support@diffrun.com"  
+
+    parent_name = order.get("user_name", "Customer")
+    child_name = order.get("name", "your child")
+
     carrier = shipping_option.lower().replace(" ", "-")
     tracking_link = f"https://track.aftership.com/{carrier}/{tracking_code}"
 
     html_content = f"""
     <html>
-      <body style="font-family: Arial, sans-serif;">
-        <h2>📦 Your storybook has been shipped!</h2>
-        <p>Hi {user_name},</p>
-        <p>We're excited to let you know that <strong>{name}'s storybook</strong> is on its way.</p>
-        <p><strong>Tracking ID:</strong> {tracking_code}</p>
-        <p><strong>Carrier:</strong> {shipping_option}</p>
-        <p>You can track your shipment here:</p>
-        <p><a href="{tracking_link}" target="_blank">{tracking_link}</a></p>
-        <br/>
-        <p>Thank you for choosing Diffrun!</p>
-      </body>
+    <body style="font-family: Arial, sans-serif;">
+        <h2>Hi {parent_name},</h2>
+        <p>Great news! <strong>{child_name}'s storybook</strong> has been shipped and is on its way to you. 📦</p>
+        <p><strong>Carrier:</strong> {shipping_option}<br>
+        <strong>Tracking Number:</strong> <a href="{tracking_link}">{tracking_code}</a></p>
+        <p>You can track your package using the button below:</p>
+        <p>
+            <a href="{tracking_link}" style="background-color:#5784ba; color:white; padding:12px 20px; border-radius:5px; text-decoration:none;">
+                Track Shipment
+            </a>
+        </p>
+        <hr>
+        <p style="font-size: 12px; color: #888;">Order ID: {order_id}</p>
+    </body>
     </html>
     """
 
     msg = EmailMessage()
-    msg["Subject"] = f"{name}'s Storybook is on the way! 📬"
+    msg["Subject"] = f"{child_name}'s Storybook is on the way! 📬"
     msg["From"] = f"Team Diffrun <{EMAIL_USER}>"
-    msg["To"] = "support@diffrun.com"
-    msg.set_content("This email contains HTML content.")
+    msg["To"] = recipient
+    msg.set_content("This email contains HTML content. Please view it in an HTML-compatible client.")
     msg.add_alternative(html_content, subtype="html")
 
     try:
