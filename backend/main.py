@@ -999,15 +999,15 @@ def send_email(to_email: str, subject: str, body: str):
 def send_nudge_email():
     try:
         now = datetime.now(timezone.utc)
-        start_of_today = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
-        start_of_yesterday = start_of_today - timedelta(days=1)
+        cutoff_24h_ago = now - timedelta(hours=24)
+        created_after = datetime(2025, 7, 23, tzinfo=timezone.utc)
 
         query = {
             "paid": False,
-            "nudge_sent": {"$ne": False},
+            "nudge_sent": False, 
             "created_at": {
-                "$gte": start_of_yesterday,
-                "$lt": start_of_today
+                "$gte": created_after,
+                "$lt": cutoff_24h_ago
             },
             "workflows": {"$exists": True}
         }
@@ -1117,15 +1117,15 @@ def schedule_nudge_emails():
 @app.get("/debug/nudge-candidates")
 def debug_nudge_candidates():
     now = datetime.now(timezone.utc)
-    start_of_today = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
-    start_of_yesterday = start_of_today - timedelta(days=1)
+    min_created_at = datetime(2025, 7, 23, tzinfo=timezone.utc)
+    cutoff_time = now - timedelta(hours=24)
 
     query = {
         "paid": False,
-        "nudge_sent": {"$ne": False},
+        "nudge_sent": False,
         "created_at": {
-            "$gte": start_of_yesterday,
-            "$lt": start_of_today
+            "$gte": min_created_at,
+            "$lt": cutoff_time
         },
         "workflows": {"$exists": True}
     }
@@ -1136,7 +1136,7 @@ def debug_nudge_candidates():
         "name": 1,
         "job_id": 1,
         "created_at": 1,
-        "workflows": 1,  
+        "workflows": 1,
         "_id": 0
     }))
 
