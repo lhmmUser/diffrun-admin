@@ -4,3 +4,4 @@ fastapi
 uvicorn
 dotenv
 requests
+boto3

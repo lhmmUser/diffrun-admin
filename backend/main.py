@@ -19,6 +19,9 @@ from pydantic import ValidationError
 from contextlib import asynccontextmanager
 from apscheduler.schedulers.background import BackgroundScheduler
 import boto3
+import csv
+from fastapi.responses import FileResponse
+import tempfile
 
 # Setup logger
 logging.basicConfig(level=logging.INFO)
@@ -1200,3 +1203,40 @@ async def unapprove_orders(req: UnapproveRequest):
             s3.delete_object(Bucket=BUCKET_NAME, Key=src_key)
 
     return {"message": f"Unapproved {len(req.job_ids)} orders successfully"}
+
+@app.get("/export-orders-csv")
+def export_orders_csv():
+    fields = [
+        "email", "phone_number", "book_id", "book_style", "total_price", "gender", "paid",
+        "approved", "created_at", "processed_at", "locale", "name", "user_name",
+        "shipping_address.city", "shipping_address.province", "order_id", "discount_code"
+    ]
+
+    projection = {f.split('.')[0]: 1 for f in fields}
+    cursor = orders_collection.find({}, projection).sort("created_at", -1)
+
+    with tempfile.NamedTemporaryFile(mode="w+", newline='', delete=False, suffix=".csv", encoding="utf-8") as temp_file:
+        writer = csv.writer(temp_file)
+        writer.writerow(fields)
+
+        for doc in cursor:
+            row = []
+            for field in fields:
+                parts = field.split('.')
+                value = doc
+                for part in parts:
+                    if isinstance(value, dict):
+                        value = value.get(part, "")
+                    else:
+                        value = ""
+
+                if parts[-1] in ("created_at", "processed_at") and isinstance(value, datetime):
+                    value = value.astimezone(IST).strftime("%d %b, %I:%M %p")
+
+                row.append(value)
+
+            writer.writerow(row)
+
+        temp_file.flush()
+        return FileResponse(temp_file.name, media_type="text/csv", filename="orders_export.csv")
+    

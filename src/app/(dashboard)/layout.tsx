@@ -46,6 +46,9 @@ export default function RootLayout({
                 <li>
                   <Link href="/jobs" className="block px-3 py-2 rounded hover:bg-gray-800 hover:text-blue-300 font-bold">Jobs</Link>
                 </li>
+                <li>
+                  <Link href="/export" className="block px-3 py-2 rounded hover:bg-gray-800 hover:text-blue-300 font-bold">Export</Link>
+                </li>
               </ul>
             </nav>
           </aside>
