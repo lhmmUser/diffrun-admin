@@ -340,10 +340,32 @@ export default function OrdersPage() {
     console.error("Error sending feedback email:", err);
     alert("❌ Something went wrong while sending the email.");
   }
-}
+}else if (action === 'unapprove') {
+   try {
+    const selectedJobIds = Array.from(selectedOrders)
+    .map(orderId => orders.find(o => o.orderId === orderId)?.jobId)
+    .filter(Boolean); 
 
+    const response = await fetch(`${baseUrl}/orders/unapprove`, {
+      method: 'POST',
+      headers:{
+        'Content-Type': 'application/json',
+      },
+      body : JSON.stringify({ job_ids: selectedJobIds }),
+    });
 
-  };
+    if(!response.ok){
+      const errorData = await response.json();
+      throw new Error(errorData.detail || 'Failed to unapprove orders');
+    }
+    alert(`✅ Successfully unapproved ${selectedJobIds.length} orders`);
+    setSelectedOrders(new Set()); // Clear selection after unapproval
+    fetchOrders(); // Refresh orders to reflect changes
+  } catch (error) {
+    console.error("Error unapproving orders:", error);
+    alert(`❌ Failed to unapprove orders: ${error instanceof Error ? error.message : 'Unknown error'}`);
+  }
+};}
 
 const hasSentFeedbackOrders = () => {
   return Array.from(selectedOrders).some(orderId => {
@@ -426,6 +448,26 @@ function convertToIST24HourFormat(utcDateStr: string): string {
       }`}
     >
       Request Feedback
+    </button>
+
+    <button
+      onClick ={()=> handleAction('unapprove')}
+      disabled= {
+        selectedOrders.size === 0 || 
+        Array.from(selectedOrders).some(orderId =>{
+           const order = orders.find(o => o.orderId === orderId);
+           return order?.status !== "Approved";
+        })
+      }
+      className={`px-4 py-2 rounded test-sm font-medium transition ${
+        selectedOrders.size === 0 ||
+        Array.from(selectedOrders).some(orderId =>{
+          const order = orders.find(o=> o.orderId === orderId);
+          return order?.status !== "Approved";
+        }) ? 'bg-gray-200 text-gray-500 cursor-not-allowed' :
+        'bg-red-500 text-white hover:bg-red-600'
+      }`}>
+      Unapprove
     </button>
   </div>
 

@@ -18,6 +18,7 @@ from pydantic import BaseModel
 from pydantic import ValidationError
 from contextlib import asynccontextmanager
 from apscheduler.schedulers.background import BackgroundScheduler
+import boto3
 
 # Setup logger
 logging.basicConfig(level=logging.INFO)
@@ -120,6 +121,11 @@ client = MongoClient(MONGO_URI)
 db = client["candyman"]
 orders_collection = db["user_details"] 
 
+s3 = boto3.client('s3',
+                  aws_access_key_id = os.getenv("AWS_ACCESS_KEY_ID"),
+                  aws_secret_access_key = os.getenv("AWS_SECRET_ACCESS_KEY"),
+                  region_name = os.getenv("AWS_REGION"))
+BUCKET_NAME = "replicacomfy"
 class CloudprinterWebhookBase(BaseModel):
     apikey: str
     type: str
@@ -151,6 +157,10 @@ class ItemDeletePayload(CloudprinterWebhookBase):
 class ItemShippedPayload(CloudprinterWebhookBase):
     tracking: str
     shipping_option: str
+
+class UnapproveRequest(BaseModel):
+    job_ids : List[str]
+    
 
 def generate_book_title(book_id, child_name):
     if not child_name:
@@ -1160,3 +1170,33 @@ def debug_nudge_candidates():
             }
 
     return list(latest_per_email.values())
+
+@app.post("/orders/unapprove")
+async def unapprove_orders(req: UnapproveRequest):
+    for job_id in req.job_ids:
+        result = orders_collection.update_one(
+            {"job_id":job_id},
+            {"$set": {"approved": False}}    
+            )
+    if result.modified_count == 0:
+        raise HTTPException(status_code=404, detail=f"No order found with job_id {job_id}")
+
+    prefix = f"output/{job_id}/"
+    folders_to_move = ["final_coverpage/", "approved_output/"]
+    for folder in folders_to_move:
+        old_prefix = prefix + folder
+        new_prefix = prefix + "previous/" + folder  
+
+        response = s3.list_objects_v2(Bucket=BUCKET_NAME, Prefix=old_prefix)
+
+        if "Contents" not in response:
+            continue
+
+        for obj in response["Contents"]:
+            src_key = obj["Key"]
+            dst_key = src_key.replace(old_prefix, new_prefix, 1)
+
+            s3.copy_object(Bucket=BUCKET_NAME, CopySource={"Bucket": BUCKET_NAME, "Key": src_key}, Key=dst_key)
+            s3.delete_object(Bucket=BUCKET_NAME, Key=src_key)
+
+    return {"message": f"Unapproved {len(req.job_ids)} orders successfully"}
