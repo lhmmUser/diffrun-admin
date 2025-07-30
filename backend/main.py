@@ -22,6 +22,7 @@ import boto3
 import csv
 from fastapi.responses import FileResponse
 import tempfile
+from dateutil import parser
 
 # Setup logger
 logging.basicConfig(level=logging.INFO)
@@ -149,7 +150,7 @@ def format_processed_date(value):
 
 
 MONGO_URI = os.getenv("MONGO_URI")
-client = MongoClient(MONGO_URI)
+client = MongoClient(MONGO_URI, tz_aware=True)
 db = client["candyman"]
 orders_collection = db["user_details"] 
 
@@ -1250,39 +1251,91 @@ async def unapprove_orders(req: UnapproveRequest):
 
     return {"message": f"Unapproved {len(req.job_ids)} orders successfully"}
 
+from dateutil import parser  # ensure this is at the top
+
 @app.get("/export-orders-csv")
 def export_orders_csv():
     fields = [
         "email", "phone_number", "book_id", "book_style", "total_price", "gender", "paid",
-        "approved", "created_at", "processed_at", "locale", "name", "user_name",
-        "shipping_address.city", "shipping_address.province", "order_id", "discount_code"
+        "approved", "created_date", "created_time", "creation_hour",
+        "payment_date", "payment_time", "payment_hour",
+        "locale", "name", "user_name", "shipping_address.city", "shipping_address.province",
+        "order_id", "discount_code"
     ]
 
-    projection = {f.split('.')[0]: 1 for f in fields}
+    projection = {
+        "email": 1, "phone_number": 1, "book_id": 1, "book_style": 1, "total_price": 1,
+        "gender": 1, "paid": 1, "approved": 1, "created_at": 1, "processed_at": 1,
+        "locale": 1, "name": 1, "user_name": 1, "shipping_address": 1, "order_id": 1,
+        "discount_code": 1
+    }
+
     cursor = orders_collection.find({}, projection).sort("created_at", -1)
+
+    def format_datetime_parts(dt):
+        try:
+            if isinstance(dt, str):
+                dt = parser.isoparse(dt)
+            if isinstance(dt, datetime):
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                dt_ist = dt.astimezone(IST)
+                return (
+                    dt_ist.strftime("%d-%m-%Y"),     # date
+                    dt_ist.strftime("%I:%M %p"),     # time
+                    dt_ist.strftime("%H")            # 24-hour
+                )
+        except Exception as e:
+            print("⚠️ Date parse failed:", e)
+        return "", "", ""
 
     with tempfile.NamedTemporaryFile(mode="w+", newline='', delete=False, suffix=".csv", encoding="utf-8") as temp_file:
         writer = csv.writer(temp_file)
         writer.writerow(fields)
 
         for doc in cursor:
+            created_date, created_time, creation_hour = format_datetime_parts(doc.get("created_at"))
+            payment_date, payment_time, payment_hour = format_datetime_parts(doc.get("processed_at"))
+
             row = []
             for field in fields:
-                parts = field.split('.')
-                value = doc
-                for part in parts:
-                    if isinstance(value, dict):
-                        value = value.get(part, "")
+                if field == "created_date":
+                    row.append(created_date)
+                elif field == "created_time":
+                    row.append(created_time)
+                elif field == "creation_hour":
+                    row.append(creation_hour)
+                elif field == "payment_date":
+                    row.append(payment_date)
+                elif field == "payment_time":
+                    row.append(payment_time)
+                elif field == "payment_hour":
+                    row.append(payment_hour)
+                else:
+                    # Nested field handling
+                    if '.' in field:
+                        value = doc
+                        for part in field.split('.'):
+                            if isinstance(value, dict):
+                                value = value.get(part, "")
+                            else:
+                                value = ""
                     else:
-                        value = ""
+                        value = doc.get(field, "")
 
-                if parts[-1] in ("created_at", "processed_at") and isinstance(value, datetime):
-                    value = value.astimezone(IST).strftime("%d %b, %I:%M %p")
+                    # Price formatting for relevant fields
+                    if field in ["total_price", "price", "amount", "total_amount"]:
+                        try:
+                            value = float(value)
+                            value = "{:.2f}".format(value)
+                        except:
+                            value = ""
+                    if field == "phone_number":
+                        value = str(value).replace(",", "").strip()
 
-                row.append(value)
+                    row.append(value)
 
             writer.writerow(row)
 
         temp_file.flush()
         return FileResponse(temp_file.name, media_type="text/csv", filename="orders_export.csv")
-    
