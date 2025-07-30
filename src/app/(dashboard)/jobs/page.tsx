@@ -15,6 +15,7 @@ type RawOrder = {
     processed_at?: any;
     paymentDate?: string;
     approvalDate?: string;
+    locale?: string;
 };
 
 type Order = {
@@ -26,6 +27,7 @@ type Order = {
     name: string;
     paymentDate: string;
     approvalDate: string;
+    locale: string; 
 };
 
 const formatDate = (dateInput: any) => {
@@ -103,7 +105,8 @@ export default function JobsPage() {
                     createdAt: order.createdAt || "",
                     name: order.name || "",
                     paymentDate: formatDate(order.processed_at) || order.paymentDate || "",
-                    approvalDate: order.approvalDate || ""
+                    approvalDate: order.approvalDate || "",
+                    locale: order.locale || "",
                 }));
 
                 console.log("Transformed orders:", transformed); // Debug log
@@ -164,6 +167,7 @@ export default function JobsPage() {
                             <th className="p-3">Job ID</th>
                             <th className="p-3">Preview URL</th>
                             <th className="p-3">Book ID</th>
+                            <th className="p-3">Loc</th>
                             <th className="p-3">Created At</th>
                             <th className="p-3">Name</th>
                             <th className="p-3">Paid</th>
@@ -192,6 +196,7 @@ export default function JobsPage() {
                                     )}
                                 </td>
                                 <td className="p-3 text-black">{order.bookId}</td>
+                                <td className="p-3 text-black">{order.locale}</td>
                                 <td className="p-3 text-black">{order.createdAt}</td>
                                 <td className="p-3 text-black">{order.name}</td>
                                 <td className="p-3">

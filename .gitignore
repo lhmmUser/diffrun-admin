@@ -46,3 +46,7 @@ next-env.d.ts
 # macOS system files
 ._*
 .DS_Store
+
+venv/
+__pycache__/
+*.py[cod]

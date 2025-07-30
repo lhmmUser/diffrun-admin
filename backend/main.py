@@ -119,6 +119,35 @@ def format_date(date_input: any) -> str:
         print(f"[DEBUG] Error formatting date: {e}")
         return ""
 
+def format_processed_date(value):
+    try:
+        if not value:
+            logger.warning("🟡 No date_value provided")
+            return ""
+        
+        if isinstance(value, datetime):
+            return value.strftime("%d-%m-%Y %H:%M")
+        
+        if isinstance(value, str):
+            try:
+                # Handle both with and without 'Z'
+                if value.endswith("Z"):
+                    dt = datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+                else:
+                    dt = datetime.fromisoformat(value)
+                return dt.strftime("%d-%m-%Y %H:%M")
+            except Exception as e:
+                logger.warning(f"⚠️ Could not parse string datetime: {value} | Error: {e}")
+                return value  # Return original if parsing fails
+
+        logger.warning(f"⚠️ Unknown type for processed_at: {type(value)} -> {value}")
+        return str(value)
+
+    except Exception as e:
+        logger.error(f"🔥 Failed to format processed_at: {value} | Error: {e}")
+        return ""
+
+
 MONGO_URI = os.getenv("MONGO_URI")
 client = MongoClient(MONGO_URI)
 db = client["candyman"]
@@ -192,6 +221,7 @@ def get_orders(
     filter_book_style: Optional[str] = Query(None),
     filter_print_approval: Optional[str] = Query(None),
     filter_discount_code: Optional[str] = Query(None),
+    exclude_discount_code: Optional[str] = None,
 
 ):
     # Base query: only show paid orders
@@ -214,13 +244,23 @@ def get_orders(
         query["print_approval"] = {"$exists": False}
 
     if filter_discount_code:
+        print(f"[DEBUG] Filter discount code: {filter_discount_code}")
         if filter_discount_code.lower() == "none":
             query["discount_amount"] = 0
             query["paid"] = True  # already set by default, but explicit is good
         else:
             query["discount_code"] = filter_discount_code.upper()
 
-
+    if exclude_discount_code:
+        if "discount_code" in query and isinstance(query["discount_code"], str):
+            # Combine both filter and exclude
+            query["$and"] = [
+                {"discount_code": query["discount_code"]},
+                {"discount_code": {"$ne": exclude_discount_code.upper()}}
+            ]
+            del query["discount_code"]  # Remove top-level field
+        elif "discount_code" not in query:
+            query["discount_code"] = {"$ne": exclude_discount_code.upper()}
 
     # Fetch and sort records
     sort_field = sort_by if sort_by else "created_at"
@@ -249,6 +289,8 @@ def get_orders(
         "feedback_email": 1,
         "print_approval": 1,
         "discount_code": 1,
+        "currency": 1,
+        "locale": 1,
         "_id": 0
     }
 
@@ -266,15 +308,17 @@ def get_orders(
             "name": doc.get("name", ""),
             "city": doc.get("shipping_address", {}).get("city", ""),
             "price": doc.get("price", doc.get("total_price", doc.get("amount", doc.get("total_amount", 0)))),
-            "paymentDate": format_date(jsonable_encoder(doc.get("processed_at", ""))),
-            "approvalDate": format_date(jsonable_encoder(doc.get("approved_at", ""))),
+            "paymentDate": ((doc.get("processed_at", ""))),
+            "approvalDate": ((doc.get("approved_at", ""))),
             "status": "Approved" if doc.get("approved") else "Uploaded",
             "bookId": doc.get("book_id", ""),
             "bookStyle": doc.get("book_style", ""),
             "printStatus": doc.get("print_status", ""),
             "feedback_email": doc.get("feedback_email", False),
             "print_approval": doc.get("print_approval", None),
-            "discount_code": doc.get("discount_code", "")
+            "discount_code": doc.get("discount_code", ""),
+            "currency": doc.get("currency", ""),
+            "locale": doc.get("locale", ""),
 
         })
 
@@ -442,7 +486,7 @@ async def approve_printing(order_ids: List[str]):
                     "state": order.get("shipping_address", {}).get("province", ""),
                     "country": country_code,
                     "email": order.get("email", ""),
-                    "phone": order.get("shipping_address", {}).get("phone", "")
+                    "phone": order.get("shipping_address", {}).get("phone", "") if country_code == "IN" else order.get("phone_number", "")
                 }],
                 "items": [{
                     "reference": reference,
@@ -756,6 +800,7 @@ def get_jobs(
         "amount": 1,
         "total_amount": 1,
         "feedback_email": 1,
+        "locale": 1,
         "_id": 0
     }
 
@@ -783,7 +828,8 @@ def get_jobs(
             "status": "Approved" if doc.get("approved") else "Uploaded",
             "bookId": doc.get("book_id", ""),
             "bookStyle": doc.get("book_style", ""),
-            "printStatus": doc.get("print_status", "")
+            "printStatus": doc.get("print_status", ""),
+            "locale": doc.get("locale", ""),
         })
 
     return result
