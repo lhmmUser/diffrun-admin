@@ -1260,14 +1260,14 @@ def export_orders_csv():
         "approved", "created_date", "created_time", "creation_hour",
         "payment_date", "payment_time", "payment_hour",
         "locale", "name", "user_name", "shipping_address.city", "shipping_address.province",
-        "order_id", "discount_code"
+        "order_id", "discount_code", "paypal_capture_id", "transaction_id"
     ]
 
     projection = {
         "email": 1, "phone_number": 1, "book_id": 1, "book_style": 1, "total_price": 1,
         "gender": 1, "paid": 1, "approved": 1, "created_at": 1, "processed_at": 1,
         "locale": 1, "name": 1, "user_name": 1, "shipping_address": 1, "order_id": 1,
-        "discount_code": 1
+        "discount_code": 1, "paypal_capture_id": 1, "transaction_id": 1
     }
 
     cursor = orders_collection.find({}, projection).sort("created_at", -1)

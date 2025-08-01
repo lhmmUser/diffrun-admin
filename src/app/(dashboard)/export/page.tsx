@@ -1,4 +1,4 @@
-'use client'; 
+'use client';
 
 import React from 'react';
 
@@ -16,22 +16,31 @@ const Export = () => {
       const a = document.createElement('a');
       a.href = url;
       a.download = 'orders_export.csv';
+      document.body.appendChild(a); 
       a.click();
+      document.body.removeChild(a);
       window.URL.revokeObjectURL(url);
     } catch (err) {
       console.error('❌ Error downloading file:', err);
-      alert('Download failed.');
+      alert('Download failed. Please try again.');
     }
   };
 
   return (
-    <div className="min-h-screen bg-gray-50 px-4 py-10 flex flex-col items-center mx-auto">
-      <h1 className="text-lg sm:text-2xl md:text-4xl font-bold text-center text-gray-800 mb-8">Analysis Report Download</h1>
+    <div className="min-h-screen bg-white px-2 py-2 md:px-6 md:py-8">
+  
+      <header className="mb-8">
+        <h1 className="text-2xl font-semibold text-gray-900">Analysis Report Download</h1>
+        <p className="text-gray-600 mt-2 text-sm sm:text-base">
+          Export your order data as a CSV file for further analysis.
+        </p>
+      </header>
+
       <button
         onClick={handleDownload}
-        className="bg-indigo-400 hover:bg-indigo-500 text-white font-medium py-3 px-6 rounded-lg shadow-md transition duration-300 ease-in-out transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-opacity-50"
+        className="group flex items-center gap-2 bg-[#6694cd] text-white font-medium py-3 px-6 rounded-lg shadow-sm transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-gray-500 focus:ring-offset-2"
       >
-        Download CSV
+        📥 Download CSV
       </button>
     </div>
   );
