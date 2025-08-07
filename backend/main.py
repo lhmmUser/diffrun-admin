@@ -1,4 +1,4 @@
-from fastapi import FastAPI, BackgroundTasks, Request, Query, HTTPException
+from fastapi import FastAPI, BackgroundTasks,Response, Request, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pymongo import MongoClient
 from dotenv import load_dotenv
@@ -20,7 +20,7 @@ from contextlib import asynccontextmanager
 from apscheduler.schedulers.background import BackgroundScheduler
 import boto3
 import csv
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 import tempfile
 from dateutil import parser
 
@@ -32,6 +32,11 @@ load_dotenv()
 
 EMAIL_USER = os.getenv("EMAIL_ADDRESS")
 EMAIL_PASS = os.getenv("EMAIL_PASSWORD")
+
+MONGO_URI_df = os.getenv("MONGO_URI_df")
+client_df = MongoClient(MONGO_URI_df)
+df_db = client_df["df-db"]
+collection_df = df_db["user-data"]
 
 scheduler = BackgroundScheduler()
 
@@ -1339,3 +1344,39 @@ def export_orders_csv():
 
         temp_file.flush()
         return FileResponse(temp_file.name, media_type="text/csv", filename="orders_export.csv")
+
+@app.get("/download-csv")
+def download_csv(from_date: str = Query(...), to_date: str = Query(...)):
+    try:
+        # Parse input dates (assumes format YYYY-MM-DD)
+        from_dt = datetime.strptime(from_date, "%Y-%m-%d")
+        to_dt = datetime.strptime(to_date, "%Y-%m-%d")
+
+        # Include the whole to_date until 23:59:59
+        to_dt = to_dt.replace(hour=23, minute=59, second=59)
+
+        # Query the collection
+        data = list(collection_df.find({
+            "time_req_recieved": {
+                "$gte": from_dt,
+                "$lte": to_dt
+            }
+        }, {"_id": 0}))  # Exclude MongoDB _id
+
+        # Handle empty result
+        if not data:
+            return Response(content="No data available", media_type="text/plain", status_code=404)
+
+        # Create CSV
+        csv_file = io.StringIO()
+        writer = csv.DictWriter(csv_file, fieldnames=data[0].keys())
+        writer.writeheader()
+        writer.writerows(data)
+        csv_file.seek(0)
+
+        return StreamingResponse(csv_file, media_type="text/csv", headers={
+            "Content-Disposition": "attachment; filename=darkfantasy_orders.csv"
+        })
+
+    except Exception as e:
+        return Response(content=f"❌ Error: {str(e)}", media_type="text/plain", status_code=500)
