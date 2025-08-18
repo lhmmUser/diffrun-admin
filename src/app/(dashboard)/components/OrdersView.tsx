@@ -630,7 +630,7 @@ return(
             key={`${order.orderId}-${index}`}
             className="border-t hover:bg-gray-50"
           >
-            <td className="px-3 py-2">
+            <td className="px-2 py-2 ">
               <input
                 type="checkbox"
                 checked={selectedOrders.has(order.orderId)}
@@ -638,7 +638,7 @@ return(
                 className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
               />
             </td>
-            <td className="px-3 py-2">
+            <td className="px-2 py-2 text-xs">
               {order.orderId !== "N/A" ? (
                 <Link href={`/orders/${order.orderId}`} className="text-blue-600 hover:underline">
                   {order.orderId}
@@ -646,20 +646,20 @@ return(
               ) : <span>N/A</span>}
             </td>
             
-            <td className="px-3 py-2 text-black">{order.name}</td>
-            <td className="px-3 py-2 text-black">{order.city}</td>
-            <td className="px-3 py-2 text-black">{order.locale}</td>
-            <td className="px-3 py-2 text-black">{order.bookId}</td>
-            <td className="px-3 py-2 text-black">{order.bookStyle}</td>
-            <td className="px-3 py-2 text-black">{getCurrencySymbol(order.currency)}{order.price.toLocaleString("en-IN")}</td>
-            <td className="px-3 py-2 text-black">{order.paymentDate && convertToIST24HourFormat(order.paymentDate)}</td>
-            <td className="px-3 py-2 text-black">{order.approvalDate && convertToIST24HourFormat(order.approvalDate)}</td>
-            <td className="px-3 py-2">
+            <td className="px-2 py-2 text-black text-xs">{order.name}</td>
+            <td className="px-2 py-2 text-black text-xs">{order.city}</td>
+            <td className="px-2 py-2 text-black text-xs">{order.locale}</td>
+            <td className="px-2 py-2 text-black text-xs">{order.bookId}</td>
+            <td className="px-2 py-2 text-black text-xs">{order.bookStyle}</td>
+            <td className="px-2 py-2 text-black text-xs">{getCurrencySymbol(order.currency)}{order.price.toLocaleString("en-IN")}</td>
+            <td className="px-2 py-2 text-black text-xs">{order.paymentDate && formatDate(order.paymentDate)}</td>
+            <td className="px-2 py-2 text-black text-xs">{order.approvalDate && formatDate(order.approvalDate)}</td>
+            <td className="px-2 py-2">
               <span className={`px-2 py-1 rounded text-xs font-medium ${order.status === "Approved" ? "bg-green-100 text-green-800" : "bg-yellow-100 text-yellow-800"}`}>
                 {order.status}
               </span>
             </td>
-            <td className="px-3 py-2">
+            <td className="px-1 py-2">
               {order.printApproval === true && (
                 <span className="px-2 py-1 rounded text-xs font-medium bg-green-100 text-green-800">Yes</span>
               )}
@@ -670,22 +670,22 @@ return(
                 <span className="px-2 py-1 rounded text-xs font-medium bg-gray-100 text-gray-800">Not Found</span>
               )}
             </td>
-            <td className="px-3 py-2">{order.previewUrl ? <a href={order.previewUrl} target="_blank" className="text-blue-600 hover:underline">Preview</a> : "-"}</td>
-            <td className="px-3 py-2">
+            <td className="px-1 py-2">{order.previewUrl ? <a href={order.previewUrl} target="_blank" className="text-blue-600 hover:underline">Preview</a> : "-"}</td>
+            <td className="px-1 py-2">
               {order.coverPdf ? (
                 <a href={order.coverPdf} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">
                   View
                 </a>
               ) : <span className="text-gray-400">-</span>}
             </td>
-            <td className="px-3 py-2">{order.interiorPdf ? <a href={order.interiorPdf} target="_blank" className="text-blue-600 hover:underline">View PDF</a> : "-"}</td>
+            <td className="px-2 py-2">{order.interiorPdf ? <a href={order.interiorPdf} target="_blank" className="text-blue-600 hover:underline">View PDF</a> : "-"}</td>
            
-            <td className="px-3 py-2">
+            <td className="px-2 py-2">
               <span className={`px-2 py-1 rounded text-xs font-medium ${order.printStatus === "sent_to_printer" ? "bg-blue-100 text-blue-800" : "bg-gray-100 text-gray-800"}`}>
                 {order.printStatus === "sent_to_printer" ? "Sent" : "-"}
               </span>
             </td>
-            <td className="px-3 py-2">
+            <td className="px-2 py-2">
               {order.discountCode ? (
                 <span className="px-2 py-1 rounded text-xs font-medium bg-blue-100 text-blue-800">
                   {order.discountCode}
@@ -694,7 +694,7 @@ return(
                 <span className="text-gray-400">-</span>
               )}
             </td>
-            <td className="px-3 py-2">
+            <td className="px-2 py-2">
               <span className={`px-2 py-1 rounded text-xs font-medium ${order.feedback_email ? "bg-green-100 text-green-800" : "bg-gray-100 text-gray-800"}`}>
                 {order.feedback_email ? "Sent" : "-"}
               </span>
