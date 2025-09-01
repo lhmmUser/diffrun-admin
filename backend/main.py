@@ -23,6 +23,9 @@ import csv
 from fastapi.responses import FileResponse, StreamingResponse
 import tempfile
 from dateutil import parser
+from app.routers.reconcile import router as vlookup_router
+from app.routers.razorpay_export import router as razorpay_router
+
 
 # Setup logger
 logging.basicConfig(level=logging.INFO)
@@ -52,7 +55,8 @@ async def lifespan(app: FastAPI):
 
 # Now define FastAPI instance
 app = FastAPI(lifespan=lifespan)
-
+app.include_router(vlookup_router)
+app.include_router(razorpay_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
