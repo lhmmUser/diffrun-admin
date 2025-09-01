@@ -25,6 +25,7 @@ import tempfile
 from dateutil import parser
 from app.routers.reconcile import router as vlookup_router
 from app.routers.razorpay_export import router as razorpay_router
+from app.routers.cloudprinter_webhook import router as cloudprinter_router
 
 
 # Setup logger
@@ -57,6 +58,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 app.include_router(vlookup_router)
 app.include_router(razorpay_router)
+app.include_router(cloudprinter_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -672,54 +674,54 @@ def get_order_status(order_id: str):
         "tracking_available": "tracking_code" in order
     }
 
-@app.post("/api/webhook/cloudprinter")
-async def cloudprinter_webhook(
-    request: Request, 
-    background_tasks: BackgroundTasks
-):
-    payload_data = await request.json()
-    if not payload_data.get("order_reference"):
-        logger.warning("❌ Webhook payload missing order_reference")
-        raise HTTPException(status_code=400, detail="Missing order_reference")
+# @app.post("/api/webhook/cloudprinter")
+# async def cloudprinter_webhook(
+#     request: Request, 
+#     background_tasks: BackgroundTasks
+# ):
+#     payload_data = await request.json()
+#     if not payload_data.get("order_reference"):
+#         logger.warning("❌ Webhook payload missing order_reference")
+#         raise HTTPException(status_code=400, detail="Missing order_reference")
 
-    event_type = payload_data.get("type")
+#     event_type = payload_data.get("type")
     
-    event_models = {
-        "ItemShipped": ItemShippedPayload,
-        "ItemProduced": ItemProducedPayload,
-        "ItemError": ItemErrorPayload,
-        "ItemValidated": ItemValidatedPayload,
-        "ItemCanceled": ItemCanceledPayload,
-        "CloudprinterOrderCanceled": CloudprinterOrderCanceledPayload,
-        "Delete": ItemDeletePayload
-    }
+#     event_models = {
+#         "ItemShipped": ItemShippedPayload,
+#         "ItemProduced": ItemProducedPayload,
+#         "ItemError": ItemErrorPayload,
+#         "ItemValidated": ItemValidatedPayload,
+#         "ItemCanceled": ItemCanceledPayload,
+#         "CloudprinterOrderCanceled": CloudprinterOrderCanceledPayload,
+#         "Delete": ItemDeletePayload
+#     }
     
-    if event_type not in event_models:
-        logger.warning(f"⚠️ Unsupported event type: {event_type}")
-        raise HTTPException(status_code=400, detail="Unsupported event type")
+#     if event_type not in event_models:
+#         logger.warning(f"⚠️ Unsupported event type: {event_type}")
+#         raise HTTPException(status_code=400, detail="Unsupported event type")
     
-    try:
-        payload = event_models[event_type](**payload_data)
-    except ValidationError as e:
-        logger.error(f"❌ Payload validation failed: {e}")
-        raise HTTPException(status_code=422, detail="Invalid payload structure")
+#     try:
+#         payload = event_models[event_type](**payload_data)
+#     except ValidationError as e:
+#         logger.error(f"❌ Payload validation failed: {e}")
+#         raise HTTPException(status_code=422, detail="Invalid payload structure")
     
-    # Verify API key
-    expected_api_key = os.getenv("CLOUDPRINTER_WEBHOOK_KEY")
-    if payload.apikey != expected_api_key:
-        logger.warning("❌ Invalid webhook API key")
-        raise HTTPException(status_code=403, detail="Invalid API key")
+#     # Verify API key
+#     expected_api_key = os.getenv("CLOUDPRINTER_WEBHOOK_KEY")
+#     if payload.apikey != expected_api_key:
+#         logger.warning("❌ Invalid webhook API key")
+#         raise HTTPException(status_code=403, detail="Invalid API key")
    
-    order_ref = payload.order_reference
-    if event_type == "ItemShipped":
-        return await handle_item_shipped(payload, background_tasks)
-    elif event_type == "ItemProduced":
-        return await handle_item_produced(payload)
-    elif event_type == "ItemError":
-        return await handle_item_error(payload)
-    else:
-        logger.info(f"🔔 Received {event_type} for order {order_ref}")
-        return {"status": "received"}
+#     order_ref = payload.order_reference
+#     if event_type == "ItemShipped":
+#         return await handle_item_shipped(payload, background_tasks)
+#     elif event_type == "ItemProduced":
+#         return await handle_item_produced(payload)
+#     elif event_type == "ItemError":
+#         return await handle_item_error(payload)
+#     else:
+#         logger.info(f"🔔 Received {event_type} for order {order_ref}")
+#         return {"status": "received"}
 
 def send_tracking_email(order_id: str, tracking_code: str, shipping_option: str):
     order = orders_collection.find_one({"order_id": order_id})
