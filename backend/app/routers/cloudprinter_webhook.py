@@ -52,18 +52,19 @@ def _send_tracking_email(to_email: str,
     display_name = (user_name or "there").strip().title() or "there"
     child_name = (child_name or "there").strip().title() or "there"
 
-    subject = f"Your order {order_ref} has shipped!"
+    subject = f"Your order from Diffrun {order_ref} has shipped!"
     html = f"""
     <html><body style="font-family: Arial, sans-serif;">
       <p>Hi {display_name},</p>
-      <p>Your story book for {child_name} has been <strong>shipped</strong>.</p>
+      <p>Your story book for {child_name} has been <strong>shipped</strong> with order reference {order_ref}. The item is shipped by {shipping_option} and the corresponding tracking number is {tracking}. Visit the courrier's website to track your package. </p>
+      
       <ul>
         <li><strong>Order:</strong> {order_ref}</li>
         <li><strong>Carrier:</strong> {shipping_option}</li>
         <li><strong>Tracking:</strong> {tracking}</li>
         <li><strong>Shipped at:</strong> {when_iso}</li>
       </ul>
-      {"<p><a href='"+tracking_url+"' style='background:#5784ba;color:#fff;padding:10px 16px;border-radius:6px;text-decoration:none'>Track your package</a></p>" if tracking_url else ""}
+       
       <p>Thanks,<br/>Team Diffrun</p>
     </body></html>
     """
@@ -153,7 +154,7 @@ async def cloudprinter_webhook(
             {"customer_email": 1, "email": 1, "user_name": 1, "_id": 0},
         )
         #to_email = (order.get("customer_email") or order.get("email") or "").strip() if order else ""
-        to_email = "husain@lhmm.in"
+        to_email = "support@diffrun.com"
         user_name = (order.get("user_name") if order else None)
         name = order.get("name") if order else None
 
