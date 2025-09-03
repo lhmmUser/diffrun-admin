@@ -2,7 +2,7 @@
 
 import React, { useState } from 'react';
 
-const baseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8001';
+const baseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
 
 const DarkFantasyDownload = () => {
   const [fromDate, setFromDate] = useState('');
@@ -81,6 +81,25 @@ const DarkFantasyDownload = () => {
       >
         Download CSV
       </button>
+      <button
+  onClick={async () => {
+    if (!fromDate || !toDate) { alert("Please select both From and To dates"); return; }
+    if (new Date(fromDate) > new Date(toDate)) { alert("From Date cannot be after To Date"); return; }
+
+    const res = await fetch(`${baseUrl}/download-xlsx?from_date=${fromDate}&to_date=${toDate}`);
+    if (!res.ok) { alert("Failed to download"); return; }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `darkfantasy_${fromDate}_to_${toDate}.xlsx`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }}
+  className="bg-emerald-600 hover:bg-emerald-700 text-white px-6 my-2 py-3 rounded-lg shadow-md transition duration-300"
+>
+  Download XLSX (with Pivot)
+</button>
     </div>
   );
 };

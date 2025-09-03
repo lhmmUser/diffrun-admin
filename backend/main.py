@@ -26,7 +26,8 @@ from dateutil import parser
 from app.routers.reconcile import router as vlookup_router
 from app.routers.razorpay_export import router as razorpay_router
 from app.routers.cloudprinter_webhook import router as cloudprinter_router
-
+import pandas as pd
+from botocore.exceptions import BotoCoreError, ClientError
 
 # Setup logger
 logging.basicConfig(level=logging.INFO)
@@ -1351,38 +1352,313 @@ def export_orders_csv():
         temp_file.flush()
         return FileResponse(temp_file.name, media_type="text/csv", filename="orders_export.csv")
 
+IST_OFFSET = timedelta(hours=5, minutes=30)
+TIMESTAMP_FIELD = "time_req_recieved" 
+
+INSTANCE_IDS = [
+    "i-0b1f98e12f9344f9f",  
+    "i-071c197c88296ab8a",  
+    "i-03dbcc37d0a59609d",  
+    "i-00de64646abb34ad2",  
+]
+
+def _parse_dt(value):
+    """Return naive datetime from common string or datetime inputs; None if not parseable."""
+    if isinstance(value, datetime):
+        # Strip tzinfo if present (we’ll treat it as naive UTC below)
+        return value.replace(tzinfo=None)
+    if isinstance(value, str):
+        # Try a few common wire formats
+        for fmt in (
+            "%Y-%m-%dT%H:%M:%S.%fZ",
+            "%Y-%m-%dT%H:%M:%SZ",
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%dT%H:%M:%S",
+        ):
+            try:
+                dt = datetime.strptime(value, fmt)
+                return dt.replace(tzinfo=None)
+            except ValueError:
+                pass
+    return None
+
+def _pick_excel_engine():
+    try:
+        import xlsxwriter  # noqa: F401
+        return "xlsxwriter"
+    except Exception:
+        try:
+            import openpyxl  # noqa: F401
+            return "openpyxl"
+        except Exception:
+            return None
+        
+def _fmt_ist(dt):
+    try:
+        if dt is None:
+            return ""
+        if isinstance(dt, str):
+            try:
+                dt = parser.isoparse(dt)
+            except Exception:
+                return ""
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(IST).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return ""
+
+AWS_REGION = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
+
+def _get_ec2_status_rows():
+    """
+    Returns (rows, error). Never raises.
+    rows: list of dicts with Name, InstanceId, State, OnOff, checks, IPs, timestamps
+    """
+    try:
+        if not AWS_REGION:
+            return [], "AWS region not set. Set AWS_REGION or AWS_DEFAULT_REGION."
+
+        ec2 = boto3.client("ec2", region_name=AWS_REGION)
+        resp = ec2.describe_instances(InstanceIds=INSTANCE_IDS)
+        reservations = resp.get("Reservations", [])
+
+        # Gather instance ids for status checks
+        instance_ids = [
+            inst["InstanceId"]
+            for r in reservations
+            for inst in r.get("Instances", [])
+        ]
+        checks_map = {}
+        if instance_ids:
+            status_resp = ec2.describe_instance_status(
+                InstanceIds=instance_ids, IncludeAllInstances=True
+            )
+            for s in status_resp.get("InstanceStatuses", []):
+                checks_map[s["InstanceId"]] = {
+                    "InstanceStatus": s.get("InstanceStatus", {}).get("Status", ""),
+                    "SystemStatus": s.get("SystemStatus", {}).get("Status", ""),
+                }
+
+        now_ist = datetime.utcnow().replace(tzinfo=timezone.utc).astimezone(IST)
+        rows = []
+        for r in reservations:
+            for inst in r.get("Instances", []):
+                iid = inst.get("InstanceId", "")
+                state = (inst.get("State") or {}).get("Name", "")
+                name = ""
+                for tag in inst.get("Tags", []) or []:
+                    if tag.get("Key") == "Name":
+                        name = tag.get("Value") or ""
+                        break
+
+                rows.append({
+                    "Name": name,
+                    "InstanceId": iid,
+                    "State": state,                           # running/stopped/…
+                    "OnOff": "on" if state == "running" else "off",
+                    "InstanceStatus": checks_map.get(iid, {}).get("InstanceStatus", ""),
+                    "SystemStatus": checks_map.get(iid, {}).get("SystemStatus", ""),
+                    "PublicIP": inst.get("PublicIpAddress", ""),
+                    "PrivateIP": inst.get("PrivateIpAddress", ""),
+                    "LaunchTime_IST": _fmt_ist(inst.get("LaunchTime")),
+                    "CheckedAt_IST": now_ist.strftime("%Y-%m-%d %H:%M:%S"),
+                })
+
+        return rows, None
+
+    except (BotoCoreError, ClientError) as e:
+        return [], f"AWS error: {e}"
+    except Exception as e:
+        return [], f"Unexpected error: {e}"
+
 @app.get("/download-csv")
 def download_csv(from_date: str = Query(...), to_date: str = Query(...)):
     try:
-        # Parse input dates (assumes format YYYY-MM-DD)
+        # Validate date range (inclusive to 23:59:59 for to_date)
         from_dt = datetime.strptime(from_date, "%Y-%m-%d")
-        to_dt = datetime.strptime(to_date, "%Y-%m-%d")
+        to_dt = datetime.strptime(to_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
+        if from_dt > to_dt:
+            return Response(content="from_date cannot be after to_date", media_type="text/plain", status_code=400)
 
-        # Include the whole to_date until 23:59:59
-        to_dt = to_dt.replace(hour=23, minute=59, second=59)
+        # Pull rows from Mongo (exclude _id)
+        data = list(collection_df.find(
+            {TIMESTAMP_FIELD: {"$gte": from_dt, "$lte": to_dt}},
+            {"_id": 0}
+        ))
 
-        # Query the collection
-        data = list(collection_df.find({
-            "time_req_recieved": {
-                "$gte": from_dt,
-                "$lte": to_dt
-            }
-        }, {"_id": 0}))  # Exclude MongoDB _id
-
-        # Handle empty result
         if not data:
             return Response(content="No data available", media_type="text/plain", status_code=404)
 
-        # Create CSV
+        # Compute additional columns per row
+        rows_out = []
+        for row in data:
+            r = dict(row)
+            base_ts = _parse_dt(r.get(TIMESTAMP_FIELD))
+
+            # Default blanks if missing/unparseable
+            r["date"] = ""
+            r["hour"] = ""
+            r["date-hour"] = ""
+            r["ist-date"] = ""
+            r["ist-hour"] = ""
+
+            if base_ts is not None:
+                # Original timestamp derived columns
+                r["date"] = base_ts.strftime("%d/%m/%Y")  # DD/MM/YYYY
+                r["hour"] = base_ts.strftime("%H")        # HH (00-23)
+
+                # IST adjusted timestamp (UTC + 05:30)
+                ist_ts = base_ts + IST_OFFSET
+                r["date-hour"] = ist_ts.strftime("%Y-%m-%d %H:%M:%S")  # combined datetime for sheets
+                r["ist-date"] = ist_ts.strftime("%d/%m/%Y")
+                r["ist-hour"] = ist_ts.strftime("%H")
+
+            rows_out.append(r)
+
+        # Ensure consistent column order (existing cols first, then new cols)
+        extra_cols = ["date", "hour", "date-hour", "ist-date", "ist-hour"]
+        base_cols = [k for k in rows_out[0].keys() if k not in extra_cols]
+        fieldnames = base_cols + extra_cols
+
+        # Write CSV
         csv_file = io.StringIO()
-        writer = csv.DictWriter(csv_file, fieldnames=data[0].keys())
+        writer = csv.DictWriter(csv_file, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
-        writer.writerows(data)
+        writer.writerows(rows_out)
         csv_file.seek(0)
 
-        return StreamingResponse(csv_file, media_type="text/csv", headers={
-            "Content-Disposition": "attachment; filename=darkfantasy_orders.csv"
-        })
+        # Name is overridden by your frontend anyway; leaving static is fine
+        headers = {"Content-Disposition": "attachment; filename=darkfantasy_orders.csv"}
+        return StreamingResponse(csv_file, media_type="text/csv", headers=headers)
 
     except Exception as e:
         return Response(content=f"❌ Error: {str(e)}", media_type="text/plain", status_code=500)
+    
+@app.get("/download-xlsx")
+def download_xlsx(from_date: str = Query(...), to_date: str = Query(...)):
+    try:
+        # Validate range
+        from_dt = datetime.strptime(from_date, "%Y-%m-%d")
+        to_dt = datetime.strptime(to_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
+        if from_dt > to_dt:
+            return Response("from_date cannot be after to_date", media_type="text/plain", status_code=400)
+
+        # Query Mongo (exclude _id)
+        data = list(collection_df.find(
+            {TIMESTAMP_FIELD: {"$gte": from_dt, "$lte": to_dt}},
+            {"_id": 0}
+        ))
+        if not data:
+            return Response("No data available", media_type="text/plain", status_code=404)
+
+        # Build rows + IST columns
+        rows_out = []
+        for row in data:
+            r = dict(row)
+            base_ts = _parse_dt(r.get(TIMESTAMP_FIELD))
+
+            r["date"] = ""
+            r["hour"] = ""
+            r["date-hour"] = ""
+            r["ist-date"] = ""
+            r["ist-hour"] = ""
+
+            if base_ts is not None:
+                ist_ts = base_ts + IST_OFFSET  # remove if DB already stores IST
+                r["date"]      = base_ts.strftime("%d/%m/%Y")
+                r["hour"]      = base_ts.strftime("%H")
+                r["date-hour"] = ist_ts.strftime("%Y-%m-%d %H:%M:%S")
+                r["ist-date"]  = ist_ts.strftime("%d/%m/%Y")
+                r["ist-hour"]  = ist_ts.strftime("%H")
+
+            rows_out.append(r)
+
+        df = pd.DataFrame(rows_out)
+
+        # Ensure required columns exist
+        for col in ["ist-date", "ist-hour", "room_id"]:
+            if col not in df.columns:
+                df[col] = ""
+
+        # Build pivot: count of room_id by (ist-date x ist-hour)
+        hours = [f"{h:02d}" for h in range(24)]
+        df["ist-hour"] = df["ist-hour"].astype(str)
+        pivot = pd.pivot_table(
+            df, index="ist-date", columns="ist-hour",
+            values="room_id", aggfunc="count", fill_value=0
+        )
+        pivot = pivot.reindex(columns=hours, fill_value=0)
+
+        # Sort ist-date as real dates when possible
+        def _date_key(x):
+            try:
+                return datetime.strptime(x, "%d/%m/%Y")
+            except Exception:
+                return x
+        pivot = pivot.sort_index(key=lambda idx: [_date_key(x) for x in idx])
+
+        # Totals
+        pivot["Total"] = pivot.sum(axis=1)
+        pivot.loc["Total"] = pivot.sum(numeric_only=True)
+
+        # Pick an engine we actually have
+        engine = _pick_excel_engine()
+        if engine is None:
+            return Response(
+                "Missing Excel writer engine. Install one of: pip install xlsxwriter OR pip install openpyxl",
+                media_type="text/plain", status_code=500
+            )
+
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine=engine) as writer:
+            # Sheet 1: raw/orders
+            df.to_excel(writer, index=False, sheet_name="orders")
+            # Sheet 2: pivot
+            pivot.to_excel(writer, sheet_name="pivot")
+
+            # ✅ NEW: Sheet 3 — EC2 status
+            ec2_rows, ec2_err = _get_ec2_status_rows()
+            if ec2_err:
+                pd.DataFrame([{"error": ec2_err}]).to_excel(
+                    writer, index=False, sheet_name="ec2_status_error"
+                )
+            else:
+                ec2_df = pd.DataFrame(ec2_rows)
+                if not ec2_df.empty:
+                    ec2_df = ec2_df.sort_values(
+                        ["OnOff", "Name", "InstanceId"], ascending=[False, True, True]
+                    )
+                ec2_df.to_excel(writer, index=False, sheet_name="ec2_status")
+
+
+            # Freeze panes (engine-specific)
+            if engine == "xlsxwriter":
+                ws1 = writer.sheets["orders"]
+                ws2 = writer.sheets["pivot"]
+                ws3 = writer.sheets.get("ec2_status")
+                if ws1:ws1.freeze_panes(1, 0)  # row 2
+                if ws2:ws2.freeze_panes(1, 1)  # row 2, col B
+                if ws3:ws3.freeze_panes(1, 0)
+
+            else:  # openpyxl
+                ws1 = writer.sheets.get("orders")
+                ws2 = writer.sheets.get("pivot")
+                ws3 = writer.sheets.get("ec2_status")
+                if ws1 is not None: ws1.freeze_panes = "A2"
+                if ws2 is not None: ws2.freeze_panes = "B2"
+                if ws3 is not None: ws3.freeze_panes = "A2"
+
+
+        output.seek(0)
+        filename = f"darkfantasy_{from_date}_to_{to_date}.xlsx"
+        headers = {"Content-Disposition": f"attachment; filename={filename}"}
+        return StreamingResponse(
+            output,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers=headers
+        )
+
+    except Exception as e:
+        # Return the message so you see the real cause in the browser too
+        return Response(f"❌ Error building XLSX: {e}", media_type="text/plain", status_code=500)
