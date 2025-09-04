@@ -28,34 +28,69 @@ from app.routers.razorpay_export import router as razorpay_router
 from app.routers.cloudprinter_webhook import router as cloudprinter_router
 import pandas as pd
 from botocore.exceptions import BotoCoreError, ClientError
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
+import pytz
+from io import BytesIO
+from typing import Tuple
+
+IST_TZ = pytz.timezone("Asia/Kolkata")
 
 # Setup logger
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+logger = logging.getLogger("xlsx_cron")
 
 load_dotenv()
 
 EMAIL_USER = os.getenv("EMAIL_ADDRESS")
 EMAIL_PASS = os.getenv("EMAIL_PASSWORD")
+SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
+EMAIL_FROM = os.getenv("EMAIL_FROM", EMAIL_USER)
+EMAIL_TO_RAW = os.getenv("EMAIL_TO", "")
+EMAIL_TO = [e.strip() for e in EMAIL_TO_RAW.split(",") if e.strip()]
+SMTP_USER = os.getenv("SMTP_USER", EMAIL_USER)
+SMTP_PASS = os.getenv("SMTP_PASS", EMAIL_PASS)
 
 MONGO_URI_df = os.getenv("MONGO_URI_df")
 client_df = MongoClient(MONGO_URI_df)
 df_db = client_df["df-db"]
 collection_df = df_db["user-data"]
 
-scheduler = BackgroundScheduler()
+scheduler = BackgroundScheduler(timezone=IST_TZ)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    scheduler.add_job(send_nudge_email, "cron", hour=14)
-    scheduler.start()
-    logger.info("✅ Nudge email scheduler started")
+    try:
+        if not scheduler.running:
+            scheduler.start()
+
+        # register export job (your existing one)
+        scheduler.add_job(
+            _run_export_and_email,
+            trigger=CronTrigger(hour="0,3,6,9,12,15,18", minute="0", timezone=IST_TZ),
+            id="xlsx_export_fixed_ist_times",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
+
+        # register nudge job via your function
+        schedule_nudge_emails()
+
+    except Exception:
+        logger.exception("Failed to start APScheduler in lifespan")
+
     yield
-    scheduler.shutdown(wait=False)
-    logger.info("🛑 Scheduler shut down on app exit")
+
+    try:
+        if scheduler.running:
+            scheduler.shutdown(wait=False)
+    except Exception:
+        logger.exception("Failed to stop APScheduler in lifespan")
 
 
-# Now define FastAPI instance
 app = FastAPI(lifespan=lifespan)
 app.include_router(vlookup_router)
 app.include_router(razorpay_router)
@@ -1182,9 +1217,24 @@ async def trigger_nudge_emails(background_tasks: BackgroundTasks):
         raise HTTPException(status_code=500, detail=f"Error starting task: {str(e)}")
 
 def schedule_nudge_emails():
-    scheduler = BackgroundScheduler()
-    scheduler.add_job(send_nudge_email, 'cron', hour=14) 
-    scheduler.start()
+    """
+    Idempotently register the daily 14:00 IST nudge job on the global scheduler.
+    Keeps the function alive for callers but avoids duplicate schedulers.
+    """
+    # Start the global scheduler if needed
+    if not scheduler.running:
+        scheduler.start()
+
+    # Add/replace the job safely so repeated calls don't duplicate it
+    scheduler.add_job(
+        send_nudge_email,
+        trigger=CronTrigger(hour="14", minute="0", timezone=IST_TZ),
+        id="nudge_email_daily_14ist",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+    )
+
 
 @app.get("/debug/nudge-candidates")
 def debug_nudge_candidates():
@@ -1662,3 +1712,208 @@ def download_xlsx(from_date: str = Query(...), to_date: str = Query(...)):
     except Exception as e:
         # Return the message so you see the real cause in the browser too
         return Response(f"❌ Error building XLSX: {e}", media_type="text/plain", status_code=500)
+    
+def _export_xlsx_bytes(from_dt_utc: datetime, to_dt_utc: datetime) -> Tuple[bytes, str]:
+    """
+    Build an XLSX with:
+      - 'orders'  : raw rows (with IST helper columns)
+      - 'pivot'   : counts per (ist-date x ist-hour)
+      - 'ec2_status' (or ec2_status_error)
+    Returns (xlsx_bytes, filename).
+    """
+    # Query Mongo (exclude _id)
+    mongo_filter = {TIMESTAMP_FIELD: {"$gte": from_dt_utc, "$lte": to_dt_utc}}
+    projection = {"_id": 0}
+    data = list(collection_df.find(mongo_filter, projection))
+
+    rows_out = []
+    if data:
+        for row in data:
+            r = dict(row)
+            base_ts = _parse_dt(r.get(TIMESTAMP_FIELD))
+
+            # Initialize helper columns
+            r["date"] = ""
+            r["hour"] = ""
+            r["date-hour"] = ""
+            r["ist-date"] = ""
+            r["ist-hour"] = ""
+
+            if base_ts is not None:
+                ist_ts = base_ts + IST_OFFSET  # keep your assumption (DB time -> IST)
+                r["date"]      = base_ts.strftime("%d/%m/%Y")        # UTC date (string)
+                r["hour"]      = base_ts.strftime("%H")              # UTC hour
+                r["date-hour"] = ist_ts.strftime("%Y-%m-%d %H:%M:%S")
+                r["ist-date"]  = ist_ts.strftime("%d/%m/%Y")
+                r["ist-hour"]  = ist_ts.strftime("%H")
+
+            rows_out.append(r)
+
+        df = pd.DataFrame(rows_out)
+        filename = f"export_{from_dt_utc.strftime('%Y%m%d_%H%M%S')}_to_{to_dt_utc.strftime('%Y%m%d_%H%M%S')}.xlsx"
+    else:
+        # still generate a valid workbook
+        df = pd.DataFrame([{"note": "No data found in this window"}])
+        filename = f"export_empty_{from_dt_utc.date()}_{to_dt_utc.date()}.xlsx"
+
+    # Ensure required columns exist for pivot parity
+    for col in ["ist-date", "ist-hour", "room_id"]:
+        if col not in df.columns:
+            df[col] = ""
+
+    # Build pivot: count of room_id by (ist-date x ist-hour)
+    hours = [f"{h:02d}" for h in range(24)]
+    try:
+        df["ist-hour"] = df["ist-hour"].astype(str)
+        pivot = pd.pivot_table(
+            df, index="ist-date", columns="ist-hour",
+            values="room_id", aggfunc="count", fill_value=0
+        )
+        pivot = pivot.reindex(columns=hours, fill_value=0)
+
+        # sort ist-date as real dates when possible
+        def _date_key(x):
+            try:
+                return datetime.strptime(x, "%d/%m/%Y")
+            except Exception:
+                return x
+        pivot = pivot.sort_index(key=lambda idx: [_date_key(x) for x in idx])
+
+        # add totals
+        pivot["Total"] = pivot.sum(axis=1)
+        pivot.loc["Total"] = pivot.sum(numeric_only=True)
+    except Exception as e:
+        # If something odd with columns, still continue with a minimal pivot
+        pivot = pd.DataFrame([{"error": f"pivot build failed: {e}"}])
+
+    # EC2 status
+    ec2_rows, ec2_err = _get_ec2_status_rows()
+    if ec2_err:
+        ec2_df = pd.DataFrame([{"error": ec2_err}])
+        ec2_sheet_name = "ec2_status_error"
+    else:
+        ec2_df = pd.DataFrame(ec2_rows)
+        if not ec2_df.empty:
+            ec2_df = ec2_df.sort_values(
+                ["OnOff", "Name", "InstanceId"], ascending=[False, True, True]
+            )
+        ec2_sheet_name = "ec2_status"
+
+    # Write workbook
+    buf = BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="orders")
+        pivot.to_excel(writer, sheet_name="pivot")
+        ec2_df.to_excel(writer, index=False, sheet_name=ec2_sheet_name)
+
+        # Freeze panes (openpyxl)
+        ws1 = writer.sheets.get("orders")
+        ws2 = writer.sheets.get("pivot")
+        ws3 = writer.sheets.get(ec2_sheet_name)
+        if ws1 is not None: ws1.freeze_panes = "A2"
+        if ws2 is not None: ws2.freeze_panes = "B2"
+        if ws3 is not None: ws3.freeze_panes = "A2"
+
+    buf.seek(0)
+    return buf.read(), filename
+
+    
+def _send_email_with_attachment(subject: str, body_html: str, attachment_name: str, attachment_bytes: bytes):
+    """
+    Sends an email with XLSX attachment via SMTP (STARTTLS).
+    """
+    if not (SMTP_HOST and SMTP_PORT and SMTP_USER and SMTP_PASS and EMAIL_FROM):
+        logger.error("Email env vars missing; cannot send export email.")
+        return
+    if not EMAIL_TO:
+        logger.error("EMAIL_TO is empty after parsing. Set EMAIL_TO='a@x.com,b@y.com'.")
+        return
+
+
+    msg = EmailMessage()
+    msg["From"] = EMAIL_FROM
+    msg["To"] = ", ".join(EMAIL_TO)
+    msg["Subject"] = subject
+    msg.set_content("This email contains HTML content. Please view in an HTML-capable client.")
+    msg.add_alternative(body_html, subtype="html")
+
+    msg.add_attachment(
+        attachment_bytes,
+        maintype="application",
+        subtype="vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename=attachment_name,
+    )
+
+    try:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as server:
+            # STARTTLS path (most common). If you use port 465, switch to SMTP_SSL.
+            server.starttls()
+            server.login(SMTP_USER, SMTP_PASS)
+            server.send_message(msg)
+        logger.info(f"SMTP: host={SMTP_HOST}:{SMTP_PORT} as={SMTP_USER} to={EMAIL_TO}")
+
+        logger.info("📧 Export email sent.")
+    except Exception as e:
+        logger.exception("Failed to send export email")
+    
+def _run_export_and_email():
+    try:
+        # IST-aligned window
+        now_ist = datetime.now(IST_TZ)  # use your single pytz timezone object
+        to_ist = now_ist.replace(minute=0, second=0, microsecond=0)
+        from_ist = to_ist - timedelta(days=3)   # <-- last 3 days
+
+        # Convert IST -> naive UTC for Mongo (if DB stores UTC)
+        from_utc = from_ist.astimezone(pytz.utc).replace(tzinfo=None)
+        to_utc   = to_ist.astimezone(pytz.utc).replace(tzinfo=None)
+
+        xlsx_bytes, fname = _export_xlsx_bytes(from_utc, to_utc)
+
+        subject = f"[Diffrun Admin] Export (IST {from_ist:%Y-%m-%d %H:%M} → {to_ist:%Y-%m-%d %H:%M})"
+        body_html = f"""
+        <html><body style="font-family: Arial, sans-serif;">
+          <p>Attached export for the <b>last 3 days</b> (IST).</p>
+          <ul>
+            <li><b>Window (IST):</b> {from_ist:%Y-%m-%d %H:%M} → {to_ist:%Y-%m-%d %H:%M}</li>
+          </ul>
+        </body></html>
+        """
+        _send_email_with_attachment(subject, body_html, fname, xlsx_bytes)
+        logger.info("✅ Scheduled export completed")
+    except Exception:
+        logger.exception("Scheduled export failed")
+
+@app.get("/debug/scheduler-jobs")
+def debug_scheduler_jobs():
+    # Shows what jobs are registered and their next run times
+    out = []
+    for j in scheduler.get_jobs():
+        nxt = j.next_run_time
+        nxt_ist = nxt.astimezone(IST_TZ).strftime("%Y-%m-%d %H:%M:%S %Z") if nxt else None
+        out.append({"id": j.id, "next_run_ist": nxt_ist, "trigger": str(j.trigger)})
+    return out
+
+@app.post("/debug/run-export-now")
+def debug_run_export_now():
+    # Manually trigger the XLSX export + email once
+    _run_export_and_email()
+    return {"status": "ok"}
+
+@app.post("/debug/email-ping")
+def debug_email_ping():
+    if not EMAIL_TO:
+        return {"ok": False, "error": "EMAIL_TO empty"}
+    msg = EmailMessage()
+    msg["From"] = EMAIL_FROM
+    msg["To"] = ", ".join(EMAIL_TO)
+    msg["Subject"] = "Ping from Diffrun backend"
+    msg.set_content("If you see this, SMTP + routing works.")
+    try:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as s:
+            s.starttls()
+            s.login(SMTP_USER, SMTP_PASS)
+            refused = s.send_message(msg)
+        return {"ok": True, "refused": refused}
+    except Exception as e:
+        logger.exception("Ping email failed")
+        return {"ok": False, "error": str(e)}
