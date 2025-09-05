@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 import os
 from fastapi.encoders import jsonable_encoder
 from typing import Optional, List
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, time, timedelta, timezone
 import requests
 import hashlib
 import PyPDF2
@@ -1217,15 +1217,9 @@ async def trigger_nudge_emails(background_tasks: BackgroundTasks):
         raise HTTPException(status_code=500, detail=f"Error starting task: {str(e)}")
 
 def schedule_nudge_emails():
-    """
-    Idempotently register the daily 14:00 IST nudge job on the global scheduler.
-    Keeps the function alive for callers but avoids duplicate schedulers.
-    """
-    # Start the global scheduler if needed
     if not scheduler.running:
         scheduler.start()
 
-    # Add/replace the job safely so repeated calls don't duplicate it
     scheduler.add_job(
         send_nudge_email,
         trigger=CronTrigger(hour="14", minute="0", timezone=IST_TZ),
@@ -1234,7 +1228,6 @@ def schedule_nudge_emails():
         coalesce=True,
         max_instances=1,
     )
-
 
 @app.get("/debug/nudge-candidates")
 def debug_nudge_candidates():
@@ -1461,10 +1454,6 @@ def _fmt_ist(dt):
 AWS_REGION = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
 
 def _get_ec2_status_rows():
-    """
-    Returns (rows, error). Never raises.
-    rows: list of dicts with Name, InstanceId, State, OnOff, checks, IPs, timestamps
-    """
     try:
         if not AWS_REGION:
             return [], "AWS region not set. Set AWS_REGION or AWS_DEFAULT_REGION."
@@ -1817,7 +1806,6 @@ def _export_xlsx_bytes(from_dt_utc: datetime, to_dt_utc: datetime) -> Tuple[byte
     buf.seek(0)
     return buf.read(), filename
 
-    
 def _send_email_with_attachment(subject: str, body_html: str, attachment_name: str, attachment_bytes: bytes):
     """
     Sends an email with XLSX attachment via SMTP (STARTTLS).
@@ -1917,3 +1905,122 @@ def debug_email_ping():
     except Exception as e:
         logger.exception("Ping email failed")
         return {"ok": False, "error": str(e)}
+
+def _utc_bounds_for_ist_day(days_ago: int = 6):
+    """UTC bounds for the IST calendar day 'days_ago' from today."""
+    now_ist = datetime.now(IST)
+    target_date = (now_ist - timedelta(days=days_ago)).date()   # e.g., yesterday for days_ago=1
+    start_ist = datetime.combine(target_date, datetime.min.time(), tzinfo=IST)
+    end_ist = start_ist + timedelta(days=6)
+    return start_ist.astimezone(timezone.utc), end_ist.astimezone(timezone.utc)
+
+@app.get("/debug/feedback-candidates")
+def debug_feedback_candidates(days_ago: int = 6):
+    start_utc, end_utc = _utc_bounds_for_ist_day(days_ago)
+
+    pipeline = [
+        {"$match": {
+            "feedback_email": {"$ne": True},
+            "shipping_option": "bluedart_in_domestic",
+            "shipped_at": {"$exists": True, "$ne": None},
+            "$or": [
+                {"discount_code": {"$exists": False}},
+                {"discount_code": {"$ne": "TEST"}}
+            ],
+        }},
+        {"$addFields": {"shipped_dt": {"$toDate": "$shipped_at"}}},
+        {"$match": {"shipped_dt": {"$gte": start_utc, "$lt": end_utc}}},
+        {"$project": {
+            "_id": 0,
+            "order_id": 1, "job_id": 1, "email": 1,
+            "user_name": 1, "name": 1, "gender": 1, "book_id": 1,
+            "shipping_option": 1, "discount_code": 1,
+            "shipped_at": 1, "shipped_dt": 1
+        }},
+        {"$sort": {"shipped_dt": 1, "order_id": 1}},
+        {"$limit": 500},
+    ]
+
+    items = list(orders_collection.aggregate(pipeline))
+    return {
+        "ist_day": str((datetime.now(IST) - timedelta(days=days_ago)).date()),
+        "bounds_utc": [start_utc.isoformat(), end_utc.isoformat()],
+        "count": len(items),
+        "candidates": items
+    }
+
+@app.post("/cron/feedback-emails")
+def cron_feedback_emails(limit: int = 200):
+   
+    pipeline = [
+        {"$match": {
+            "feedback_email": {"$ne": True},
+            "shipping_option": "bluedart_in_domestic",
+            "shipped_at": {"$exists": True, "$ne": None},
+            "$or": [
+                {"discount_code": {"$exists": False}},
+                {"discount_code": {"$ne": "TEST"}}
+            ],
+        }},
+        {"$addFields": {"shipped_dt": {"$toDate": "$shipped_at"}}},
+        {"$match": {"$expr": {
+            "$and": [
+                {"$gte": [
+                    {"$dateDiff": {
+                        "startDate": "$shipped_dt",
+                        "endDate": "$$NOW",
+                        "unit": "day",
+                        "timezone": "Asia/Kolkata"
+                    }},
+                    6
+                ]},
+                {"$lt": [
+                    {"$dateDiff": {
+                        "startDate": "$shipped_dt",
+                        "endDate": "$$NOW",
+                        "unit": "day",
+                        "timezone": "Asia/Kolkata"
+                    }},
+                    7
+                ]}
+            ]
+        }}},
+        {"$project": {
+            "_id": 0,
+            "order_id": 1,
+            "job_id": 1,
+            "email": 1,
+            "name": 1,
+            "user_name": 1,
+            "gender": 1,
+            "book_id": 1,
+            "shipping_option": 1,
+            "discount_code": 1,
+            "shipped_at": 1,
+            "shipped_dt": 1
+        }},
+        {"$sort": {"shipped_dt": 1, "order_id": 1}},
+        {"$limit": int(limit)}
+    ]
+
+    candidates = list(orders_collection.aggregate(pipeline))
+
+    results = {"total": len(candidates), "sent": 0, "skipped": 0, "errors": 0, "details": []}
+    for c in candidates:
+        job_id = c.get("job_id")
+        email = c.get("email")
+        if not job_id or not email:
+            results["skipped"] += 1
+            results["details"].append({"job_id": job_id, "status": "skipped", "reason": "missing job_id or email"})
+            continue
+
+        try:
+            # Reuse your existing endpoint logic directly
+            send_feedback_email(job_id, BackgroundTasks())
+            results["sent"] += 1
+            results["details"].append({"job_id": job_id, "status": "sent", "email": email})
+        except Exception as e:
+            results["errors"] += 1
+            results["details"].append({"job_id": job_id, "status": "error", "error": str(e)})
+
+    return results
