@@ -48,32 +48,103 @@ def _send_tracking_email(to_email: str,
         print(f"[MAIL] skipped: empty recipient for order {order_ref}")
         return
 
-    tracking_url = _tracking_link(shipping_option, tracking)
     display_name = (user_name or "there").strip().title() or "there"
     child_name = (child_name or "there").strip().title() or "there"
 
-    subject = f"Your order from Diffrun {order_ref} has shipped!"
+    subject = f"Your order from Diffrun {order_ref} has been shipped!"
     html = f"""
-    <html><body style="font-family: Arial, sans-serif;">
-      <p>Hi {display_name},</p>
-      <p>Your story book for {child_name} has been <strong>shipped</strong> with order reference {order_ref}. The item is shipped by {shipping_option} and the corresponding tracking number is {tracking}. Visit the courrier's website to track your package. </p>
-      
-      <ul>
-        <li><strong>Order:</strong> {order_ref}</li>
-        <li><strong>Carrier:</strong> {shipping_option}</li>
-        <li><strong>Tracking:</strong> {tracking}</li>
-        <li><strong>Shipped at:</strong> {when_iso}</li>
-      </ul>
-       
-      <p>Thanks,<br/>Team Diffrun</p>
-    </body></html>
+    <html>
+    <head>
+      <meta charset="UTF-8">
+      <meta name="color-scheme" content="light">
+      <meta name="supported-color-schemes" content="light">
+      <style>
+        @media only screen and (max-width: 480px) {{
+          .container {{
+            width: 100% !important;
+            max-width: 100% !important;
+            padding: 16px !important;
+          }}
+          .col, .img-col {{
+            display: block !important;
+            width: 100% !important;
+          }}
+          .img-col img {{
+            width: 100% !important;
+            height: auto !important;
+          }}
+          .browse-now-btn {{
+            font-size: 14px !important;
+            padding: 12px 16px !important;
+          }}
+          p, li, a {{
+            font-size: 15px !important;
+            line-height: 1.5 !important;
+          }}
+        }}
+      </style>
+    </head>
+    <body style="font-family: Arial, sans-serif; background:#f7f7f7; margin:0; padding:20px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
+        <tr>
+          <td align="center">
+            <table role="presentation" class="container" width="100%" cellpadding="0" cellspacing="0" border="0"
+                   style="max-width: 48rem; margin: 0 auto; background:#ffffff; border-radius:8px; box-shadow:0 0 10px rgba(0,0,0,0.08); overflow:hidden;">
+              <tr>
+                <td style="padding:24px;">
+                  
+                  <!-- Your original content (unchanged) -->
+                  <p>Hey {display_name},</p>
+                  Order Update! <strong>{child_name}'s storybook</strong> has been printed and is ready to be shipped. 🚚✨
+
+                  <ul>
+                    <li><strong>Order:</strong> {order_ref}</li>
+                    <li><strong>Carrier:</strong> {shipping_option}</li>
+                    <li><strong>Tracking:</strong> {tracking}</li>
+                    <li><strong>Shipped at:</strong> {when_iso}</li>
+                  </ul>
+
+                  <p>Thanks,<br />Team Diffrun</p>
+
+                  <!-- Explore More Row -->
+                  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+                         style="margin-top: 30px; background-color: #f7f6cf; border-radius: 8px;">
+                    <tr>
+                      <td class="col" style="padding: 20px; vertical-align: middle;">
+                        <p style="font-size: 15px; margin: 0;">
+                          Explore more magical books in our growing collection &nbsp;
+                          <button class="browse-now-btn"
+                                  style="background-color:#5784ba; margin-top: 20px; border-radius: 30px; border: none; padding:10px 15px;">
+                            <a href="https://diffrun.com"
+                               style="color:white; font-weight: bold; text-decoration: none; display:inline-block;">
+                              Browse Now
+                            </a>
+                          </button>
+                        </p>
+                      </td>
+                      <td class="img-col" width="300" style="padding: 0 20px 0 0; margin: 0; vertical-align: middle;">
+                        <img src="https://diffrungenerations.s3.ap-south-1.amazonaws.com/email_image+(2).jpg"
+                             alt="Storybook Preview" width="300"
+                             style="display: block; border-radius: 0; margin: 0; padding: 0;">
+                      </td>
+                    </tr>
+                  </table>
+
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+      </table>
+    </body>
+    </html>
     """
 
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = f"Diffrun <{EMAIL_USER}>"
     msg["To"] = to_email
-    msg.set_content("Your order has shipped. View this email in HTML to see the tracking button.")
+    msg.set_content("Your order has been shipped. View this email in HTML to see the formatted message.")
     msg.add_alternative(html, subtype="html")
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
@@ -82,7 +153,7 @@ def _send_tracking_email(to_email: str,
     print(f"[MAIL] sent shipped-email to {to_email} for order {order_ref}")
 
 @router.post("/api/webhook/cloudprinter")
-@router.post("/api/webhook/cloudprinter/")  # accept trailing slash; avoids redirect losing auth header
+@router.post("/api/webhook/cloudprinter/") 
 async def cloudprinter_webhook(
     request: Request,
     background_tasks: BackgroundTasks,
@@ -153,8 +224,8 @@ async def cloudprinter_webhook(
             {"order_id": data.order_reference},
             {"customer_email": 1, "email": 1, "user_name": 1, "_id": 0},
         )
-        #to_email = (order.get("customer_email") or order.get("email") or "").strip() if order else ""
-        to_email = "support@diffrun.com"
+        to_email = (order.get("customer_email") or order.get("email") or "").strip() if order else "support@diffrun.com"
+        # to_email = "support@diffrun.com"
         user_name = (order.get("user_name") if order else None)
         name = order.get("name") if order else None
 
