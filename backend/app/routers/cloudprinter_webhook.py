@@ -41,15 +41,14 @@ def _send_tracking_email(to_email: str,
                          order_ref: str,
                          shipping_option: str,
                          tracking: str,
-                         when_iso: str,
                          user_name: str | None = None,
-                         child_name: str | None = None):
+                         name: str | None = None):
     if not to_email:
         print(f"[MAIL] skipped: empty recipient for order {order_ref}")
         return
 
     display_name = (user_name or "there").strip().title() or "there"
-    child_name = (child_name or "there").strip().title() or "there"
+    child_name = (name or "Your").strip().title() or "Your"
 
     subject = f"Your order from Diffrun {order_ref} has been shipped!"
     html = f"""
@@ -101,7 +100,6 @@ def _send_tracking_email(to_email: str,
                     <li><strong>Order:</strong> {order_ref}</li>
                     <li><strong>Carrier:</strong> {shipping_option}</li>
                     <li><strong>Tracking:</strong> {tracking}</li>
-                    <li><strong>Shipped at:</strong> {when_iso}</li>
                   </ul>
 
                   <p>Thanks,<br />Team Diffrun</p>

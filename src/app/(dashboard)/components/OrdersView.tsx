@@ -483,30 +483,29 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
   const startIdx = (currentPage - 1) * ordersPerPage;
   const currentOrders = orders.slice(startIdx, startIdx + ordersPerPage);
 
-  function formatDayMonIST(dateInput: any): string {
-    if (!dateInput) return "";
+  function formatDayMonUTC(dateInput: any): string {
+  if (!dateInput) return "";
 
-    // Normalize input -> Date
-    let dt: Date | null = null;
-    try {
-      if (typeof dateInput === "object" && dateInput.$date?.$numberLong) {
-        dt = new Date(Number(dateInput.$date.$numberLong));  // epoch ms
-      } else if (typeof dateInput === "string" && dateInput.trim() !== "") {
-        dt = new Date(dateInput); // e.g. "2025-09-04T19:40:39+00:00"
-      }
-    } catch { /* ignore */ }
-    if (!dt || isNaN(dt.getTime())) return "";
+  let dt: Date | null = null;
+  try {
+    if (typeof dateInput === "object" && dateInput.$date?.$numberLong) {
+      dt = new Date(Number(dateInput.$date.$numberLong));  // epoch ms (UTC)
+    } else if (typeof dateInput === "string" && dateInput.trim() !== "") {
+      dt = new Date(dateInput); // ISO string
+    }
+  } catch { /* ignore */ }
+  if (!dt || isNaN(dt.getTime())) return "";
 
-    // Format as DD MMM in IST
-    const s = dt.toLocaleString("en-GB", {
-      day: "2-digit",
-      month: "short",
-      timeZone: "Asia/Kolkata",
-    });
+  // Format as DD MMM in UTC (ignore IST shift)
+  const s = dt.toLocaleString("en-GB", {
+    day: "2-digit",
+    month: "short",
+    timeZone: "UTC",   // force UTC day, not IST
+  });
 
-    // Some environments output "Sep" instead of "Sept"; normalize to "Sept"
-    return s.replace(/\bSep\b/, "Sept");
-  }
+  return s.replace(/\bSep\b/, "Sept");
+}
+
 
   return (
     <div className="py-1 px-2  space-y-3 bg-white rounded shadow-md">
@@ -745,7 +744,7 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
                   </span>
                 </td>
                 <td className="px-2 py-2 text-xs">
-                  {order.shippedAt && formatDayMonIST(order.shippedAt)}
+                  {order.shippedAt && formatDayMonUTC(order.shippedAt)}
                 </td>
                 <td className="px-2 py-2">
                   {order.discountCode ? (

@@ -369,7 +369,7 @@ def get_orders(
             "discount_code": doc.get("discount_code", ""),
             "currency": doc.get("currency", ""),
             "locale": doc.get("locale", ""),
-            "shippedAt": format_date(doc.get("shipped_at")),
+            "shippedAt": doc.get("shipped_at"),
         })
 
     return result
