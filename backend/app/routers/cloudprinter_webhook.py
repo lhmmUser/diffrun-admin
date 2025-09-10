@@ -220,7 +220,7 @@ async def cloudprinter_webhook(
         # We "won" the race to send the email → fetch recipient + name
         order = orders_collection.find_one(
             {"order_id": data.order_reference},
-            {"customer_email": 1, "email": 1, "user_name": 1, "_id": 0},
+            {"customer_email": 1, "email": 1, "user_name": 1, "name": 1, "_id": 0},
         )
         to_email = (order.get("customer_email") or order.get("email") or "").strip() if order else "support@diffrun.com"
         # to_email = "support@diffrun.com"
