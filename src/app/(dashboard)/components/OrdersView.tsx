@@ -1,6 +1,3 @@
-/* eslint-disable react-hooks/exhaustive-deps */
-/* eslint-disable @typescript-eslint/no-explicit-any */
-/* eslint-disable @typescript-eslint/no-unused-vars */
 "use client";
 
 import { useEffect, useState } from "react";
@@ -136,6 +133,7 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
       if (filterDiscountCode !== "all") params.append("filter_discount_code", filterDiscountCode);
       if (excludeTestDiscount) {
         params.append("exclude_discount_code", "TEST");
+        params.append("exclude_discount_code", "REJECTED");
       }
       params.append("sort_by", sortBy);
       params.append("sort_dir", sortDir);
@@ -508,7 +506,7 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
 
 
   return (
-    <div className="py-1 px-2  space-y-3 bg-white rounded shadow-md">
+    <div className="py-2 px-4 space-y-3">
 
 
       <h2 className="text-2xl font-semibold text-black">{title}</h2>

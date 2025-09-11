@@ -8,8 +8,8 @@ export default function LoginPage() {
       <SignIn
         path="/"
         routing="path"
-        signUpUrl="/unauthorized" // prevent open signups
-        afterSignInUrl="/dashboard" // redirect on success
+        signUpUrl="/unauthorized" 
+        fallbackRedirectUrl="/dashboard" 
       />
     </div>
   );

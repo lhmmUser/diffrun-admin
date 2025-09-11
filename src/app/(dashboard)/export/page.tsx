@@ -27,7 +27,7 @@ const Export = () => {
   };
 
   return (
-    <div className="min-h-screen bg-white px-2 py-2 md:px-6 md:py-8">
+    <div className="min-h-screen px-4 py-2">
   
       <header className="mb-8">
         <h1 className="text-2xl font-semibold text-gray-900">Analysis Report Download</h1>

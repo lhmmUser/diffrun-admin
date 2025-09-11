@@ -124,7 +124,7 @@ export default function JobsPage() {
     const currentOrders = orders.slice(startIdx, startIdx + itemsPerPage);
 
     return (
-        <div>
+        <div className="px-4 py-2 space-y-3">
             <h2 className="text-2xl font-semibold mb-4 text-black">Jobs</h2>
 
             {/* Filters */}
@@ -162,7 +162,7 @@ export default function JobsPage() {
             {/* Table */}
             <div className="overflow-x-auto bg-white rounded shadow overflow-visible relative">
                 <table className="min-w-full table-auto text-sm text-left">
-                    <thead className="bg-gray-100 text-gray-700 font-semibold">
+                    <thead className="bg-gray-200 text-gray-700 font-medium">
                         <tr>
                             <th className="p-3">Job ID</th>
                             <th className="p-3">Preview URL</th>

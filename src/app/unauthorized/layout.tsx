@@ -4,6 +4,6 @@ export default function UnauthorizedLayout({
   children: React.ReactNode;
 }) {
   return (
-    <>{children}</> // ✅ No <html> or <body>
+    <>{children}</>
   );
 }

@@ -1,4 +1,5 @@
-from fastapi import FastAPI, BackgroundTasks,Response, Request, Query, HTTPException, Body, Path
+from dateutil import parser  # ensure this is at the top
+from fastapi import FastAPI, BackgroundTasks, Response, Request, Query, HTTPException, Body, Path
 from fastapi.middleware.cors import CORSMiddleware
 from pymongo import MongoClient
 from dotenv import load_dotenv
@@ -52,6 +53,7 @@ EMAIL_TO_RAW = os.getenv("EMAIL_TO", "")
 EMAIL_TO = [e.strip() for e in EMAIL_TO_RAW.split(",") if e.strip()]
 SMTP_USER = os.getenv("SMTP_USER", EMAIL_USER)
 SMTP_PASS = os.getenv("SMTP_PASS", EMAIL_PASS)
+NUDGE_MIN_WORKFLOWS = int(os.getenv("NUDGE_MIN_WORKFLOWS", "13"))
 
 MONGO_URI_df = os.getenv("MONGO_URI_df")
 client_df = MongoClient(MONGO_URI_df)
@@ -60,24 +62,41 @@ collection_df = df_db["user-data"]
 
 scheduler = BackgroundScheduler(timezone=IST_TZ)
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
         if not scheduler.running:
             scheduler.start()
 
-        # register export job (your existing one)
         scheduler.add_job(
             _run_export_and_email,
             trigger=CronTrigger(hour="0,3,6,9,12,15,18,21", minute="0", timezone=IST_TZ),
+            trigger=CronTrigger(hour="0,3,6,9,12,15,18",
+                                minute="0", timezone=IST_TZ),
             id="xlsx_export_fixed_ist_times",
             replace_existing=True,
             coalesce=True,
             max_instances=1,
         )
 
-        # register nudge job via your function
-        schedule_nudge_emails()
+        scheduler.add_job(
+            send_nudge_email,
+            trigger=CronTrigger(hour="14", minute="0", timezone=IST_TZ),
+            id="nudge_email_daily_14ist",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
+
+        scheduler.add_job(
+            run_feedback_emails_job,
+            trigger=CronTrigger(hour="10", minute="0", timezone=IST_TZ),
+            id="feedback_emails_job",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
 
     except Exception:
         logger.exception("Failed to start APScheduler in lifespan")
@@ -115,18 +134,27 @@ COUNTRY_CODES = {
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
+
+def run_feedback_emails_job():
+    try:
+        cron_feedback_emails(limit=200)
+    except Exception:
+        logger.exception("Error running feedback emails job")
+
+
 def split_full_name(full_name: str) -> tuple[str, str]:
     """Split a full name into first name and last name."""
     if not full_name:
         return ("", "")
-    
+
     parts = full_name.strip().split()
     if len(parts) == 1:
         return (parts[0], "")
     return (" ".join(parts[:-1]), parts[-1])
 
+
 def format_date(date_input: any) -> str:
-    
+
     if not date_input:
         return ""
     try:
@@ -136,7 +164,7 @@ def format_date(date_input: any) -> str:
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
             formatted = dt.astimezone(IST).strftime("%d %b, %I:%M %p")
-            
+
             return formatted
         # If it's a MongoDB extended JSON
         if isinstance(date_input, dict):
@@ -144,13 +172,15 @@ def format_date(date_input: any) -> str:
                 timestamp = int(date_input['$date']['$numberLong']) / 1000
                 dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
                 formatted = dt.astimezone(IST).strftime("%d %b, %I:%M %p")
-                
+
                 return formatted
             elif 'date' in date_input:
-                timestamp = int(date_input['date']['$numberLong']) / 1000 if '$numberLong' in date_input['date'] else int(date_input['date']) / 1000
+                timestamp = int(date_input['date']['$numberLong']) / \
+                    1000 if '$numberLong' in date_input['date'] else int(
+                        date_input['date']) / 1000
                 dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
                 formatted = dt.astimezone(IST).strftime("%d %b, %I:%M %p")
-                
+
                 return formatted
         # If it's an ISO string
         elif isinstance(date_input, str):
@@ -158,7 +188,7 @@ def format_date(date_input: any) -> str:
                 return ""
             dt = datetime.fromisoformat(date_input.replace('Z', '+00:00'))
             formatted = dt.astimezone(IST).strftime("%d %b, %I:%M %p")
-            
+
             return formatted
         else:
             print(f"[DEBUG] Unknown date format")
@@ -167,15 +197,16 @@ def format_date(date_input: any) -> str:
         print(f"[DEBUG] Error formatting date: {e}")
         return ""
 
+
 def format_processed_date(value):
     try:
         if not value:
             logger.warning("🟡 No date_value provided")
             return ""
-        
+
         if isinstance(value, datetime):
             return value.strftime("%d-%m-%Y %H:%M")
-        
+
         if isinstance(value, str):
             try:
                 # Handle both with and without 'Z'
@@ -185,10 +216,12 @@ def format_processed_date(value):
                     dt = datetime.fromisoformat(value)
                 return dt.strftime("%d-%m-%Y %H:%M")
             except Exception as e:
-                logger.warning(f"⚠️ Could not parse string datetime: {value} | Error: {e}")
+                logger.warning(
+                    f"⚠️ Could not parse string datetime: {value} | Error: {e}")
                 return value  # Return original if parsing fails
 
-        logger.warning(f"⚠️ Unknown type for processed_at: {type(value)} -> {value}")
+        logger.warning(
+            f"⚠️ Unknown type for processed_at: {type(value)} -> {value}")
         return str(value)
 
     except Exception as e:
@@ -196,16 +229,152 @@ def format_processed_date(value):
         return ""
 
 
+def _now_ist():
+    return datetime.now(IST_TZ)
+
+
+def _ist_midnight(dt_ist: datetime) -> datetime:
+    return dt_ist.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+@app.get("/stats/orders-rolling7")
+def stats_orders_rolling7(
+    exclude_codes: List[str] = Query(["TEST", "LHMM", "COLLAB"])
+):
+
+    now_ist = _now_ist()
+    # End at end of "today" (inclusive); we’ll bucket by day strings, so it's okay to include today
+    end_curr_ist = _ist_midnight(now_ist) + timedelta(days=1)  # next midnight
+    start_curr_ist = end_curr_ist - timedelta(days=7)          # 7 days window
+    start_prev_ist = start_curr_ist - \
+        timedelta(days=7)        # previous 7 days
+    end_prev_ist = start_curr_ist
+
+    # Convert to UTC instants for matching (Mongo stores UTC/ISO)
+    start_prev_utc = start_prev_ist.astimezone(timezone.utc)
+    end_prev_utc = end_prev_ist.astimezone(timezone.utc)
+    start_curr_utc = start_curr_ist.astimezone(timezone.utc)
+    end_curr_utc = end_curr_ist.astimezone(timezone.utc)
+
+    # Common match pieces
+    discount_ne = [{"discount_code": {"$ne": code}} for code in exclude_codes]
+    base_match = {
+        "paid": True,
+        "order_id": {"$regex": r"^#\d+$"},  # "#1844" style
+        "processed_at": {"$exists": True, "$ne": None},
+        "$and": discount_ne if discount_ne else []
+    }
+
+    # Helper to run a window
+    def _series_for_window(start_utc: datetime, end_utc: datetime):
+        pipeline = [
+            {"$match": base_match},
+            {"$addFields": {"processed_dt": {"$toDate": "$processed_at"}}},
+            {"$match": {"processed_dt": {"$gte": start_utc, "$lt": end_utc}}},
+            {
+                "$group": {
+                    "_id": {
+                        "$dateToString": {
+                            "format": "%Y-%m-%d",
+                            "date": "$processed_dt",
+                            "timezone": "Asia/Kolkata",
+                        }
+                    },
+                    "count": {"$sum": 1},
+                }
+            },
+            {"$sort": {"_id": 1}},
+        ]
+        rows = list(orders_collection.aggregate(pipeline))
+        return {r["_id"]: r["count"] for r in rows}
+
+    prev_map = _series_for_window(start_prev_utc, end_prev_utc)
+    curr_map = _series_for_window(start_curr_utc, end_curr_utc)
+
+    # Build aligned label list for current 7 days (IST) and fill zeros
+    labels = []
+    curr_series = []
+    prev_series = []
+
+    for i in range(7, 0, -1):
+        day_ist = end_curr_ist - timedelta(days=i)
+        key = day_ist.strftime("%Y-%m-%d")
+        labels.append(key)
+        curr_series.append(int(curr_map.get(key, 0)))
+
+        # prev day is exactly -7 days aligned
+        prev_key = (day_ist - timedelta(days=7)).strftime("%Y-%m-%d")
+        prev_series.append(int(prev_map.get(prev_key, 0)))
+
+    return {
+        "labels": labels,                 # e.g., ["2025-09-04", ...]
+        "current": curr_series,           # ints
+        "previous": prev_series,          # ints
+        "window": {
+            "prev_ist": [start_prev_ist.isoformat(), end_prev_ist.isoformat()],
+            "curr_ist": [start_curr_ist.isoformat(), end_curr_ist.isoformat()],
+        },
+        "exclusions": exclude_codes,
+    }
+
+
+@app.get("/orders/hash-ids")
+def list_hash_ids(
+    exclude_codes: List[str] = Query(["TEST", "LHMM", "COLLAB"]),
+    days: int = Query(14, ge=1, le=90),
+):
+    end_ist = _ist_midnight(_now_ist()) + timedelta(days=1)
+    start_ist = end_ist - timedelta(days=days)
+    start_utc = start_ist.astimezone(timezone.utc)
+    end_utc = end_ist.astimezone(timezone.utc)
+
+    discount_ne = [{"discount_code": {"$ne": code}} for code in exclude_codes]
+    query = {
+        "paid": True,
+        "order_id": {"$regex": r"^#\d+$"},
+        "processed_at": {"$exists": True, "$ne": None},
+        "$and": discount_ne if discount_ne else []
+    }
+
+    projection = {"_id": 0, "order_id": 1,
+                  "processed_at": 1, "discount_code": 1}
+    cur = orders_collection.find(query, projection)
+
+    # Filter by processed_at window
+    items = []
+    for doc in cur:
+        try:
+            dt = doc.get("processed_at")
+            if isinstance(dt, str):
+                dt = parser.isoparse(dt)
+            if dt and dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            if dt and (start_utc <= dt < end_utc):
+                items.append({
+                    "order_id": doc["order_id"],
+                    "processed_at": dt.astimezone(IST_TZ).strftime("%Y-%m-%d %H:%M:%S"),
+                })
+        except Exception:
+            continue
+
+    # Sort by time desc
+    items.sort(key=lambda x: x["processed_at"], reverse=True)
+    return {"count": len(items), "items": items}
+
+
 MONGO_URI = os.getenv("MONGO_URI")
 client = MongoClient(MONGO_URI, tz_aware=True)
 db = client["candyman"]
-orders_collection = db["user_details"] 
+orders_collection = db["user_details"]
 
 s3 = boto3.client('s3',
-                  aws_access_key_id = os.getenv("AWS_ACCESS_KEY_ID"),
-                  aws_secret_access_key = os.getenv("AWS_SECRET_ACCESS_KEY"),
-                  region_name = os.getenv("AWS_REGION"))
+                  aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+                  aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+                  region_name=os.getenv("AWS_REGION"))
+
 BUCKET_NAME = "replicacomfy"
+
+
 class CloudprinterWebhookBase(BaseModel):
     apikey: str
     type: str
@@ -215,32 +384,40 @@ class CloudprinterWebhookBase(BaseModel):
     item_reference: Optional[str] = None
     datetime: str
 
+
 class ItemProducedPayload(CloudprinterWebhookBase):
-    pass 
+    pass
+
 
 class ItemErrorPayload(CloudprinterWebhookBase):
     error_code: str
     error_message: str
 
+
 class ItemValidatedPayload(CloudprinterWebhookBase):
     pass
+
 
 class ItemCanceledPayload(CloudprinterWebhookBase):
     pass
 
+
 class CloudprinterOrderCanceledPayload(CloudprinterWebhookBase):
     pass
 
+
 class ItemDeletePayload(CloudprinterWebhookBase):
     pass
+
 
 class ItemShippedPayload(CloudprinterWebhookBase):
     tracking: str
     shipping_option: str
 
+
 class UnapproveRequest(BaseModel):
-    job_ids : List[str]
-    
+    job_ids: List[str]
+
 
 def generate_book_title(book_id, child_name):
     if not child_name:
@@ -260,6 +437,7 @@ def generate_book_title(book_id, child_name):
         return f"Many Dreams of {child_name}"
     else:
         return f"{child_name}'s Storybook"
+
 
 @app.get("/orders")
 def get_orders(
@@ -295,7 +473,8 @@ def get_orders(
         print(f"[DEBUG] Filter discount code: {filter_discount_code}")
         if filter_discount_code.lower() == "none":
             query["discount_amount"] = 0
-            query["paid"] = True  # already set by default, but explicit is good
+            # already set by default, but explicit is good
+            query["paid"] = True
         else:
             query["discount_code"] = filter_discount_code.upper()
 
@@ -344,11 +523,12 @@ def get_orders(
         "cust_status": 1,
     }
 
-    records = list(orders_collection.find(query, projection).sort(sort_field, sort_order))
+    records = list(orders_collection.find(
+        query, projection).sort(sort_field, sort_order))
     result = []
 
     for doc in records:
-        
+
         result.append({
             "order_id": doc.get("order_id", ""),
             "job_id": doc.get("job_id", ""),
@@ -374,11 +554,13 @@ def get_orders(
 
     return result
 
+
 @app.post("/orders/set-cust-status/{order_id}")
 async def set_cust_status(
     order_id: str,
     status: Literal["red", "green"] = Body(..., embed=True),
-    create_if_missing: bool = Query(False, description="Use ?create_if_missing=true to upsert for testing")
+    create_if_missing: bool = Query(
+        False, description="Use ?create_if_missing=true to upsert for testing")
 ):
     # Add index on order_id in Mongo for performance (recommended)
     # orders_collection.create_index("order_id")
@@ -400,8 +582,9 @@ async def set_cust_status(
         "upserted_id": str(result.upserted_id) if result.upserted_id else None,
     }
 
+
 def format_booking_date(processed_at):
-    
+
     try:
         if isinstance(processed_at, datetime):
             dt = processed_at
@@ -418,14 +601,15 @@ def format_booking_date(processed_at):
         print(f"Error formatting processed_at: {e}")
         return "N/A"
 
+
 @app.get("/orders/{order_id}")
 def get_order_detail(order_id: str):
     # Find the order with the given order_id
     order = orders_collection.find_one({"order_id": order_id})
-    
+
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
-    
+
     # Format the response with all necessary fields
     return {
         "order_id": order.get("order_id", ""),
@@ -446,6 +630,7 @@ def get_order_detail(order_id: str):
         }
     }
 
+
 def get_pdf_page_count(pdf_url: str) -> int:
     try:
         # Download the PDF
@@ -456,12 +641,13 @@ def get_pdf_page_count(pdf_url: str) -> int:
         # Read the PDF content
         pdf_content = io.BytesIO(response.content)
         pdf_reader = PyPDF2.PdfReader(pdf_content)
-        
+
         # Get the page count
         return len(pdf_reader.pages)
     except Exception as e:
         print(f"Error counting PDF pages: {str(e)}")
         return 35  # Fallback to default value
+
 
 def get_product_details(book_style: str) -> tuple[str, str]:
     if book_style == "paperback":  # Exact match with database value
@@ -470,7 +656,8 @@ def get_product_details(book_style: str) -> tuple[str, str]:
         return ("Hardcover", "photobook_cw_s210_s_fc")
     else:  # Fallback to hardcover if unknown
         return ("Hardcover", "photobook_cw_s210_s_fc")
-    
+
+
 def get_shipping_level(country_code: str) -> str:
     if country_code == "IN":
         return "cp_saver"
@@ -478,9 +665,11 @@ def get_shipping_level(country_code: str) -> str:
         return "cp_ground"
     return "cp_ground"  # default fallback
 
+
 @app.post("/orders/approve-printing")
 async def approve_printing(order_ids: List[str]):
-    CLOUDPRINTER_API_KEY = os.getenv("CLOUDPRINTER_API_KEY", "1414e4bd0220dc1e518e268937ff18a3")
+    CLOUDPRINTER_API_KEY = os.getenv(
+        "CLOUDPRINTER_API_KEY", "1414e4bd0220dc1e518e268937ff18a3")
     CLOUDPRINTER_API_URL = "https://api.cloudprinter.com/cloudcore/1.0/orders/add"
 
     results = []
@@ -491,8 +680,8 @@ async def approve_printing(order_ids: List[str]):
         if not order:
             print(f"Order not found in database: {order_id}")
             results.append({
-                "order_id": order_id, 
-                "status": "error", 
+                "order_id": order_id,
+                "status": "error",
                 "message": "Order not found",
                 "step": "database_lookup"
             })
@@ -505,13 +694,15 @@ async def approve_printing(order_ids: List[str]):
             # Calculate MD5 sums for the PDFs
             book_url = order.get("book_url", "")
             cover_url = order.get("cover_url", "")
-            
+
             print(f"Downloading and calculating MD5 for cover PDF...")
-            cover_md5 = hashlib.md5(requests.get(cover_url).content).hexdigest() if cover_url else None
+            cover_md5 = hashlib.md5(requests.get(
+                cover_url).content).hexdigest() if cover_url else None
             print(f"Cover PDF MD5: {cover_md5}")
 
             print(f"Downloading and calculating MD5 for interior PDF...")
-            interior_md5 = hashlib.md5(requests.get(book_url).content).hexdigest() if book_url else None
+            interior_md5 = hashlib.md5(requests.get(
+                book_url).content).hexdigest() if book_url else None
             print(f"Interior PDF MD5: {interior_md5}")
 
             # Get the page count from the interior PDF
@@ -535,7 +726,8 @@ async def approve_printing(order_ids: List[str]):
             print(f"Selected product: {reference} ({product_code})")
 
             shipping_level = get_shipping_level(country_code)
-            print(f"Selected shipping level: {shipping_level} for {country_code}")
+            print(
+                f"Selected shipping level: {shipping_level} for {country_code}")
 
             # Prepare the request payload
             print(f"Preparing CloudPrinter payload for order {order_id}...")
@@ -584,7 +776,7 @@ async def approve_printing(order_ids: List[str]):
             }
 
             print(f"Sending request to CloudPrinter for order {order_id}...")
-           
+
             response = requests.post(
                 CLOUDPRINTER_API_URL,
                 json=payload,
@@ -592,7 +784,8 @@ async def approve_printing(order_ids: List[str]):
             )
             response_data = response.json()
 
-            print(f"CloudPrinter API Response (Status {response.status_code}): {response_data}")
+            print(
+                f"CloudPrinter API Response (Status {response.status_code}): {response_data}")
 
             if response.status_code in [200, 201]:
                 print(f"Updating order status in database for {order_id}...")
@@ -615,8 +808,10 @@ async def approve_printing(order_ids: List[str]):
                 })
                 print(f"Successfully processed order {order_id}")
             else:
-                error_msg = response_data.get("message", "Failed to send to printer")
-                print(f"Failed to send order {order_id} to printer: {error_msg}")
+                error_msg = response_data.get(
+                    "message", "Failed to send to printer")
+                print(
+                    f"Failed to send order {order_id} to printer: {error_msg}")
                 results.append({
                     "order_id": order_id,
                     "status": "error",
@@ -635,6 +830,7 @@ async def approve_printing(order_ids: List[str]):
             })
 
     return results
+
 
 @app.get("/jobs")
 def get_jobs(
@@ -681,7 +877,8 @@ def get_jobs(
         "_id": 0
     }
 
-    records = list(orders_collection.find(query, projection).sort(sort_field, sort_order))
+    records = list(orders_collection.find(
+        query, projection).sort(sort_field, sort_order))
     result = []
 
     for doc in records:
@@ -711,6 +908,7 @@ def get_jobs(
 
     return result
 
+
 @app.get("/stats/jobs-timeline")
 def jobs_timeline(interval: str = Query("day", enum=["day", "week", "month"])):
     # Map interval to MongoDB date format
@@ -732,6 +930,7 @@ def jobs_timeline(interval: str = Query("day", enum=["day", "week", "month"])):
     # Format for frontend
     return [{"date": d["_id"], "count": d["count"]} for d in data]
 
+
 def format_approved_date_for_email(raw):
     try:
         if isinstance(raw, dict) and "$date" in raw:
@@ -745,7 +944,8 @@ def format_approved_date_for_email(raw):
         print(f"Error formatting approved_at: {e}")
     return "N/A"
 
-def personalize_pronoun( gender: str) -> str:
+
+def personalize_pronoun(gender: str) -> str:
     gender = gender.strip().lower()
     if gender == "boy":
         return "his"
@@ -754,15 +954,17 @@ def personalize_pronoun( gender: str) -> str:
     else:
         return "their"  # fallback to original if gender is unknown
 
+
 @app.post("/send-feedback-email/{job_id}")
 def send_feedback_email(job_id: str, background_tasks: BackgroundTasks):
     order = orders_collection.find_one({"job_id": job_id})
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
-    
+
     recipient_email = order.get("email", "")
     if not recipient_email:
-        raise HTTPException(status_code=400, detail="No email found for this order")
+        raise HTTPException(
+            status_code=400, detail="No email found for this order")
 
     try:
         html_content = f"""
@@ -800,7 +1002,7 @@ def send_feedback_email(job_id: str, background_tasks: BackgroundTasks):
                 <h2 style="color: #333; font-size: 15px;">Hey there {order.get("user_name")},</h2>
 
                 <p style="font-size: 14px; color: #555;">
-                We truly hope {order.get("name", "")} is enjoying {personalize_pronoun(order.get("gender","   "))} magical storybook, <strong>{generate_book_title(order.get("book_id"), order.get("name"))}</strong>! 
+                We truly hope {order.get("name", "")} is enjoying {personalize_pronoun(order.get("gender", "   "))} magical storybook, <strong>{generate_book_title(order.get("book_id"), order.get("name"))}</strong>! 
                 At Diffrun, we are dedicated to crafting personalized storybooks that inspire joy, imagination, and lasting memories for every child. 
                 Your feedback means the world to us. We'd be grateful if you could share your experience.
                 </p>
@@ -885,7 +1087,7 @@ def send_feedback_email(job_id: str, background_tasks: BackgroundTasks):
         """
 
         msg = EmailMessage()
-        msg["Subject"] = f"We'd love your feedback on {order.get("name", "")}'s Storybook!"
+        msg["Subject"] = f"We'd love your feedback on {order.get('name', '')}'s Storybook!"
         msg["From"] = f"Diffrun Team <{os.getenv('EMAIL_ADDRESS')}>"
         msg["To"] = order.get("email", "")
         msg.set_content("This email contains HTML content.")
@@ -909,8 +1111,9 @@ def send_feedback_email(job_id: str, background_tasks: BackgroundTasks):
         logger.error(f"❌ Failed to send feedback email: {e}")
         raise HTTPException(status_code=500, detail="Failed to send email.")
 
-    #background_tasks.add_task(send_email, recipient_email, subject, html_body)
+    # background_tasks.add_task(send_email, recipient_email, subject, html_body)
     return {"message": "Feedback email queued"}
+
 
 def send_email(to_email: str, subject: str, body: str):
     msg = EmailMessage()
@@ -923,7 +1126,7 @@ def send_email(to_email: str, subject: str, body: str):
         # OPTION A – Port 465 (SSL from the start)
         EMAIL_USER = os.getenv("EMAIL_ADDRESS")
         EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
-        
+
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
             smtp.login(EMAIL_USER, EMAIL_PASSWORD)
             smtp.send_message(msg)
@@ -932,38 +1135,38 @@ def send_email(to_email: str, subject: str, body: str):
     except Exception as e:
         print(f"❌ Error sending email to {to_email}: {e}")
 
+
 def send_nudge_email():
     try:
         now = datetime.now(timezone.utc)
         cutoff_24h_ago = now - timedelta(hours=24)
         created_after = datetime(2025, 7, 23, tzinfo=timezone.utc)
 
-        query = {
-            "paid": False,
-            "nudge_sent": False, 
-            "created_at": {
-                "$gte": created_after,
-                "$lt": cutoff_24h_ago
-            },
-            "workflows": {"$exists": True}
-        }
+        pipeline = [
+            {"$match": {
+                "paid": False,
+                "nudge_sent": False,
+                "created_at": {"$gte": created_after, "$lt": cutoff_24h_ago},
+                "workflows": {"$exists": True},
+                "email": {"$exists": True, "$ne": None, "$not": {"$regex": "@lhmm\\.in$", "$options": "i"}}
+            }},
+            {"$match": {
+                "$expr": {
+                    "$gte": [
+                        {"$size": {"$objectToArray": "$workflows"}},
+                        NUDGE_MIN_WORKFLOWS
+                    ]
+                }
+            }},
+            {"$sort": {"email": 1, "created_at": -1}},
+            {"$group": {"_id": "$email", "doc": {"$first": "$$ROOT"}}},
+            {"$replaceRoot": {"newRoot": "$doc"}},
+            {"$limit": 1000},
+            {"$project": {"email": 1, "user_name": 1, "name": 1, "job_id": 1}}
+        ]
 
-        users = list(orders_collection.find(query))
-
-        latest_per_email = {}
-
-        for u in users:
-            email = u.get("email")
-            if not email or "lhmm.in" in email:
-                continue
-
-            if len(u.get("workflows", {})) != 10:
-                continue
-
-            if email not in latest_per_email or u["created_at"] > latest_per_email[email]["created_at"]:
-                latest_per_email[email] = u
-
-        for user in latest_per_email.values():
+        candidates = list(orders_collection.aggregate(pipeline))
+        for user in candidates:
             try:
                 send_nudge_email_to_user(
                     email=user["email"],
@@ -971,31 +1174,33 @@ def send_nudge_email():
                     child_name=user.get("name", "your child"),
                     job_id=user["job_id"]
                 )
-
                 orders_collection.update_one(
-                    {"_id": user["_id"]},
-                    {"$set": {"nudge_sent": True}}
+                    {"job_id": user["job_id"]},
+                    {"$set": {
+                        "nudge_sent": True,
+                        "nudge_sent_at": datetime.now(timezone.utc)
+                    }}
                 )
-
                 logger.info(f"✅ Sent nudge email to {user['email']}")
-
             except Exception as e:
-                logger.error(f"❌ Error sending email to {user.get('email')}: {str(e)}")
-
+                logger.error(
+                    f"❌ Error sending email to {user.get('email')}: {str(e)}")
     except Exception as e:
         logger.error(f"❌ Nudge email task failed: {str(e)}")
 
+
 def send_nudge_email_to_user(email: str, user_name: str, child_name: str, job_id: str):
-   
+
     order = orders_collection.find_one({"job_id": job_id})
     if not order:
         logger.warning(f"⚠️ Could not find order for job_id={job_id}")
         return
 
-    preview_link = order.get("preview_url", f"https://diffrun.com/preview/{job_id}")
+    preview_link = order.get(
+        "preview_url", f"https://diffrun.com/preview/{job_id}")
     user_name = user_name.strip().title() or "there"
     child_name = child_name.strip().title() or "your child"
-    
+
     html_content = f"""
     <html>
         <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
@@ -1023,19 +1228,20 @@ def send_nudge_email_to_user(email: str, user_name: str, child_name: str, job_id
         </body>
     </html>
     """
-    
+
     msg = EmailMessage()
     msg["Subject"] = f"{child_name}'s Diffrun Storybook is waiting!"
     msg["From"] = f"Diffrun Team <{os.getenv('EMAIL_ADDRESS')}>"
     msg["To"] = email
     msg.add_alternative(html_content, subtype="html")
-   
+
     EMAIL_USER = os.getenv("EMAIL_ADDRESS")
     EMAIL_PASS = os.getenv("EMAIL_PASSWORD")
-    
+
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
         smtp.login(EMAIL_USER, EMAIL_PASS)
         smtp.send_message(msg)
+
 
 @app.post("/trigger-nudge-emails")
 async def trigger_nudge_emails(background_tasks: BackgroundTasks):
@@ -1043,20 +1249,9 @@ async def trigger_nudge_emails(background_tasks: BackgroundTasks):
         background_tasks.add_task(send_nudge_email)
         return {"status": "success", "message": "Nudge email process started"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error starting task: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Error starting task: {str(e)}")
 
-def schedule_nudge_emails():
-    if not scheduler.running:
-        scheduler.start()
-
-    scheduler.add_job(
-        send_nudge_email,
-        trigger=CronTrigger(hour="14", minute="0", timezone=IST_TZ),
-        id="nudge_email_daily_14ist",
-        replace_existing=True,
-        coalesce=True,
-        max_instances=1,
-    )
 
 @app.get("/debug/nudge-candidates")
 def debug_nudge_candidates():
@@ -1064,62 +1259,49 @@ def debug_nudge_candidates():
     min_created_at = datetime(2025, 7, 23, tzinfo=timezone.utc)
     cutoff_time = now - timedelta(hours=24)
 
-    query = {
-        "paid": False,
-        "nudge_sent": False,
-        "created_at": {
-            "$gte": min_created_at,
-            "$lt": cutoff_time
-        },
-        "workflows": {"$exists": True}
-    }
-
-    users = list(orders_collection.find(query, {
-        "email": 1,
-        "user_name": 1,
-        "name": 1,
-        "job_id": 1,
-        "created_at": 1,
-        "workflows": 1,
-        "_id": 0
-    }))
-
-    latest_per_email = {}
-
-    for u in users:
-        email = u.get("email") or ""
-        if not email or "lhmm.in" in email:
-            continue
-
-        if len(u.get("workflows", {})) != 10:
-            continue
-
-        if email not in latest_per_email or u["created_at"] > latest_per_email[email]["created_at"]:
-            latest_per_email[email] = {
-                "email": email,
-                "name": u.get("name"),
-                "user_name": u.get("user_name"),
-                "job_id": u.get("job_id"),
-                "created_at": u.get("created_at")
+    pipeline = [
+        {"$match": {
+            "paid": False,
+            "nudge_sent": False,
+            "created_at": {"$gte": min_created_at, "$lt": cutoff_time},
+            "workflows": {"$exists": True},
+            "email": {"$exists": True, "$ne": None, "$not": {"$regex": "@lhmm\\.in$", "$options": "i"}}
+        }},
+        {"$match": {
+            "$expr": {
+                "$gte": [
+                    {"$size": {"$objectToArray": "$workflows"}},
+                    NUDGE_MIN_WORKFLOWS
+                ]
             }
+        }},
+        {"$sort": {"email": 1, "created_at": -1}},
+        {"$group": {"_id": "$email", "doc": {"$first": "$$ROOT"}}},
+        {"$replaceRoot": {"newRoot": "$doc"}},
+        {"$project": {
+            "_id": 0, "email": 1, "user_name": 1, "name": 1, "job_id": 1, "created_at": 1
+        }}
+    ]
 
-    return list(latest_per_email.values())
+    return list(orders_collection.aggregate(pipeline))
+
 
 @app.post("/orders/unapprove")
 async def unapprove_orders(req: UnapproveRequest):
     for job_id in req.job_ids:
         result = orders_collection.update_one(
-            {"job_id":job_id},
-            {"$set": {"approved": False}}    
-            )
+            {"job_id": job_id},
+            {"$set": {"approved": False}}
+        )
     if result.modified_count == 0:
-        raise HTTPException(status_code=404, detail=f"No order found with job_id {job_id}")
+        raise HTTPException(
+            status_code=404, detail=f"No order found with job_id {job_id}")
 
     prefix = f"output/{job_id}/"
     folders_to_move = ["final_coverpage/", "approved_output/"]
     for folder in folders_to_move:
         old_prefix = prefix + folder
-        new_prefix = prefix + "previous/" + folder  
+        new_prefix = prefix + "previous/" + folder
 
         response = s3.list_objects_v2(Bucket=BUCKET_NAME, Prefix=old_prefix)
 
@@ -1130,12 +1312,12 @@ async def unapprove_orders(req: UnapproveRequest):
             src_key = obj["Key"]
             dst_key = src_key.replace(old_prefix, new_prefix, 1)
 
-            s3.copy_object(Bucket=BUCKET_NAME, CopySource={"Bucket": BUCKET_NAME, "Key": src_key}, Key=dst_key)
+            s3.copy_object(Bucket=BUCKET_NAME, CopySource={
+                           "Bucket": BUCKET_NAME, "Key": src_key}, Key=dst_key)
             s3.delete_object(Bucket=BUCKET_NAME, Key=src_key)
 
     return {"message": f"Unapproved {len(req.job_ids)} orders successfully"}
 
-from dateutil import parser  # ensure this is at the top
 
 @app.get("/export-orders-csv")
 def export_orders_csv():
@@ -1144,7 +1326,7 @@ def export_orders_csv():
         "approved", "created_date", "created_time", "creation_hour",
         "payment_date", "payment_time", "payment_hour",
         "locale", "name", "user_name", "shipping_address.city", "shipping_address.province",
-        "order_id", "discount_code", "paypal_capture_id", "transaction_id", 
+        "order_id", "discount_code", "paypal_capture_id", "transaction_id",
     ]
 
     projection = {
@@ -1178,8 +1360,10 @@ def export_orders_csv():
         writer.writerow(fields)
 
         for doc in cursor:
-            created_date, created_time, creation_hour = format_datetime_parts(doc.get("created_at"))
-            payment_date, payment_time, payment_hour = format_datetime_parts(doc.get("processed_at"))
+            created_date, created_time, creation_hour = format_datetime_parts(
+                doc.get("created_at"))
+            payment_date, payment_time, payment_hour = format_datetime_parts(
+                doc.get("processed_at"))
 
             row = []
             for field in fields:
@@ -1224,8 +1408,9 @@ def export_orders_csv():
         temp_file.flush()
         return FileResponse(temp_file.name, media_type="text/csv", filename="orders_export.csv")
 
+
 IST_OFFSET = timedelta(hours=5, minutes=30)
-TIMESTAMP_FIELD = "time_req_recieved" 
+TIMESTAMP_FIELD = "time_req_recieved"
 
 INSTANCE_IDS = [
     "i-0b1f98e12f9344f9f",  
@@ -1235,7 +1420,12 @@ INSTANCE_IDS = [
     "i-0e9f5ac83b77815a0",
     "i-0e6c27e8b058676f8",
     "i-0bfbcb4615bc6b3e3"  
+    "i-0b1f98e12f9344f9f",
+    "i-071c197c88296ab8a",
+    "i-03dbcc37d0a59609d",
+    "i-00de64646abb34ad2",
 ]
+
 
 def _parse_dt(value):
     """Return naive datetime from common string or datetime inputs; None if not parseable."""
@@ -1257,6 +1447,7 @@ def _parse_dt(value):
                 pass
     return None
 
+
 def _pick_excel_engine():
     try:
         import xlsxwriter  # noqa: F401
@@ -1267,7 +1458,8 @@ def _pick_excel_engine():
             return "openpyxl"
         except Exception:
             return None
-        
+
+
 def _fmt_ist(dt):
     try:
         if dt is None:
@@ -1283,7 +1475,9 @@ def _fmt_ist(dt):
     except Exception:
         return ""
 
+
 AWS_REGION = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
+
 
 def _get_ec2_status_rows():
     try:
@@ -1343,12 +1537,14 @@ def _get_ec2_status_rows():
     except Exception as e:
         return [], f"Unexpected error: {e}"
 
+
 @app.get("/download-csv")
 def download_csv(from_date: str = Query(...), to_date: str = Query(...)):
     try:
         # Validate date range (inclusive to 23:59:59 for to_date)
         from_dt = datetime.strptime(from_date, "%Y-%m-%d")
-        to_dt = datetime.strptime(to_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
+        to_dt = datetime.strptime(
+            to_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
         if from_dt > to_dt:
             return Response(content="from_date cannot be after to_date", media_type="text/plain", status_code=400)
 
@@ -1381,7 +1577,8 @@ def download_csv(from_date: str = Query(...), to_date: str = Query(...)):
 
                 # IST adjusted timestamp (UTC + 05:30)
                 ist_ts = base_ts + IST_OFFSET
-                r["date-hour"] = ist_ts.strftime("%Y-%m-%d %H:%M:%S")  # combined datetime for sheets
+                # combined datetime for sheets
+                r["date-hour"] = ist_ts.strftime("%Y-%m-%d %H:%M:%S")
                 r["ist-date"] = ist_ts.strftime("%d/%m/%Y")
                 r["ist-hour"] = ist_ts.strftime("%H")
 
@@ -1394,24 +1591,28 @@ def download_csv(from_date: str = Query(...), to_date: str = Query(...)):
 
         # Write CSV
         csv_file = io.StringIO()
-        writer = csv.DictWriter(csv_file, fieldnames=fieldnames, extrasaction="ignore")
+        writer = csv.DictWriter(
+            csv_file, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows_out)
         csv_file.seek(0)
 
         # Name is overridden by your frontend anyway; leaving static is fine
-        headers = {"Content-Disposition": "attachment; filename=darkfantasy_orders.csv"}
+        headers = {
+            "Content-Disposition": "attachment; filename=darkfantasy_orders.csv"}
         return StreamingResponse(csv_file, media_type="text/csv", headers=headers)
 
     except Exception as e:
         return Response(content=f"❌ Error: {str(e)}", media_type="text/plain", status_code=500)
-    
+
+
 @app.get("/download-xlsx")
 def download_xlsx(from_date: str = Query(...), to_date: str = Query(...)):
     try:
         # Validate range
         from_dt = datetime.strptime(from_date, "%Y-%m-%d")
-        to_dt = datetime.strptime(to_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
+        to_dt = datetime.strptime(
+            to_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
         if from_dt > to_dt:
             return Response("from_date cannot be after to_date", media_type="text/plain", status_code=400)
 
@@ -1437,11 +1638,11 @@ def download_xlsx(from_date: str = Query(...), to_date: str = Query(...)):
 
             if base_ts is not None:
                 ist_ts = base_ts + IST_OFFSET  # remove if DB already stores IST
-                r["date"]      = base_ts.strftime("%d/%m/%Y")
-                r["hour"]      = base_ts.strftime("%H")
+                r["date"] = base_ts.strftime("%d/%m/%Y")
+                r["hour"] = base_ts.strftime("%H")
                 r["date-hour"] = ist_ts.strftime("%Y-%m-%d %H:%M:%S")
-                r["ist-date"]  = ist_ts.strftime("%d/%m/%Y")
-                r["ist-hour"]  = ist_ts.strftime("%H")
+                r["ist-date"] = ist_ts.strftime("%d/%m/%Y")
+                r["ist-hour"] = ist_ts.strftime("%H")
 
             rows_out.append(r)
 
@@ -1502,7 +1703,6 @@ def download_xlsx(from_date: str = Query(...), to_date: str = Query(...)):
                     )
                 ec2_df.to_excel(writer, index=False, sheet_name="ec2_status")
 
-
             # Freeze panes (engine-specific)
             if engine == "xlsxwriter":
                 # ws1 = writer.sheets["orders"]
@@ -1533,7 +1733,8 @@ def download_xlsx(from_date: str = Query(...), to_date: str = Query(...)):
     except Exception as e:
         # Return the message so you see the real cause in the browser too
         return Response(f"❌ Error building XLSX: {e}", media_type="text/plain", status_code=500)
-    
+
+
 def _export_xlsx_bytes(from_dt_utc: datetime, to_dt_utc: datetime) -> Tuple[bytes, str]:
     """
     Build an XLSX with:
@@ -1561,12 +1762,14 @@ def _export_xlsx_bytes(from_dt_utc: datetime, to_dt_utc: datetime) -> Tuple[byte
             r["ist-hour"] = ""
 
             if base_ts is not None:
-                ist_ts = base_ts + IST_OFFSET  # keep your assumption (DB time -> IST)
-                r["date"]      = base_ts.strftime("%d/%m/%Y")        # UTC date (string)
-                r["hour"]      = base_ts.strftime("%H")              # UTC hour
+                # keep your assumption (DB time -> IST)
+                ist_ts = base_ts + IST_OFFSET
+                r["date"] = base_ts.strftime(
+                    "%d/%m/%Y")        # UTC date (string)
+                r["hour"] = base_ts.strftime("%H")              # UTC hour
                 r["date-hour"] = ist_ts.strftime("%Y-%m-%d %H:%M:%S")
-                r["ist-date"]  = ist_ts.strftime("%d/%m/%Y")
-                r["ist-hour"]  = ist_ts.strftime("%H")
+                r["ist-date"] = ist_ts.strftime("%d/%m/%Y")
+                r["ist-hour"] = ist_ts.strftime("%H")
 
             rows_out.append(r)
 
@@ -1638,6 +1841,7 @@ def _export_xlsx_bytes(from_dt_utc: datetime, to_dt_utc: datetime) -> Tuple[byte
     buf.seek(0)
     return buf.read(), filename
 
+
 def _send_email_with_attachment(subject: str, body_html: str, attachment_name: str, attachment_bytes: bytes):
     """
     Sends an email with XLSX attachment via SMTP (STARTTLS).
@@ -1646,15 +1850,16 @@ def _send_email_with_attachment(subject: str, body_html: str, attachment_name: s
         logger.error("Email env vars missing; cannot send export email.")
         return
     if not EMAIL_TO:
-        logger.error("EMAIL_TO is empty after parsing. Set EMAIL_TO='a@x.com,b@y.com'.")
+        logger.error(
+            "EMAIL_TO is empty after parsing. Set EMAIL_TO='a@x.com,b@y.com'.")
         return
-
 
     msg = EmailMessage()
     msg["From"] = EMAIL_FROM
     msg["To"] = ", ".join(EMAIL_TO)
     msg["Subject"] = subject
-    msg.set_content("This email contains HTML content. Please view in an HTML-capable client.")
+    msg.set_content(
+        "This email contains HTML content. Please view in an HTML-capable client.")
     msg.add_alternative(body_html, subtype="html")
 
     msg.add_attachment(
@@ -1670,12 +1875,14 @@ def _send_email_with_attachment(subject: str, body_html: str, attachment_name: s
             server.starttls()
             server.login(SMTP_USER, SMTP_PASS)
             server.send_message(msg)
-        logger.info(f"SMTP: host={SMTP_HOST}:{SMTP_PORT} as={SMTP_USER} to={EMAIL_TO}")
+        logger.info(
+            f"SMTP: host={SMTP_HOST}:{SMTP_PORT} as={SMTP_USER} to={EMAIL_TO}")
 
         logger.info("📧 Export email sent.")
     except Exception as e:
         logger.exception("Failed to send export email")
-    
+
+
 def _run_export_and_email():
     try:
         # IST-aligned window
@@ -1685,7 +1892,7 @@ def _run_export_and_email():
 
         # Convert IST -> naive UTC for Mongo (if DB stores UTC)
         from_utc = from_ist.astimezone(pytz.utc).replace(tzinfo=None)
-        to_utc   = to_ist.astimezone(pytz.utc).replace(tzinfo=None)
+        to_utc = to_ist.astimezone(pytz.utc).replace(tzinfo=None)
 
         xlsx_bytes, fname = _export_xlsx_bytes(from_utc, to_utc)
 
@@ -1703,21 +1910,26 @@ def _run_export_and_email():
     except Exception:
         logger.exception("Scheduled export failed")
 
+
 @app.get("/debug/scheduler-jobs")
 def debug_scheduler_jobs():
     # Shows what jobs are registered and their next run times
     out = []
     for j in scheduler.get_jobs():
         nxt = j.next_run_time
-        nxt_ist = nxt.astimezone(IST_TZ).strftime("%Y-%m-%d %H:%M:%S %Z") if nxt else None
-        out.append({"id": j.id, "next_run_ist": nxt_ist, "trigger": str(j.trigger)})
+        nxt_ist = nxt.astimezone(IST_TZ).strftime(
+            "%Y-%m-%d %H:%M:%S %Z") if nxt else None
+        out.append({"id": j.id, "next_run_ist": nxt_ist,
+                   "trigger": str(j.trigger)})
     return out
+
 
 @app.post("/debug/run-export-now")
 def debug_run_export_now():
     # Manually trigger the XLSX export + email once
     _run_export_and_email()
     return {"status": "ok"}
+
 
 @app.post("/debug/email-ping")
 def debug_email_ping():
@@ -1738,16 +1950,17 @@ def debug_email_ping():
         logger.exception("Ping email failed")
         return {"ok": False, "error": str(e)}
 
+
 def _utc_bounds_for_ist_day(days_ago: int = 6):
-    """UTC bounds for the IST calendar day 'days_ago' from today."""
     now_ist = datetime.now(IST)
-    target_date = (now_ist - timedelta(days=days_ago)).date()   # e.g., yesterday for days_ago=1
+    target_date = (now_ist - timedelta(days=days_ago)).date()
     start_ist = datetime.combine(target_date, datetime.min.time(), tzinfo=IST)
-    end_ist = start_ist + timedelta(days=6)
+    end_ist = start_ist + timedelta(days=1)
     return start_ist.astimezone(timezone.utc), end_ist.astimezone(timezone.utc)
 
+
 @app.get("/debug/feedback-candidates")
-def debug_feedback_candidates(days_ago: int = 6):
+def feedback_eligible(days_ago: int = 6, limit: int = 500):
     start_utc, end_utc = _utc_bounds_for_ist_day(days_ago)
 
     pipeline = [
@@ -1755,126 +1968,136 @@ def debug_feedback_candidates(days_ago: int = 6):
             "feedback_email": {"$ne": True},
             "shipping_option": "bluedart_in_domestic",
             "shipped_at": {"$exists": True, "$ne": None},
-            "$or": [
-                {"discount_code": {"$exists": False}},
-                {"discount_code": {"$ne": "TEST"}}
-            ],
         }},
         {"$addFields": {"shipped_dt": {"$toDate": "$shipped_at"}}},
         {"$match": {"shipped_dt": {"$gte": start_utc, "$lt": end_utc}}},
         {"$project": {
             "_id": 0,
             "order_id": 1, "job_id": 1, "email": 1,
-            "user_name": 1, "name": 1, "gender": 1, "book_id": 1,
-            "shipping_option": 1, "discount_code": 1,
-            "shipped_at": 1, "shipped_dt": 1
-        }},
-        {"$sort": {"shipped_dt": 1, "order_id": 1}},
-        {"$limit": 500},
-    ]
-
-    items = list(orders_collection.aggregate(pipeline))
-    return {
-        "ist_day": str((datetime.now(IST) - timedelta(days=days_ago)).date()),
-        "bounds_utc": [start_utc.isoformat(), end_utc.isoformat()],
-        "count": len(items),
-        "candidates": items
-    }
-
-@app.post("/cron/feedback-emails")
-def cron_feedback_emails(limit: int = 200):
-    pipeline = [
-        {"$match": {
-            "feedback_email": {"$ne": True},
-            "shipping_option": "bluedart_in_domestic",
-            "shipped_at": {"$exists": True, "$ne": None},
-            # discount_code != TEST (or missing)
-            "$or": [
-                {"discount_code": {"$exists": False}},
-                {"discount_code": {"$ne": "TEST"}}
-            ],
-        }},
-        # allow only: cust_status missing OR "green"
-        {"$match": {
-            "$or": [
-                {"cust_status": {"$exists": False}},
-                {"cust_status": "green"}
-            ]
-        }},
-        {"$addFields": {"shipped_dt": {"$toDate": "$shipped_at"}}},
-        # shipped_dt is 6–7 IST days ago
-        {"$match": {"$expr": {
-            "$and": [
-                {"$gte": [
-                    {"$dateDiff": {
-                        "startDate": "$shipped_dt",
-                        "endDate": "$$NOW",
-                        "unit": "day",
-                        "timezone": "Asia/Kolkata"
-                    }},
-                    6
-                ]},
-                {"$lt": [
-                    {"$dateDiff": {
-                        "startDate": "$shipped_dt",
-                        "endDate": "$$NOW",
-                        "unit": "day",
-                        "timezone": "Asia/Kolkata"
-                    }},
-                    7
-                ]}
-            ]
-        }}},
-        {"$project": {
-            "_id": 0,
-            "order_id": 1,
-            "job_id": 1,
-            "email": 1,
-            "name": 1,
-            "user_name": 1,
-            "gender": 1,
-            "book_id": 1,
-            "shipping_option": 1,
-            "discount_code": 1,
-            "shipped_at": 1,
-            "shipped_dt": 1,
-            "cust_status": 1
+            "name": 1, "user_name": 1, "gender": 1, "book_id": 1,
+            "shipping_option": 1, "shipped_at": 1, "shipped_dt": 1
         }},
         {"$sort": {"shipped_dt": 1, "order_id": 1}},
         {"$limit": int(limit)}
     ]
 
+    items = list(orders_collection.aggregate(pipeline))
+    return {
+        "ist_target_day": str((datetime.now(IST) - timedelta(days=days_ago)).date()),
+        "utc_bounds": [start_utc.isoformat(), end_utc.isoformat()],
+        "count": len(items),
+        "candidates": items
+    }
+
+
+@app.post("/cron/feedback-emails")
+def cron_feedback_emails(limit: int = 200):
+    pipeline = [
+        {
+            "$match": {
+                "feedback_email": {"$ne": True},
+                "shipping_option": "bluedart_in_domestic",
+                "shipped_at": {"$exists": True, "$ne": None},
+                "$or": [
+                    {"discount_code": {"$exists": False}},
+                    {"discount_code": {"$ne": "TEST"}}
+                ],
+            }
+        },
+        {"$addFields": {"shipped_dt": {"$toDate": "$shipped_at"}}},
+        {
+            "$match": {
+                "$expr": {
+                    "$and": [
+                        {
+                            "$gte": [
+                                {
+                                    "$dateDiff": {
+                                        "startDate": "$shipped_dt",
+                                        "endDate": "$$NOW",
+                                        "unit": "day",
+                                        "timezone": "Asia/Kolkata",
+                                    }
+                                },
+                                6,
+                            ]
+                        },
+                        {
+                            "$lt": [
+                                {
+                                    "$dateDiff": {
+                                        "startDate": "$shipped_dt",
+                                        "endDate": "$$NOW",
+                                        "unit": "day",
+                                        "timezone": "Asia/Kolkata",
+                                    }
+                                },
+                                7,
+                            ]
+                        },
+                    ]
+                }
+            }
+        },
+        {
+            "$project": {
+                "_id": 0,
+                "order_id": 1,
+                "job_id": 1,
+                "email": 1,
+                "name": 1,
+                "user_name": 1,
+                "gender": 1,
+                "book_id": 1,
+                "shipping_option": 1,
+                "discount_code": 1,
+                "shipped_at": 1,
+                "shipped_dt": 1,
+            }
+        },
+        {"$sort": {"shipped_dt": 1, "order_id": 1}},
+        {"$limit": int(limit)},
+    ]
+
     candidates = list(orders_collection.aggregate(pipeline))
 
-    results = {"total": len(candidates), "sent": 0, "skipped": 0, "errors": 0, "details": []}
+    results = {"total": len(candidates), "sent": 0,
+               "skipped": 0, "errors": 0, "details": []}
     for c in candidates:
-        # Defensive guard in case status flips between query and send:
-        if c.get("cust_status") == "red":
-            results["skipped"] += 1
-            results["details"].append({
-                "job_id": c.get("job_id"),
-                "order_id": c.get("order_id"),
-                "status": "skipped",
-                "reason": "cust_status red"
-            })
-            continue
-
         job_id = c.get("job_id")
         email = c.get("email")
         if not job_id or not email:
             results["skipped"] += 1
-            results["details"].append({"job_id": job_id, "order_id": c.get("order_id"),
-                                       "status": "skipped", "reason": "missing job_id or email"})
+            results["details"].append(
+                {
+                    "job_id": job_id,
+                    "order_id": c.get("order_id"),
+                    "status": "skipped",
+                    "reason": "missing job_id or email",
+                }
+            )
             continue
 
         try:
             send_feedback_email(job_id, BackgroundTasks())
             results["sent"] += 1
-            results["details"].append({"job_id": job_id, "order_id": c.get("order_id"),
-                                       "status": "sent", "email": email})
+            results["details"].append(
+                {
+                    "job_id": job_id,
+                    "order_id": c.get("order_id"),
+                    "status": "sent",
+                    "email": email,
+                }
+            )
         except Exception as e:
             results["errors"] += 1
-            results["details"].append({"job_id": job_id, "order_id": c.get("order_id"),
-                                       "status": "error", "error": str(e)})
+            results["details"].append(
+                {
+                    "job_id": job_id,
+                    "order_id": c.get("order_id"),
+                    "status": "error",
+                    "error": str(e),
+                }
+            )
 
     return results
