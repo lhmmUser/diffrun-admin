@@ -69,7 +69,7 @@ async def lifespan(app: FastAPI):
         # register export job (your existing one)
         scheduler.add_job(
             _run_export_and_email,
-            trigger=CronTrigger(hour="0,3,6,9,12,15,18", minute="0", timezone=IST_TZ),
+            trigger=CronTrigger(hour="0,3,6,9,12,15,18,21", minute="0", timezone=IST_TZ),
             id="xlsx_export_fixed_ist_times",
             replace_existing=True,
             coalesce=True,
@@ -1231,7 +1231,10 @@ INSTANCE_IDS = [
     "i-0b1f98e12f9344f9f",  
     "i-071c197c88296ab8a",  
     "i-03dbcc37d0a59609d",  
-    "i-00de64646abb34ad2",  
+    "i-00de64646abb34ad2",
+    "i-0e9f5ac83b77815a0",
+    "i-0e6c27e8b058676f8",
+    "i-0bfbcb4615bc6b3e3"  
 ]
 
 def _parse_dt(value):
@@ -1502,20 +1505,20 @@ def download_xlsx(from_date: str = Query(...), to_date: str = Query(...)):
 
             # Freeze panes (engine-specific)
             if engine == "xlsxwriter":
-                ws1 = writer.sheets["orders"]
-                ws2 = writer.sheets["pivot"]
-                ws3 = writer.sheets.get("ec2_status")
-                if ws1:ws1.freeze_panes(1, 0)  # row 2
-                if ws2:ws2.freeze_panes(1, 1)  # row 2, col B
-                if ws3:ws3.freeze_panes(1, 0)
+                # ws1 = writer.sheets["orders"]
+                ws1 = writer.sheets["pivot"]
+                ws2 = writer.sheets.get("ec2_status")
+                # if ws1:ws1.freeze_panes(1, 0)  # row 2
+                if ws1:ws1.freeze_panes(1, 1)  # row 2, col B
+                if ws2:ws2.freeze_panes(1, 0)
 
             else:  # openpyxl
-                ws1 = writer.sheets.get("orders")
-                ws2 = writer.sheets.get("pivot")
-                ws3 = writer.sheets.get("ec2_status")
-                if ws1 is not None: ws1.freeze_panes = "A2"
-                if ws2 is not None: ws2.freeze_panes = "B2"
-                if ws3 is not None: ws3.freeze_panes = "A2"
+                # ws1 = writer.sheets.get("orders")
+                ws1 = writer.sheets.get("pivot")
+                ws2 = writer.sheets.get("ec2_status")
+                # if ws1 is not None: ws1.freeze_panes = "A2"
+                if ws1 is not None: ws1.freeze_panes = "B2"
+                if ws2 is not None: ws2.freeze_panes = "A2"
 
 
         output.seek(0)
@@ -1625,12 +1628,12 @@ def _export_xlsx_bytes(from_dt_utc: datetime, to_dt_utc: datetime) -> Tuple[byte
         ec2_df.to_excel(writer, index=False, sheet_name=ec2_sheet_name)
 
         # Freeze panes (openpyxl)
-        ws1 = writer.sheets.get("orders")
-        ws2 = writer.sheets.get("pivot")
-        ws3 = writer.sheets.get(ec2_sheet_name)
-        if ws1 is not None: ws1.freeze_panes = "A2"
-        if ws2 is not None: ws2.freeze_panes = "B2"
-        if ws3 is not None: ws3.freeze_panes = "A2"
+        #ws1 = writer.sheets.get("orders")
+        ws1 = writer.sheets.get("pivot")
+        ws2 = writer.sheets.get(ec2_sheet_name)
+        # if ws1 is not None: ws1.freeze_panes = "A2"
+        if ws1 is not None: ws1.freeze_panes = "B2"
+        if ws2 is not None: ws2.freeze_panes = "A2"
 
     buf.seek(0)
     return buf.read(), filename
