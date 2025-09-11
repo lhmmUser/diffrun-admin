@@ -72,8 +72,6 @@ async def lifespan(app: FastAPI):
         scheduler.add_job(
             _run_export_and_email,
             trigger=CronTrigger(hour="0,3,6,9,12,15,18,21", minute="0", timezone=IST_TZ),
-            trigger=CronTrigger(hour="0,3,6,9,12,15,18",
-                                minute="0", timezone=IST_TZ),
             id="xlsx_export_fixed_ist_times",
             replace_existing=True,
             coalesce=True,
