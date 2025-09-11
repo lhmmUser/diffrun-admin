@@ -1484,7 +1484,7 @@ def download_xlsx(from_date: str = Query(...), to_date: str = Query(...)):
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine=engine) as writer:
             # Sheet 1: raw/orders
-            df.to_excel(writer, index=False, sheet_name="orders")
+            # df.to_excel(writer, index=False, sheet_name="orders")
             # Sheet 2: pivot
             pivot.to_excel(writer, sheet_name="pivot")
 
@@ -1623,7 +1623,7 @@ def _export_xlsx_bytes(from_dt_utc: datetime, to_dt_utc: datetime) -> Tuple[byte
     # Write workbook
     buf = BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="orders")
+        # df.to_excel(writer, index=False, sheet_name="orders")
         pivot.to_excel(writer, sheet_name="pivot")
         ec2_df.to_excel(writer, index=False, sheet_name=ec2_sheet_name)
 
