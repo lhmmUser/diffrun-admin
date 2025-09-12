@@ -1415,7 +1415,7 @@ INSTANCE_IDS = [
     "i-00de64646abb34ad2",
     "i-0e9f5ac83b77815a0",
     "i-0e6c27e8b058676f8",
-    "i-0bfbcb4615bc6b3e3"  
+    "i-0bfbcb4615bc6b3e3",  
     "i-0b1f98e12f9344f9f",
     "i-071c197c88296ab8a",
     "i-03dbcc37d0a59609d",
