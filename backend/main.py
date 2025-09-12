@@ -34,6 +34,7 @@ from apscheduler.triggers.cron import CronTrigger
 import pytz
 from io import BytesIO
 from typing import Tuple
+from zoneinfo import ZoneInfo
 
 IST_TZ = pytz.timezone("Asia/Kolkata")
 
@@ -131,13 +132,6 @@ COUNTRY_CODES = {
 }
 
 IST = timezone(timedelta(hours=5, minutes=30))
-
-
-def run_feedback_emails_job():
-    try:
-        cron_feedback_emails(limit=200)
-    except Exception:
-        logger.exception("Error running feedback emails job")
 
 
 def split_full_name(full_name: str) -> tuple[str, str]:
@@ -1134,96 +1128,32 @@ def send_email(to_email: str, subject: str, body: str):
         print(f"❌ Error sending email to {to_email}: {e}")
 
 
-def send_nudge_email():
-    try:
-        now = datetime.now(timezone.utc)
-        cutoff_24h_ago = now - timedelta(hours=24)
-        created_after = datetime(2025, 7, 23, tzinfo=timezone.utc)
-
-        pipeline = [
-            {"$match": {
-                "paid": False,
-                "nudge_sent": False,
-                "created_at": {"$gte": created_after, "$lt": cutoff_24h_ago},
-                "workflows": {"$exists": True},
-                "email": {"$exists": True, "$ne": None, "$not": {"$regex": "@lhmm\\.in$", "$options": "i"}}
-            }},
-            {"$match": {
-                "$expr": {
-                    "$gte": [
-                        {"$size": {"$objectToArray": "$workflows"}},
-                        NUDGE_MIN_WORKFLOWS
-                    ]
-                }
-            }},
-            {"$sort": {"email": 1, "created_at": -1}},
-            {"$group": {"_id": "$email", "doc": {"$first": "$$ROOT"}}},
-            {"$replaceRoot": {"newRoot": "$doc"}},
-            {"$limit": 1000},
-            {"$project": {"email": 1, "user_name": 1, "name": 1, "job_id": 1}}
-        ]
-
-        candidates = list(orders_collection.aggregate(pipeline))
-        for user in candidates:
-            try:
-                send_nudge_email_to_user(
-                    email=user["email"],
-                    user_name=user.get("user_name", "there"),
-                    child_name=user.get("name", "your child"),
-                    job_id=user["job_id"]
-                )
-                orders_collection.update_one(
-                    {"job_id": user["job_id"]},
-                    {"$set": {
-                        "nudge_sent": True,
-                        "nudge_sent_at": datetime.now(timezone.utc)
-                    }}
-                )
-                logger.info(f"✅ Sent nudge email to {user['email']}")
-            except Exception as e:
-                logger.error(
-                    f"❌ Error sending email to {user.get('email')}: {str(e)}")
-    except Exception as e:
-        logger.error(f"❌ Nudge email task failed: {str(e)}")
-
-
-def send_nudge_email_to_user(email: str, user_name: str, child_name: str, job_id: str):
-
+def send_nudge_email_to_user(email: str, user_name: str | None, child_name: str | None, job_id: str):
     order = orders_collection.find_one({"job_id": job_id})
     if not order:
         logger.warning(f"⚠️ Could not find order for job_id={job_id}")
         return
 
-    preview_link = order.get(
-        "preview_url", f"https://diffrun.com/preview/{job_id}")
-    user_name = user_name.strip().title() or "there"
-    child_name = child_name.strip().title() or "your child"
+    preview_link = order.get("preview_url", f"https://diffrun.com/preview/{job_id}")
+
+    user_name  = ((user_name or "").strip().title()) or "there"
+    child_name = ((child_name or "").strip().title()) or "your child"
 
     html_content = f"""
     <html>
-        <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
-            <p>Hi <strong>{user_name}</strong>,</p>
-
-            <p>We noticed you began crafting a personalized storybook for <strong>{child_name}</strong> — and it’s already looking magical!</p>
-
-            <p>Just one more step to bring it to life: preview the story and place your order whenever you’re ready.</p>
-
-            <p style="margin: 32px 0;">
-            <a href="{preview_link}" 
-                style="background-color: #5784ba;
-                    color: white;
-                    padding: 14px 28px;
-                    border-radius: 6px;
-                    text-decoration: none;
-                    font-weight: bold;">
-                Preview & Continue
-            </a>
-            </p>
-
-            <p>Your story is safe and waiting. We’d love for <strong>{child_name}</strong> to see themselves in a story made just for them. 💫</p>
-
-            <p>Warm wishes,<br><strong>The Diffrun Team</strong></p>
-        </body>
+      <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+        <p>Hi <strong>{user_name}</strong>,</p>
+        <p>We noticed you began crafting a personalized storybook for <strong>{child_name}</strong> — and it’s already looking magical!</p>
+        <p>Just one more step to bring it to life: preview the story and place your order whenever you’re ready.</p>
+        <p style="margin: 32px 0;">
+          <a href="{preview_link}" 
+             style="background-color: #5784ba; color: white; padding: 14px 28px; border-radius: 6px; text-decoration: none; font-weight: bold;">
+            Preview & Continue
+          </a>
+        </p>
+        <p>Your story is safe and waiting. We’d love for <strong>{child_name}</strong> to see themselves in a story made just for them. 💫</p>
+        <p>Warm wishes,<br><strong>The Diffrun Team</strong></p>
+      </body>
     </html>
     """
 
@@ -1233,52 +1163,120 @@ def send_nudge_email_to_user(email: str, user_name: str, child_name: str, job_id
     msg["To"] = email
     msg.add_alternative(html_content, subtype="html")
 
-    EMAIL_USER = os.getenv("EMAIL_ADDRESS")
-    EMAIL_PASS = os.getenv("EMAIL_PASSWORD")
+    EMAIL_USER = (os.getenv("EMAIL_ADDRESS") or "").strip()
+    EMAIL_PASS = (os.getenv("EMAIL_PASSWORD") or "").strip()
+    if not EMAIL_USER or not EMAIL_PASS:
+        raise RuntimeError("EMAIL_ADDRESS/EMAIL_PASSWORD not configured")
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
         smtp.login(EMAIL_USER, EMAIL_PASS)
         smtp.send_message(msg)
 
 
-@app.post("/trigger-nudge-emails")
-async def trigger_nudge_emails(background_tasks: BackgroundTasks):
+def send_nudge_email():
     try:
-        background_tasks.add_task(send_nudge_email)
-        return {"status": "success", "message": "Nudge email process started"}
+        ist = ZoneInfo("Asia/Kolkata")
+        now_ist = datetime.now(ist)
+        start_ist_date = (now_ist.date() - timedelta(days=1))
+        end_ist_date   =  now_ist.date()
+
+        start_dt_ist = datetime(start_ist_date.year, start_ist_date.month, start_ist_date.day, 0, 0, 0, tzinfo=ist)
+        end_dt_ist   = datetime(end_ist_date.year,   end_ist_date.month,   end_ist_date.day,   0, 0, 0, tzinfo=ist)
+
+        start_utc = start_dt_ist.astimezone(timezone.utc)
+        end_utc   = end_dt_ist.astimezone(timezone.utc)
+
+        pipeline = [
+            {"$match": {
+                "paid": False,
+                # nudge_sent false OR missing
+                "$or": [{"nudge_sent": False}, {"nudge_sent": {"$exists": False}}],
+                # strictly yesterday (IST converted to UTC)
+                "created_at": {"$gte": start_utc, "$lt": end_utc},
+                # email present and not @lhmm.in
+                "email": {"$exists": True, "$ne": None, "$not": {"$regex": "@lhmm\\.in$", "$options": "i"}},
+                # workflows present
+                "workflows": {"$exists": True},
+            }},
+            # workflows object length == 13
+            {"$match": {
+                "$expr": {"$eq": [ {"$size": {"$objectToArray": "$workflows"}}, 13 ]}
+            }},
+            {"$sort": {"email": 1, "created_at": -1}},
+            {"$group": {"_id": "$email", "doc": {"$first": "$$ROOT"}}},
+            {"$replaceRoot": {"newRoot": "$doc"}},
+            {"$limit": 1000},
+            {"$project": {"email": 1, "user_name": 1, "name": 1, "job_id": 1}},
+        ]
+
+        candidates = list(orders_collection.aggregate(pipeline))
+        logger.info(f"Found {len(candidates)} nudge candidates for yesterday (IST).")
+
+        for user in candidates:
+            try:
+                send_nudge_email_to_user(
+                    email=user["email"],
+                    user_name=user.get("user_name"),
+                    child_name=user.get("name"),
+                    job_id=user["job_id"],
+                )
+                orders_collection.update_one(
+                    {"job_id": user["job_id"]},
+                    {"$set": {"nudge_sent": True, "nudge_sent_at": datetime.now(timezone.utc)}}
+                )
+                logger.info(f"✅ Nudge sent to {user['email']}")
+            except Exception as e:
+                logger.error(f"❌ Error sending email to {user.get('email')}: {e}")
     except Exception as e:
-        raise HTTPException(
-            status_code=500, detail=f"Error starting task: {str(e)}")
+        logger.error(f"❌ Nudge email task failed: {e}")
 
 
 @app.get("/debug/nudge-candidates")
 def debug_nudge_candidates():
-    now = datetime.now(timezone.utc)
-    min_created_at = datetime(2025, 7, 23, tzinfo=timezone.utc)
-    cutoff_time = now - timedelta(hours=24)
+    ist = ZoneInfo("Asia/Kolkata")
+    # “Yesterday” in IST
+    now_ist = datetime.now(ist)
+    start_ist = (now_ist.date() - timedelta(days=1))
+    end_ist = now_ist.date()
+
+    start_dt_ist = datetime(start_ist.year, start_ist.month, start_ist.day, 0, 0, 0, tzinfo=ist)
+    end_dt_ist   = datetime(end_ist.year,   end_ist.month,   end_ist.day,   0, 0, 0, tzinfo=ist)
+
+    # Convert to UTC for Mongo (created_at stored as UTC datetimes)
+    start_utc = start_dt_ist.astimezone(timezone.utc)
+    end_utc   = end_dt_ist.astimezone(timezone.utc)
 
     pipeline = [
         {"$match": {
             "paid": False,
-            "nudge_sent": False,
-            "created_at": {"$gte": min_created_at, "$lt": cutoff_time},
-            "workflows": {"$exists": True},
-            "email": {"$exists": True, "$ne": None, "$not": {"$regex": "@lhmm\\.in$", "$options": "i"}}
+            # nudge_sent false OR missing
+            "$or": [{"nudge_sent": False}, {"nudge_sent": {"$exists": False}}],
+            # strictly in yesterday’s IST window (converted to UTC)
+            "created_at": {"$gte": start_utc, "$lt": end_utc},
+            # email present and not @lhmm.in
+            "email": {
+                "$exists": True, "$ne": None,
+                "$not": {"$regex": "@lhmm\\.in$", "$options": "i"}
+            },
+            # workflows exists
+            "workflows": {"$exists": True}
         }},
+        # workflows object length == 13
         {"$match": {
             "$expr": {
-                "$gte": [
+                "$eq": [
                     {"$size": {"$objectToArray": "$workflows"}},
-                    NUDGE_MIN_WORKFLOWS
+                    13
                 ]
             }
         }},
+        # one per email: pick most recent by created_at
         {"$sort": {"email": 1, "created_at": -1}},
         {"$group": {"_id": "$email", "doc": {"$first": "$$ROOT"}}},
         {"$replaceRoot": {"newRoot": "$doc"}},
         {"$project": {
             "_id": 0, "email": 1, "user_name": 1, "name": 1, "job_id": 1, "created_at": 1
-        }}
+        }},
     ]
 
     return list(orders_collection.aggregate(pipeline))
@@ -2099,3 +2097,9 @@ def cron_feedback_emails(limit: int = 200):
             )
 
     return results
+
+def run_feedback_emails_job():
+    try:
+        cron_feedback_emails(limit=200)
+    except Exception:
+        logger.exception("Error running feedback emails job")
