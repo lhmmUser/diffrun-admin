@@ -1,5 +1,5 @@
-from dateutil import parser  # ensure this is at the top
-from fastapi import FastAPI, BackgroundTasks, Response, Request, Query, HTTPException, Body, Path
+from dateutil import parser
+from fastapi import FastAPI, BackgroundTasks, Response, Query, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 from pymongo import MongoClient
 from dotenv import load_dotenv
@@ -15,8 +15,7 @@ import smtplib
 from email.message import EmailMessage
 import logging
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel,  constr
-from pydantic import ValidationError
+from pydantic import BaseModel
 from contextlib import asynccontextmanager
 from apscheduler.schedulers.background import BackgroundScheduler
 import boto3
@@ -113,6 +112,10 @@ app = FastAPI(lifespan=lifespan)
 app.include_router(vlookup_router)
 app.include_router(razorpay_router)
 app.include_router(cloudprinter_router)
+
+from app.routers.cloudprinter_produce_webhook import router as cp_produce_router
+app.include_router(cp_produce_router)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -410,7 +413,6 @@ class ItemShippedPayload(CloudprinterWebhookBase):
 class UnapproveRequest(BaseModel):
     job_ids: List[str]
 
-
 def generate_book_title(book_id, child_name):
     if not child_name:
         child_name = "Your child"
@@ -657,9 +659,116 @@ def get_shipping_level(country_code: str) -> str:
         return "cp_ground"
     return "cp_ground"  # default fallback
 
+def _send_production_email(
+    to_email: str,
+    display_name: str,
+    child_name: str,
+    job_id: str | None,
+):
+    if not to_email:
+        print("[MAIL] skipped: empty recipient for production email")
+        return
+
+    display = (display_name or "there").strip().title() or "there"
+    child   = (child_name or "Your").strip().title() or "Your"
+    track_href = f"https://diffrun.com/track-your-order?job_id={job_id}" if job_id else "https://diffrun.com/track-your-order"
+
+    subject = f"{child}'s storybook is now in production 🎉"
+
+    html = f"""\
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <meta name="color-scheme" content="light">
+            <meta name="supported-color-schemes" content="light">
+            <style>
+                @media only screen and (max-width: 480px) {{
+                    .container {{
+                        width: 100% !important;
+                        max-width: 100% !important;
+                        padding: 16px !important;
+                    }}
+                    .col, .img-col {{
+                        display: block !important;
+                        width: 100% !important;
+                    }}
+                    .img-col img {{
+                        width: 100% !important;
+                        height: auto !important;
+                    }}
+                    .browse-now-btn {{
+                        font-size: 14px !important;
+                        padding: 12px 16px !important;
+                    }}
+                    p, li, a {{
+                        font-size: 15px !important;
+                        line-height: 1.5 !important;
+                    }}
+                }}
+            </style>
+        </head>
+        <body style="font-family: Arial, sans-serif; background:#f7f7f7; margin:0; padding:20px;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
+                <tr>
+                    <td align="center">
+                        <table role="presentation" class="container" width="100%" cellpadding="0" cellspacing="0" border="0"
+                            style="max-width: 48rem; margin: 0 auto; background:#ffffff; border-radius:8px; box-shadow:0 0 10px rgba(0,0,0,0.08); overflow:hidden;">
+                            <tr>
+                                <td style="padding:24px;">
+                                    <p>Hey {display},</p>
+                                    <p><strong>{child}'s storybook</strong> has been moved to production at our print factory. 🎉</p>
+                                    <p>It will be shipped within the next 3–4 business days. We will notify you with the tracking ID once your order is shipped.</p>
+                                    <a href="{track_href}"
+                                        style="display: inline-block; background:#5784ba; color: white; text-decoration: none; border-radius: 18px; padding: 12px 24px; font-weight: bold;">
+                                        Track your order
+                                    </a>
+                                    <p>Thanks,<br />Team Diffrun</p>
+                                    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+                                        style="margin-top: 30px; background-color: #f7f6cf; border-radius: 8px;">
+                                        <tr>
+                                            <td class="col" style="padding: 20px; vertical-align: middle;">
+                                                <p style="font-size: 15px; margin: 0;">
+                                                    Explore more magical books in our growing collection &nbsp;
+                                                    <button class="browse-now-btn"
+                                                        style="background-color:#5784ba; margin-top: 20px; border-radius: 30px; border: none; padding:10px 15px;">
+                                                        <a href="https://diffrun.com"
+                                                            style="color:white; font-weight: bold; text-decoration: none; display:inline-block;">
+                                                            Browse Now
+                                                        </a>
+                                                    </button>
+                                                </p>
+                                            </td>
+                                            <td class="img-col" width="300"
+                                                style="padding: 0 20px 0 0; margin: 0; vertical-align: middle;">
+                                                <img src="https://diffrungenerations.s3.ap-south-1.amazonaws.com/email_image+(2).jpg"
+                                                    alt="Storybook Preview" width="300"
+                                                    style="display: block; border-radius: 0; margin: 0; padding: 0;">
+                                            </td>
+                                        </tr>
+                                    </table>
+                                </td>
+                            </tr>
+                        </table>
+                    </td>
+                </tr>
+            </table>
+        </body>
+        </html>
+        """
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = f"Diffrun <{EMAIL_USER}>"
+    msg["To"] = to_email
+    msg.set_content("Your book has moved to production. View this email in HTML to see the formatted message.")
+    msg.add_alternative(html, subtype="html")
+
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+        smtp.login(EMAIL_USER, EMAIL_PASS)
+        smtp.send_message(msg)
 
 @app.post("/orders/approve-printing")
-async def approve_printing(order_ids: List[str]):
+async def approve_printing(order_ids: List[str], background_tasks: BackgroundTasks):
     CLOUDPRINTER_API_KEY = os.getenv(
         "CLOUDPRINTER_API_KEY", "1414e4bd0220dc1e518e268937ff18a3")
     CLOUDPRINTER_API_URL = "https://api.cloudprinter.com/cloudcore/1.0/orders/add"
@@ -791,6 +900,36 @@ async def approve_printing(order_ids: List[str]):
                         }
                     }
                 )
+
+                # send the production email ONCE, idempotent
+                once = orders_collection.update_one(
+                    {"order_id": order_id, "$or": [
+                        {"production_email_sent": {"$exists": False}},
+                        {"production_email_sent": False}
+                    ]},
+                    {"$set": {"production_email_sent": True}}
+                )
+
+                if once.modified_count == 1:
+                    to_email = (order.get("customer_email") or order.get("email") or "").strip()
+                    display_name = order.get("user_name") or "there"
+                    child_name = order.get("name") or "Your"
+                    job_id = order.get("job_id")
+
+                    if to_email and EMAIL_USER and EMAIL_PASS:
+                        background_tasks.add_task(
+                            _send_production_email,
+                            to_email,
+                            display_name,
+                            child_name,
+                            job_id
+                        )
+                        print(f"[EMAIL] queued production email to {to_email} for {order_id}")
+                    else:
+                        print(f"[EMAIL] skipped (missing recipient or creds) for {order_id}")
+                else:
+                    print(f"[EMAIL] already sent for {order_id}, skipping")
+
                 results.append({
                     "order_id": order_id,
                     "status": "success",
