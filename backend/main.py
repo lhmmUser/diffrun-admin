@@ -5,7 +5,7 @@ from pymongo import MongoClient
 from dotenv import load_dotenv
 import os
 from fastapi.encoders import jsonable_encoder
-from typing import Optional, List, Literal
+from typing import Optional, List, Literal,  Union
 from datetime import datetime, time, timedelta, timezone
 import requests
 import hashlib
@@ -34,6 +34,7 @@ import pytz
 from io import BytesIO
 from typing import Tuple
 from zoneinfo import ZoneInfo
+import re
 
 IST_TZ = pytz.timezone("Asia/Kolkata")
 
@@ -234,7 +235,7 @@ def _ist_midnight(dt_ist: datetime) -> datetime:
 
 @app.get("/stats/orders-rolling7")
 def stats_orders_rolling7(
-    exclude_codes: List[str] = Query(["TEST", "LHMM", "COLLAB"])
+    exclude_codes: List[str] = Query(["TEST", "LHMM", "COLLAB", "REJECTED"])
 ):
 
     now_ist = _now_ist()
@@ -441,11 +442,11 @@ def get_orders(
     filter_book_style: Optional[str] = Query(None),
     filter_print_approval: Optional[str] = Query(None),
     filter_discount_code: Optional[str] = Query(None),
-    exclude_discount_code: Optional[str] = None,
-
+    exclude_discount_code: Optional[List[str]] = Query(None),
 ):
     # Base query: only show paid orders
     query = {"paid": True}
+    ex_values: List[str] = []
 
     # Add additional filters
     if filter_status == "approved":
@@ -473,15 +474,31 @@ def get_orders(
             query["discount_code"] = filter_discount_code.upper()
 
     if exclude_discount_code:
-        if "discount_code" in query and isinstance(query["discount_code"], str):
-            # Combine both filter and exclude
-            query["$and"] = [
-                {"discount_code": query["discount_code"]},
-                {"discount_code": {"$ne": exclude_discount_code.upper()}}
-            ]
-            del query["discount_code"]  # Remove top-level field
-        elif "discount_code" not in query:
-            query["discount_code"] = {"$ne": exclude_discount_code.upper()}
+    # Normalize to a list
+        if isinstance(exclude_discount_code, list):
+            ex_values = exclude_discount_code
+        else:
+            # support CSV in a single param too (e.g., "TEST,REJECTED")
+            ex_values = [p.strip() for p in str(exclude_discount_code).split(",")]
+
+    # Build exclusion only if we have values
+    ex_values = [v for v in (s.strip() for s in ex_values) if v]
+    if ex_values:
+        # Case-insensitive exact match using anchored regexes
+        regexes = [re.compile(rf"^{re.escape(v)}$", re.IGNORECASE) for v in ex_values]
+
+        # If you already have a discount_code filter, AND them together
+        existing = query.pop("discount_code", None)
+
+        exclude_cond = {"discount_code": {"$nin": regexes}}
+
+        if existing is None:
+            # no prior condition → just set the exclusion
+            query["discount_code"] = exclude_cond["discount_code"]
+        else:
+            # merge with prior one using $and
+            # existing might be a scalar or a dict; both are fine
+            query["$and"] = [{"discount_code": existing}, exclude_cond]
 
     # Fetch and sort records
     sort_field = sort_by if sort_by else "created_at"
@@ -1373,34 +1390,39 @@ def send_nudge_email():
 @app.get("/debug/nudge-candidates")
 def debug_nudge_candidates():
     ist = ZoneInfo("Asia/Kolkata")
-    # “Yesterday” in IST
     now_ist = datetime.now(ist)
-    start_ist = (now_ist.date() - timedelta(days=1))
-    end_ist = now_ist.date()
+    
+    # Yesterday in IST (00:00 to 23:59)
+    yesterday_ist = now_ist.date() - timedelta(days=1)
+    start_yesterday_ist = datetime(yesterday_ist.year, yesterday_ist.month, yesterday_ist.day, 0, 0, 0, tzinfo=ist)
+    end_yesterday_ist = datetime(yesterday_ist.year, yesterday_ist.month, yesterday_ist.day, 23, 59, 59, tzinfo=ist)
+    
+    # Today in IST (00:00 to current time)
+    today_ist = now_ist.date()
+    start_today_ist = datetime(today_ist.year, today_ist.month, today_ist.day, 0, 0, 0, tzinfo=ist)
+    end_today_ist = now_ist  # current time
 
-    start_dt_ist = datetime(start_ist.year, start_ist.month, start_ist.day, 0, 0, 0, tzinfo=ist)
-    end_dt_ist   = datetime(end_ist.year,   end_ist.month,   end_ist.day,   0, 0, 0, tzinfo=ist)
-
-    # Convert to UTC for Mongo (created_at stored as UTC datetimes)
-    start_utc = start_dt_ist.astimezone(timezone.utc)
-    end_utc   = end_dt_ist.astimezone(timezone.utc)
+    # Convert to UTC for Mongo
+    start_yesterday_utc = start_yesterday_ist.astimezone(timezone.utc)
+    end_yesterday_utc = end_yesterday_ist.astimezone(timezone.utc)
+    start_today_utc = start_today_ist.astimezone(timezone.utc)
+    end_today_utc = end_today_ist.astimezone(timezone.utc)
 
     pipeline = [
+        # First, match documents from both yesterday AND today with basic filters
         {"$match": {
-            "paid": False,
-            # nudge_sent false OR missing
-            "$or": [{"nudge_sent": False}, {"nudge_sent": {"$exists": False}}],
-            # strictly in yesterday’s IST window (converted to UTC)
-            "created_at": {"$gte": start_utc, "$lt": end_utc},
-            # email present and not @lhmm.in
+            "$or": [
+                {"created_at": {"$gte": start_yesterday_utc, "$lt": end_yesterday_utc}},
+                {"created_at": {"$gte": start_today_utc, "$lt": end_today_utc}}
+            ],
             "email": {
                 "$exists": True, "$ne": None,
                 "$not": {"$regex": "@lhmm\\.in$", "$options": "i"}
             },
-            # workflows exists
             "workflows": {"$exists": True}
         }},
-  
+        
+        # Filter for exactly 13 workflows
         {"$match": {
             "$expr": {
                 "$eq": [
@@ -1409,16 +1431,83 @@ def debug_nudge_candidates():
                 ]
             }
         }},
-        # one per email: pick most recent by created_at
-        {"$sort": {"email": 1, "created_at": -1}},
-        {"$group": {"_id": "$email", "doc": {"$first": "$$ROOT"}}},
-        {"$replaceRoot": {"newRoot": "$doc"}},
-        {"$project": {
-            "_id": 0, "email": 1, "user_name": 1, "name": 1, "job_id": 1, "created_at": 1
+        
+        # Group by email to check payment status
+        {"$group": {
+            "_id": "$email",
+            "docs": {"$push": "$$ROOT"},
+            "has_paid_order": {"$max": "$paid"},  # If any order has paid=true, this becomes true
+            "latest_created_at": {"$max": "$created_at"}  # Find the most recent order
         }},
+        
+        # Only include emails where ALL orders are unpaid (has_paid_order is false)
+        {"$match": {
+            "has_paid_order": False
+        }},
+        
+        # Find the most recent document for each email
+        {"$project": {
+            "email": "$_id",
+            "latest_doc": {
+                "$arrayElemAt": [
+                    {"$filter": {
+                        "input": "$docs",
+                        "as": "doc",
+                        "cond": {"$eq": ["$$doc.created_at", "$latest_created_at"]}
+                    }},
+                    0
+                ]
+            }
+        }},
+        
+        # Replace root with the latest document
+        {"$replaceRoot": {"newRoot": "$latest_doc"}},
+        
+        # Filter for nudge_sent: false or missing
+        {"$match": {
+            "$or": [{"nudge_sent": False}, {"nudge_sent": {"$exists": False}}]
+        }},
+        
+        # Project only needed fields
+        {"$project": {
+            "_id": 0, 
+            "email": 1, 
+            "user_name": 1, 
+            "name": 1, 
+            "job_id": 1, 
+            "created_at": 1,
+            "paid": 1,
+            "nudge_sent": 1,
+            "workflows_count": {"$size": {"$objectToArray": "$workflows"}}
+        }}
     ]
 
-    return list(orders_collection.aggregate(pipeline))
+    results = list(orders_collection.aggregate(pipeline))
+    
+    # Add debug info to see what time ranges we're querying
+    debug_info = {
+        "yesterday_ist_range": {
+            "start": start_yesterday_ist.isoformat(),
+            "end": end_yesterday_ist.isoformat()
+        },
+        "today_ist_range": {
+            "start": start_today_ist.isoformat(),
+            "end": end_today_ist.isoformat()
+        },
+        "yesterday_utc_range": {
+            "start": start_yesterday_utc.isoformat(),
+            "end": end_yesterday_utc.isoformat()
+        },
+        "today_utc_range": {
+            "start": start_today_utc.isoformat(),
+            "end": end_today_utc.isoformat()
+        },
+        "current_ist_time": now_ist.isoformat(),
+        "candidates_found": len(results),
+        "candidates": results
+    }
+    
+    return debug_info
 
 
 @app.post("/orders/unapprove")

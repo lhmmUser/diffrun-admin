@@ -17,7 +17,7 @@ export default function Home() {
   const [stats, setStats] = useState<StatsResponse | null>(null);
   const [error, setError] = useState<string>("");
 
-  const exclusions = ["TEST", "LHMM", "COLLAB"];
+  const exclusions = ["TEST", "LHMM", "COLLAB", "REJECTED"];
 
   useEffect(() => {
     const params = new URLSearchParams();
