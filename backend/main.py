@@ -78,14 +78,14 @@ async def lifespan(app: FastAPI):
             max_instances=1,
         )
 
-        scheduler.add_job(
-            send_nudge_email,
-            trigger=CronTrigger(hour="14", minute="0", timezone=IST_TZ),
-            id="nudge_email_daily_14ist",
-            replace_existing=True,
-            coalesce=True,
-            max_instances=1,
-        )
+        # scheduler.add_job(
+        #     send_nudge_email,
+        #     trigger=CronTrigger(hour="14", minute="0", timezone=IST_TZ),
+        #     id="nudge_email_daily_14ist",
+        #     replace_existing=True,
+        #     coalesce=True,
+        #     max_instances=1,
+        # )
 
         scheduler.add_job(
             run_feedback_emails_job,
@@ -1400,7 +1400,7 @@ def debug_nudge_candidates():
             # workflows exists
             "workflows": {"$exists": True}
         }},
-        # workflows object length == 13
+  
         {"$match": {
             "$expr": {
                 "$eq": [
