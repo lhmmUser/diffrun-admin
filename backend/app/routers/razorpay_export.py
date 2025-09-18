@@ -1,9 +1,9 @@
-# app/routers/razorpay_payments_csv.py
-import os, io, csv
+# app/routers/razorpay_export.py
+import os, io, csv, re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 import httpx
-from fastapi import APIRouter, Query, HTTPException
+from fastapi import APIRouter, Query, HTTPException, Body
 from fastapi.responses import StreamingResponse
 from dateutil import parser as dtparser
 from dotenv import load_dotenv
@@ -15,6 +15,10 @@ load_dotenv()
 RZP_BASE = "https://api.razorpay.com/v1"
 KEY_ID = os.getenv("RAZORPAY_KEY_ID")
 KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET")
+
+_UUID_RE = re.compile(
+    r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}\b"
+)
 
 def _assert_keys():
     if not KEY_ID or not KEY_SECRET:
@@ -169,3 +173,91 @@ async def payments_csv(
         media_type="text/csv",
         headers={"Content-Disposition": 'attachment; filename="razorpay_payments.csv"'}
     )
+
+def _extract_job_id(p: Dict[str, Any]) -> Optional[str]:
+    # 1) Prefer notes.job_id if present
+    notes = p.get("notes") or {}
+    if isinstance(notes, dict):
+        jid = notes.get("job_id") or notes.get("JobId") or notes.get("JOB_ID")
+        if isinstance(jid, str) and _UUID_RE.search(jid):
+            return _UUID_RE.search(jid).group(0)
+        # scan all values for a UUID
+        for v in notes.values():
+            if isinstance(v, str):
+                m = _UUID_RE.search(v)
+                if m:
+                    return m.group(0)
+    # 2) Fallback: scan description for UUID
+    desc = p.get("description") or ""
+    if isinstance(desc, str):
+        m = _UUID_RE.search(desc)
+        if m:
+            return m.group(0)
+    return None
+
+def _payment_to_detail(p: Dict[str, Any]) -> Dict[str, Any]:
+    upi = p.get("upi") or {}
+    acq = p.get("acquirer_data") or {}
+    vpa = p.get("vpa") or upi.get("vpa") or ""
+    flow = upi.get("flow", "")
+
+    return {
+        "id": p.get("id", ""),
+        "email": p.get("email", "") or None,
+        "contact": p.get("contact", "") or None,
+        "status": p.get("status", "") or None,
+        "method": p.get("method", "") or None,
+        "currency": p.get("currency", "") or None,
+        "amount_display": amount_to_display(p.get("amount")),
+        "created_at": ts_to_ddmmyyyy_hhmmss(p.get("created_at")),
+        "order_id": p.get("order_id", "") or None,
+        "description": p.get("description", "") or None,
+        "notes": p.get("notes") or {},
+        "vpa": vpa or None,
+        "flow": flow or None,
+        "rrn": acq.get("rrn", "") or None,
+        "arn": acq.get("authentication_reference_number", "") or None,
+        "auth_code": acq.get("auth_code", "") or None,
+        "job_id": _extract_job_id(p),
+    }
+
+@router.post("/payments/by-ids")
+async def payments_by_ids(
+    payload: Dict[str, Any] = Body(..., example={"ids": ["pay_123", "pay_456"]}),
+) -> Dict[str, Any]:
+    """
+    Given a list of Razorpay payment IDs, return payment details for each.
+    Requires RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET.
+    """
+    _assert_keys()
+    ids = payload.get("ids")
+    if not isinstance(ids, list) or not all(isinstance(x, str) and x.strip() for x in ids):
+        raise HTTPException(400, detail="Body must contain 'ids' as a non-empty list of strings")
+
+    # Deduplicate and cap to a sane upper bound
+    uniq_ids = list(dict.fromkeys(x.strip() for x in ids if x.strip()))
+    if len(uniq_ids) > 1000:
+        raise HTTPException(413, detail="Too many IDs; max 1000 per request")
+
+    items: List[Dict[str, Any]] = []
+    errors: List[Dict[str, Any]] = []
+
+    try:
+        async with httpx.AsyncClient(auth=(KEY_ID, KEY_SECRET), timeout=20.0) as client:
+            for pid in uniq_ids:
+                try:
+                    r = await client.get(f"{RZP_BASE}/payments/{pid}")
+                    if r.status_code == 404:
+                        errors.append({"id": pid, "error": "Not found"})
+                        continue
+                    r.raise_for_status()
+                    p = r.json()
+                    items.append(_payment_to_detail(p))
+                except httpx.HTTPStatusError as e:
+                    errors.append({"id": pid, "error": f"http {e.response.status_code}", "detail": e.response.text[:200]})
+                except httpx.RequestError as e:
+                    errors.append({"id": pid, "error": "network", "detail": str(e)})
+    except httpx.RequestError as e:
+        raise HTTPException(502, detail=f"Network error calling Razorpay: {e}")
+
+    return {"count": len(items), "items": items, "errors": errors}

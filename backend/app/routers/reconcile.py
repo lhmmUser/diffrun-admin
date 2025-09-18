@@ -1,12 +1,18 @@
 # app/routers/reconcile.py
 from fastapi import APIRouter, Query, HTTPException
 from fastapi.responses import JSONResponse
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 import os
 import httpx
-
+import re
 from pymongo import MongoClient
 from pymongo.errors import PyMongoError
+from app.routers.razorpay_export import (
+    _assert_keys,
+    amount_to_display,
+    ts_to_ddmmyyyy_hhmmss,
+)
+import hmac, hashlib
 
 router = APIRouter(prefix="/reconcile", tags=["reconcile"])
 
@@ -28,6 +34,9 @@ client = MongoClient(MONGO_URI, tz_aware=True)
 db = client["candyman"]
 orders_collection = db["user_details"]
 
+_UUID_RE = re.compile(
+    r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}\b"
+)
 
 # ------------------------------ KEEP: /orders --------------------------------
 @router.get("/orders")
@@ -252,3 +261,152 @@ async def vlookup_payment_to_orders_auto(
         "na_payment_ids": [x["id"] for x in na_items],
         "na_by_status": na_by_status,  # contains only the chosen status
     })
+
+def _extract_uuid(s: str | None) -> str | None:
+    if not isinstance(s, str) or not s:
+        return None
+    m = _UUID_RE.search(s)
+    return m.group(0) if m else None
+
+def _extract_job_id_from_payment(p: Dict[str, Any]) -> Optional[str]:
+    notes = p.get("notes") or {}
+    if isinstance(notes, dict):
+        # common keys first
+        for k in ("job_id", "JobId", "JOB_ID"):
+            v = notes.get(k)
+            got = _extract_uuid(v) if isinstance(v, str) else None
+            if got:
+                return got
+        # scan all string values
+        for v in notes.values():
+            if isinstance(v, str):
+                got = _extract_uuid(v)
+                if got:
+                    return got
+    desc = p.get("description") or ""
+    return _extract_uuid(desc) if isinstance(desc, str) else None
+
+def _lookup_paid_preview_by_job(job_id: Optional[str]) -> Tuple[Optional[bool], Optional[str]]:
+    if not job_id:
+        return (None, None)
+    try:
+        doc = orders_collection.find_one({"job_id": job_id}, {"paid": 1, "preview_url": 1})
+        if not doc:
+            return (None, None)
+        paid = bool(doc.get("paid")) if "paid" in doc else None
+        preview_url = doc.get("preview_url") if isinstance(doc.get("preview_url"), str) else None
+        return (paid, preview_url)
+    except Exception:
+        return (None, None)
+    
+def _project_row(payment: Dict[str, Any]) -> Dict[str, Any]:
+    """Combine Razorpay fields + DB (job_id, paid, preview_url)."""
+    upi = payment.get("upi") or {}
+    acq = payment.get("acquirer_data") or {}
+    vpa = payment.get("vpa") or upi.get("vpa") or ""
+    flow = upi.get("flow", "")
+
+    pid = payment.get("id", "")
+
+    # Primary: transaction_id == payment_id mapping in your user_details
+    job_id_db = None
+    paid, preview_url = (None, None)
+    try:
+        doc_tx = orders_collection.find_one({"transaction_id": pid}, {"job_id": 1, "paid": 1, "preview_url": 1})
+        if doc_tx:
+            job_id_db = doc_tx.get("job_id")
+            paid = bool(doc_tx.get("paid")) if "paid" in doc_tx else None
+            preview_url = doc_tx.get("preview_url") if isinstance(doc_tx.get("preview_url"), str) else None
+    except Exception:
+        pass
+
+    # Fallback: extract UUID job_id from Razorpay payload then lookup by job_id
+    if not job_id_db:
+        job_id_guess = _extract_job_id_from_payment(payment)
+        if job_id_guess:
+            paid, preview_url = _lookup_paid_preview_by_job(job_id_guess)
+            job_id_db = job_id_guess
+
+    return {
+        "id": pid,
+        "email": payment.get("email") or None,
+        "contact": payment.get("contact") or None,
+        "status": payment.get("status") or None,
+        "method": payment.get("method") or None,
+        "currency": payment.get("currency") or None,
+        "amount_display": amount_to_display(payment.get("amount")),
+        "created_at": ts_to_ddmmyyyy_hhmmss(payment.get("created_at")),
+        "order_id": payment.get("order_id") or None,
+        "description": payment.get("description") or None,
+        "vpa": vpa or None,
+        "flow": flow or None,
+        "rrn": acq.get("rrn") or None,
+        "arn": acq.get("authentication_reference_number") or None,
+        "auth_code": acq.get("auth_code") or None,
+        # DB-enriched:
+        "job_id": job_id_db,
+        "paid": paid,
+        "preview_url": preview_url,
+    }
+
+@router.post("/na-payment-details")
+async def na_payment_details(body: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Body: {"ids": ["pay_ABC...", ...]}
+    Returns Razorpay details + DB-enriched (job_id, paid, preview_url) for each ID.
+    """
+    _assert_keys()
+
+    ids = body.get("ids")
+    if not isinstance(ids, list) or not ids:
+        raise HTTPException(400, detail="Body must contain 'ids' as a non-empty list of strings")
+
+    uniq_ids = list(dict.fromkeys([str(x).strip() for x in ids if str(x).strip()]))
+    if len(uniq_ids) > 2000:
+        raise HTTPException(413, detail="Too many IDs; max 2000 per request")
+
+    items: List[Dict[str, Any]] = []
+    errors: List[Dict[str, Any]] = []
+
+    try:
+        async with httpx.AsyncClient(
+            auth=(os.getenv("RAZORPAY_KEY_ID"), os.getenv("RAZORPAY_KEY_SECRET")),
+            timeout=20.0
+        ) as client:
+            for pid in uniq_ids:
+                try:
+                    r = await client.get(f"https://api.razorpay.com/v1/payments/{pid}")
+                    if r.status_code == 404:
+                        errors.append({"id": pid, "error": "not_found"})
+                        continue
+                    r.raise_for_status()
+                    p = r.json()
+                    items.append(_project_row(p))
+                except httpx.HTTPStatusError as e:
+                    errors.append({"id": pid, "error": f"http_{e.response.status_code}", "detail": (e.response.text or "")[:200]})
+                except httpx.RequestError as e:
+                    errors.append({"id": pid, "error": "network", "detail": str(e)})
+    except httpx.RequestError as e:
+        raise HTTPException(502, detail=f"Network error calling Razorpay: {e}")
+
+    return {"count": len(items), "items": items, "errors": errors}
+
+@router.post("/sign-razorpay")
+def sign_razorpay(body: Dict[str, Any]) -> Dict[str, str]:
+    """
+    Returns a Razorpay-compatible signature for body: 'order_id|payment_id'.
+    Body: { "razorpay_order_id": "...", "razorpay_payment_id": "..." }
+    Uses RAZORPAY_KEY_SECRET from server .env. DO NOT expose this from frontend.
+    """
+    secret = os.getenv("RAZORPAY_KEY_SECRET")
+    if not secret:
+        raise HTTPException(500, detail="RAZORPAY_KEY_SECRET not set")
+
+    order_id = (body or {}).get("razorpay_order_id")
+    payment_id = (body or {}).get("razorpay_payment_id")
+    if not order_id or not payment_id:
+        raise HTTPException(400, detail="razorpay_order_id and razorpay_payment_id are required")
+
+    message = f"{order_id}|{payment_id}".encode("utf-8")
+    digest = hmac.new(secret.encode("utf-8"), message, hashlib.sha256).hexdigest()
+    return {"razorpay_signature": digest}
