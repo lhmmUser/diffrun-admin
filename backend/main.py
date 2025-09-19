@@ -1022,6 +1022,8 @@ def get_jobs(
         "total_amount": 1,
         "feedback_email": 1,
         "locale": 1,
+        "partial_preview": 1,
+        "final_preview": 1,
         "_id": 0
     }
 
@@ -1033,6 +1035,7 @@ def get_jobs(
         shipping_address = doc.get("shipping_address", {})
         if isinstance(shipping_address, dict):
             city = shipping_address.get("city", "")
+            
         else:
             city = ""
         result.append({
@@ -1052,6 +1055,8 @@ def get_jobs(
             "bookStyle": doc.get("book_style", ""),
             "printStatus": doc.get("print_status", ""),
             "locale": doc.get("locale", ""),
+            "partial_preview": doc.get("partial_preview", "") or "",
+            "final_preview": doc.get("final_preview", "") or "",
         })
 
     return result
