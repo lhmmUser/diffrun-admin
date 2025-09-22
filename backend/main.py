@@ -681,6 +681,7 @@ def _send_production_email(
     display_name: str,
     child_name: str,
     job_id: str | None,
+    order_id: str | None, 
 ):
     if not to_email:
         print("[MAIL] skipped: empty recipient for production email")
@@ -688,9 +689,9 @@ def _send_production_email(
 
     display = (display_name or "there").strip().title() or "there"
     child   = (child_name or "Your").strip().title() or "Your"
-    track_href = f"https://diffrun.com/track-your-order?job_id={job_id}" if job_id else "https://diffrun.com/track-your-order"
-
-    subject = f"{child}'s storybook is now in production 🎉"
+    track_href = f"https://diffrun.com/track-your-order?job_id={job_id}"
+    safe_order = order_id or "—"
+    subject = f"Order {safe_order}: {child_name}'s storybook is now in production 🎉"
 
     html = f"""\
         <html>
@@ -939,7 +940,8 @@ async def approve_printing(order_ids: List[str], background_tasks: BackgroundTas
                             to_email,
                             display_name,
                             child_name,
-                            job_id
+                            job_id,
+                            order_id
                         )
                         print(f"[EMAIL] queued production email to {to_email} for {order_id}")
                     else:
