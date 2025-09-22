@@ -6,26 +6,9 @@ import { useEffect, useMemo, useState } from "react";
 // Backend base (no trailing slash)
 const API_BASE = (process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000").replace(/\/$/, "");
 
-// ---------- Local discount map (server should have its own copy as well) ----------
-const DISCOUNT_MAP: Record<string, number> = {
-  LHMM: 99.93,
-  LHMM50: 50,
-  SPECIAL10: 10,
-  LEMON20: 20,
-  TEST: 99.93,
-  COLLAB: 99.93,
-  SUKHKARMAN5: 5,
-  WELCOME5: 5,
-  SAM5: 5,
-  SUBSCRIBER10: 10,
-  MRSNAMBIAR15: 15,
-  AKMEMON15: 15,
-  TANVI15: 15,
-  PERKY15: 15,
-  SPECIAL15: 15,
-  JISHU15: 15,
-  JESSICA15: 15,
-};
+// Timeouts (tweak via env if you need)
+const SIGN_TIMEOUT_MS = Number(process.env.NEXT_PUBLIC_SIGN_TIMEOUT_MS ?? "30000");      // 30s
+const VERIFY_TIMEOUT_MS = Number(process.env.NEXT_PUBLIC_VERIFY_TIMEOUT_MS ?? "180000"); // 3m
 
 // ---------------- Types ----------------
 type ApiResponse = {
@@ -50,7 +33,7 @@ type PaymentDetail = {
   status: string | null;
   method: string | null;
   currency: string | null;
-  amount_display: string;     // e.g. "1.53"
+  amount_display: string;     // "1,750.00" or "₹1,750" etc (we'll parse)
   created_at: string;
   order_id: string | null;    // Razorpay order_id
   description: string | null;
@@ -59,41 +42,116 @@ type PaymentDetail = {
   rrn: string | null;
   arn: string | null;
   auth_code: string | null;
-  job_id: string | null;      // From DB or extracted
-  paid: boolean | null;       // From DB
-  preview_url: string | null; // From DB
 
-  // Optional if your backend enriches:
-  discount_code?: string | null;
+  // From DB (enriched by your /reconcile/na-payment-details)
+  job_id: string | null;
+  paid: boolean | null;
+  preview_url: string | null;
+  book_id?: string | null;     // <— needed for pricing
+  book_style?: string | null;  // "paperback" | "hardcover"
 };
 
-// -------------- Helpers --------------
-const toNum = (v: string | undefined | null) => {
-  if (v == null) return 0;
-  const n = parseFloat(String(v).trim());
-  return isNaN(n) ? 0 : n;
+// --------------- Pricing/Discount tables ---------------
+/** Prices are strings in INR that may include ₹ and commas; we'll parse to number (INR) */
+const BOOK_PRICING: Record<string, { paperback: { price: string; shipping: string; taxes: string }, hardcover: { price: string; shipping: string; taxes: string } }> = {
+  astro: {
+    paperback: { price: "₹1,750", shipping: "0", taxes: "0" },
+    hardcover: { price: "₹2,250", shipping: "0", taxes: "0" },
+  },
+  hero: {
+    paperback: { price: "₹1,650", shipping: "0", taxes: "0" },
+    hardcover: { price: "₹2,200", shipping: "0", taxes: "0" },
+  },
+  bloom: {
+    paperback: { price: "₹1,650", shipping: "0", taxes: "0" },
+    hardcover: { price: "₹2,200", shipping: "0", taxes: "0" },
+  },
+  wigu: {
+    paperback: { price: "₹1,650", shipping: "0", taxes: "0" },
+    hardcover: { price: "₹2,200", shipping: "0", taxes: "0" },
+  },
+  twin: {
+    paperback: { price: "₹1,650", shipping: "0", taxes: "0" },
+    hardcover: { price: "₹2,200", shipping: "0", taxes: "0" },
+  },
+  dream: {
+    paperback: { price: "₹1,650", shipping: "0", taxes: "0" },
+    hardcover: { price: "₹2,200", shipping: "0", taxes: "0" },
+  },
+  sports: {
+    paperback: { price: "₹1,650", shipping: "0", taxes: "0" },
+    hardcover: { price: "₹2,200", shipping: "0", taxes: "0" },
+  },
+  abcd: {
+    paperback: { price: "₹1,650", shipping: "0", taxes: "0" },
+    hardcover: { price: "₹2,200", shipping: "0", taxes: "0" },
+  },
+};
+
+const DISCOUNT_PCT: Record<string, number> = {
+  LHMM: 99.93,
+  LHMM50: 50,
+  SPECIAL10: 10,
+  LEMON20: 20,
+  TEST: 99.93,
+  COLLAB: 99.93,
+  SUKHKARMAN5: 5,
+  WELCOME5: 5,
+  SAM5: 5,
+  SUBSCRIBER10: 10,
+  MRSNAMBIAR15: 15,
+  AKMEMON15: 15,
+  TANVI15: 15,
+  PERKY15: 15,
+  SPECIAL15: 15,
+  JISHU15: 15,
+  JESSICA15: 15,
+};
+
+// ---------------- Utilities ----------------
+const parseINR = (s?: string | null): number | undefined => {
+  if (!s) return undefined;
+  const cleaned = s.replace(/[₹,\s]/g, "");
+  const n = Number(cleaned);
+  return Number.isFinite(n) ? n : undefined;
 };
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
-/**
- * Resolve the discount code for a payment row without depending on Razorpay
- * percentage. We only infer the code text, then map to DISCOUNT_MAP.
- */
-const extractDiscountCode = (d: PaymentDetail): string => {
-  // 1) Prefer explicit field if present in the enriched detail
-  if (d.discount_code) return String(d.discount_code).trim().toUpperCase();
-
-  // 2) Try discovery from description (common in Razorpay notes/desc)
-  const hay = (d.description || "").toUpperCase();
-  for (const code of Object.keys(DISCOUNT_MAP)) {
-    if (hay.includes(code)) return code;
+async function resolveBookMeta(jobId: string | null | undefined, apiBase: string) {
+  if (!jobId) {
+    console.warn("[META] No job_id provided, cannot resolve book meta");
+    return { book_id: undefined, book_style: undefined };
   }
+  const url = `${apiBase}/orders/meta/by-job/${encodeURIComponent(jobId)}`;
+  console.log("[META] GET:", url);
+  try {
+    const res = await fetch(url, { method: "GET" });
+    console.log("[META] status:", res.status);
+    const json = await res.json().catch(() => null);
+    console.log("[META] json:", json);
+    if (!res.ok || !json) {
+      console.warn("[META] failed to resolve book meta:", json);
+      return { book_id: undefined, book_style: undefined };
+    }
+    const book_id = (json.book_id ?? json.bookId ?? "").toString() || undefined;
+    const book_style = (json.book_style ?? json.bookStyle ?? "").toString() || undefined;
+    return { book_id, book_style };
+  } catch (e: any) {
+    console.error("[META] exception while resolving book meta:", e?.message || e);
+    return { book_id: undefined, book_style: undefined };
+  }
+}
 
-  // 3) Nothing found
-  return "";
+const getBookPricing = (bookId?: string | null, style?: string | null) => {
+  const key = (bookId || "").toLowerCase();
+  const st = (style || "").toLowerCase() as "paperback" | "hardcover";
+  const conf = BOOK_PRICING[key];
+  if (!conf) return undefined;
+  if (st !== "paperback" && st !== "hardcover") return undefined;
+  return conf[st];
 };
 
-// --------------- Component ---------------
+// ---------------- Component ----------------
 export default function ReconcileUploader() {
   const [result, setResult] = useState<ApiResponse | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -109,13 +167,10 @@ export default function ReconcileUploader() {
   const [fromDate, setFromDate] = useState<string>("");
   const [toDate, setToDate] = useState<string>("");
 
-  // per-row verify state (auto only)
-  const [verifyLoading, setVerifyLoading] = useState<Record<string, boolean>>({});
-  const [verifyError, setVerifyError] = useState<Record<string, string | null>>({});
-  const [verifySuccess, setVerifySuccess] = useState<Record<string, boolean>>({});
-
   // ---------- Reconcile fetch ----------
   async function runReconcile() {
+    console.log("[RECONCILE] Run");
+    console.log("API_BASE:", API_BASE);
     setErr(null);
     setResult(null);
     setDetails([]);
@@ -130,17 +185,22 @@ export default function ReconcileUploader() {
     if (toDate) qs.set("to_date", toDate);
 
     const url = `${API_BASE}/reconcile/vlookup-payment-to-orders/auto${qs.toString() ? `?${qs}` : ""}`;
+    console.log("GET:", url);
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 180_000);
 
     try {
       const res = await fetch(url, { method: "GET", signal: ctrl.signal });
+      console.log("Response status:", res.status);
       const json = (await res.json().catch(() => null)) as ApiResponse | null;
+      console.log("Response JSON:", json);
       if (!res.ok || !json) {
         setErr((json as any)?.detail || (json as any)?.error || `Server error (${res.status})`);
         return;
       }
       setResult(json);
+      const ids = json.na_payment_ids || [];
+      console.log("NA count:", ids.length, "IDs:", ids.length);
     } catch (e: any) {
       setErr(e?.name === "AbortError" ? "Request timed out." : e?.message || "Network error");
     } finally {
@@ -162,6 +222,9 @@ export default function ReconcileUploader() {
     const timer = setTimeout(() => controller.abort(), 60_000);
 
     (async () => {
+      console.log("[DETAILS] Fetch NA payment details");
+      console.log("POST:", `${API_BASE}/reconcile/na-payment-details`);
+      console.log("IDs:", naIds);
       setLoadingDetails(true);
       setDetailsErr(null);
       setDetails([]);
@@ -172,7 +235,9 @@ export default function ReconcileUploader() {
           signal: controller.signal,
           body: JSON.stringify({ ids: naIds }),
         });
+        console.log("Status:", res.status);
         const json = await res.json().catch(() => null);
+        console.log("JSON items length:", json?.items?.length);
         if (!res.ok || !json) {
           setDetailsErr((json as any)?.detail || "Failed to fetch payment details");
           return;
@@ -201,15 +266,15 @@ export default function ReconcileUploader() {
     if (!details?.length) return;
     const header = [
       "id","email","contact","created_at","amount","currency","status","method",
-      "paid","preview_url","order_id","job_id","vpa","flow","rrn","arn","auth_code","description"
+      "paid","preview_url","order_id","job_id","book_id","book_style",
+      "vpa","flow","rrn","arn","auth_code","description"
     ];
     const rows = details.map(d => [
       d.id, d.email ?? "", d.contact ?? "", d.created_at ?? "",
       d.amount_display ?? "", d.currency ?? "", d.status ?? "", d.method ?? "",
       d.paid === null ? "" : d.paid ? "true" : "false",
-      d.preview_url ?? "",
-      d.order_id ?? "", d.job_id ?? "", d.vpa ?? "", d.flow ?? "",
-      d.rrn ?? "", d.arn ?? "", d.auth_code ?? "", (d.description ?? "").replace(/\r?\n/g, " "),
+      d.preview_url ?? "", d.order_id ?? "", d.job_id ?? "", d.book_id ?? "", d.book_style ?? "",
+      d.vpa ?? "", d.flow ?? "", d.rrn ?? "", d.arn ?? "", d.auth_code ?? "", (d.description ?? "").replace(/\r?\n/g, " "),
     ]);
     const csv = [header.join(","), ...rows.map(r => r.map(v => {
       const s = String(v ?? "");
@@ -226,102 +291,156 @@ export default function ReconcileUploader() {
   };
 
   const updateRowPaid = (pid: string) => {
+    console.log("[UI] Marking row as paid:", pid);
     setDetails((prev) => prev.map((d) => (d.id === pid ? { ...d, paid: true } : d)));
   };
 
-  // ---------- Auto verify flow (NO percentage from Razorpay; map from DISCOUNT_MAP only) ----------
-  const autoVerify = async (d: PaymentDetail) => {
-    const pid = d.id;
-    const jobId = d.job_id;
-    const orderId = d.order_id;
+  
+const autoVerify = async (d: PaymentDetail) => {
+  const pid = d.id;
+  const jobId = d.job_id;
+  const orderId = d.order_id;
 
-    if (!jobId) {
-      setVerifyError((p) => ({ ...p, [pid]: "Missing job_id in row. Cannot verify." }));
+  if (!jobId) {
+    console.error("[AUTO VERIFY] Missing job_id in row", d);
+    return;
+  }
+  if (!orderId) {
+    console.error("[AUTO VERIFY] Missing razorpay_order_id in row", d);
+    return;
+  }
+
+  const t0 = performance.now();
+  console.log("[AUTO VERIFY]", pid, "Row data:", d);
+
+  try {
+    // 1) Get server signature
+    const signRes = await fetch(`${API_BASE}/reconcile/sign-razorpay`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ razorpay_order_id: orderId, razorpay_payment_id: pid }),
+    });
+    const signJson = await signRes.json().catch(() => null);
+    console.log("[SIGN RESPONSE]", signRes.status, signJson);
+    if (!signRes.ok || !signJson?.razorpay_signature) {
+      console.error("[SIGN ERROR]", pid, signJson);
       return;
     }
-    if (!orderId) {
-      setVerifyError((p) => ({ ...p, [pid]: "Missing razorpay_order_id in row. Cannot verify." }));
-      return;
+
+    // 2) Resolve discount_code from Razorpay
+    console.log("[DISCOUNT] resolve for", pid);
+    const discountRes = await fetch(`${API_BASE}/razorpay/payments/by-ids`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids: [pid] }),
+    });
+    const discountJson = await discountRes.json().catch(() => null);
+    console.log("[DISCOUNT RESPONSE]", discountRes.status, discountJson);
+
+    const discount_code =
+      discountJson?.items?.[0]?.notes?.discount_code?.toUpperCase?.() || "";
+    const discountPct = DISCOUNT_PCT[discount_code] ?? 0; // <-- use the right map
+    console.log("[DISCOUNT LOOKUP]", { code: discount_code, pct: discountPct });
+
+    // 3) Book meta (prefer row; fall back to DB)
+    let bookId = d.book_id || undefined;
+    let bookStyle = d.book_style || undefined;
+    if (!bookId || !bookStyle) {
+      const meta = await resolveBookMeta(jobId, API_BASE);
+      bookId = meta.book_id || bookId;
+      bookStyle = meta.book_style || bookStyle;
+    }
+    console.log("[BOOK META]", { bookId, bookStyle });
+
+    // 4) Pricing (use BOOK_PRICING via helper)
+    const conf = getBookPricing(bookId, bookStyle); // returns { price, shipping, taxes } or undefined
+    if (!conf) {
+      console.warn("[PRICING] Missing mapping for", { book_id: bookId, book_style: bookStyle }, "— falling back to paid amount as actual_price");
     }
 
-    setVerifyLoading((p) => ({ ...p, [pid]: true }));
-    setVerifyError((p) => ({ ...p, [pid]: null }));
-    setVerifySuccess((p) => ({ ...p, [pid]: false }));
+    const paidAmount = parseINR(d.amount_display) ?? 0;                // amount collected by Razorpay (total_price)
+    const actualPrice = conf ? (parseINR(conf.price) ?? paidAmount) : paidAmount; // list price from table
+    const shipping = conf ? (parseINR(conf.shipping) ?? 0) : 0;
+    const taxes = conf ? (parseINR(conf.taxes) ?? 0) : 0;
 
-    // 1) Ask backend to sign (keeps secret server-side)
-    const ctrl1 = new AbortController();
-    const t1 = setTimeout(() => ctrl1.abort(), 30_000);
-    try {
-      const signRes = await fetch(`${API_BASE}/reconcile/sign-razorpay`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        signal: ctrl1.signal,
-        body: JSON.stringify({ razorpay_order_id: orderId, razorpay_payment_id: pid }),
-      });
-      const signJson = await signRes.json().catch(() => null);
-      if (!signRes.ok || !signJson?.razorpay_signature) {
-        setVerifyError((p) => ({ ...p, [pid]: (signJson as any)?.detail || `Failed to sign (HTTP ${signRes.status})` }));
-        return;
-      }
+    // 5) Compute discount & final
+    const discountAmount = round2((discountPct / 100) * actualPrice);
+    const finalAmount = round2(actualPrice - discountAmount + shipping + taxes);
 
-      // 2) Resolve discount code ONLY as text, then map percentage LOCALLY.
-      const code = extractDiscountCode(d);          // e.g., "COLLAB"
-      const pct = DISCOUNT_MAP[code] ?? 0;          // e.g., 99.93 for COLLAB
+    console.log("[PRICING CALC]", {
+      actualPrice,
+      paidAmount,
+      discountPct,
+      discountAmount,
+      finalAmount,
+      shipping,
+      taxes,
+    });
 
-      // 3) Compute amounts ONLY from local map & displayed amount (no Razorpay percent)
-      const actual = toNum(d.amount_display);       // "1.53" -> 1.53
-      const shipping = 0;
-      const taxes = 0;
+    // 6) Send to /verify-razorpay
+    const payload = {
+      razorpay_order_id: orderId,
+      razorpay_payment_id: pid,
+      razorpay_signature: signJson.razorpay_signature,
+      job_id: jobId,
 
-      const discountAmount = round2((actual * pct) / 100);
-      const finalAmount = round2(actual - discountAmount + shipping + taxes);
+      // pricing fields
+      actual_price: actualPrice,
+      discount_code,
+      discount_percentage: discountPct,
+      discount_amount: discountAmount,
+      final_amount: finalAmount,
+      shipping_price: shipping,
+      taxes,
+    };
 
-      // 4) Send payload to your backend; backend must treat server map as authoritative
-      const payload: Record<string, any> = {
-        razorpay_order_id: d.order_id,
-        razorpay_payment_id: d.id,
-        razorpay_signature: String(signJson.razorpay_signature),
-        job_id: d.job_id,
+    console.log("[VERIFY REQUEST PAYLOAD]", payload);
 
-        actual_price: actual.toFixed(2),
-        discount_percentage: pct,                       // <-- from DISCOUNT_MAP only
-        discount_amount: discountAmount.toFixed(2),
-        shipping_price: shipping ? shipping : undefined,
-        taxes: taxes ? taxes : undefined,
-        final_amount: finalAmount.toFixed(2),
-        discount_code: code || undefined,               // always include resolved code
-      };
+    const verifyRes = await fetch('https://test-backend.diffrun.com/verify-razorpay', {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const verifyJson = await verifyRes.json().catch(() => null);
+    console.log("[VERIFY RESPONSE]", verifyRes.status, verifyJson);
 
-      const ctrl2 = new AbortController();
-      const t2 = setTimeout(() => ctrl2.abort(), 60_000);
-      try {
-        const res = await fetch('https://test-backend.diffrun.com/verify-razorpay', {  // <-- use your configured backend
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          signal: ctrl2.signal,
-          body: JSON.stringify(payload),
-        });
-        const json = await res.json().catch(() => null);
-        if (!res.ok || !json) {
-          setVerifyError((p) => ({ ...p, [pid]: (json as any)?.error || `HTTP ${res.status}` }));
-          return;
-        }
-        if (json.success === true) {
-          setVerifySuccess((p) => ({ ...p, [pid]: true }));
-          updateRowPaid(pid);
-        } else {
-          setVerifyError((p) => ({ ...p, [pid]: json.error || "Verification failed" }));
-        }
-      } finally {
-        clearTimeout(t2);
-      }
-    } catch (e: any) {
-      setVerifyError((p) => ({ ...p, [pid]: e?.name === "AbortError" ? "Signing timed out." : e?.message || "Signing failed" }));
-    } finally {
-      clearTimeout(t1);
-      setVerifyLoading((p) => ({ ...p, [pid]: false }));
+    // after:
+if (verifyRes.ok && verifyJson?.success) {
+  console.log("[UI] Marking row as paid:", pid);
+  setDetails((prev) => prev.map((row) => (row.id === pid ? { ...row, paid: true } : row)));
+
+  // NEW: mark reconciled
+  try {
+    const flagPayload = { job_id: jobId, razorpay_payment_id: pid };
+    console.log("[RECONCILE FLAG] POST", `${API_BASE}/reconcile/mark`, "payload:", flagPayload);
+
+    const flagRes = await fetch(`${API_BASE}/reconcile/mark`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(flagPayload),
+    });
+    const flagJson = await flagRes.json().catch(() => null);
+    console.log("[RECONCILE FLAG] status:", flagRes.status, "json:", flagJson);
+
+    if (!flagRes.ok || !flagJson?.ok) {
+      console.error("[RECONCILE FLAG] failed:", flagJson);
     }
-  };
+  } catch (e: any) {
+    console.error("[RECONCILE FLAG] exception:", e?.message || e);
+  }
+} else {
+  console.error("[VERIFY ERROR]", pid, verifyJson);
+}
+
+  } catch (err: any) {
+    console.error("[AUTO VERIFY ERROR]", pid, err);
+  } finally {
+    const elapsed = performance.now() - t0;
+    console.log(`[TIMING] ${pid} took ${elapsed.toFixed(2)} ms`);
+  }
+};
+
+
 
   // ---------- UI ----------
   return (
@@ -329,36 +448,20 @@ export default function ReconcileUploader() {
       <div className="grid md:grid-cols-4 gap-4 items-end">
         <div>
           <label className="block text-sm font-medium mb-1">From date (optional)</label>
-          <input
-            type="date"
-            className="border rounded px-2 py-1 w-full"
-            value={fromDate}
-            onChange={(e) => setFromDate(e.target.value)}
-          />
+          <input type="date" className="border rounded px-2 py-1 w-full" value={fromDate} onChange={(e) => setFromDate(e.target.value)} />
         </div>
         <div>
           <label className="block text-sm font-medium mb-1">To date (optional)</label>
-          <input
-            type="date"
-            className="border rounded px-2 py-1 w-full"
-            value={toDate}
-            onChange={(e) => setToDate(e.target.value)}
-          />
+          <input type="date" className="border rounded px-2 py-1 w-full" value={toDate} onChange={(e) => setToDate(e.target.value)} />
         </div>
       </div>
 
       <div className="flex items-center gap-6">
-        <button
-          onClick={runReconcile}
-          className="px-4 py-2 rounded bg-black text-white disabled:opacity-50"
-          disabled={loading}
-        >
+        <button onClick={runReconcile} className="px-4 py-2 rounded bg-black text-white disabled:opacity-50" disabled={loading}>
           {loading ? "Reconciling…" : "Run Reconcile"}
         </button>
         {!!result?.na_payment_ids?.length && (
-          <button onClick={downloadDetailsCSV} className="px-3 py-2 rounded border text-sm">
-            Download NA Details (CSV)
-          </button>
+          <button onClick={downloadDetailsCSV} className="px-3 py-2 rounded border text-sm">Download NA Details (CSV)</button>
         )}
       </div>
 
@@ -367,24 +470,10 @@ export default function ReconcileUploader() {
       {result && (
         <div className="mt-4 space-y-3">
           <div className="text-sm">
-            <div>
-              Payment Captured but Order not found (#N/A count):{" "}
-              <strong className="text-red-700">{result.summary.na_count}</strong>
-            </div>
-            <div>
-              Date window: <strong>{result.summary.date_window.from_date}</strong> →{" "}
-              <strong>{result.summary.date_window.to_date}</strong>
-            </div>
-            <div>
-              Orders (total docs scanned): <strong>{result.summary.total_orders_docs_scanned}</strong>
-            </div>
-            <div>
-              Orders with <code>transaction_id</code>:{" "}
-              <strong>{result.summary.orders_with_transaction_id}</strong>
-            </div>
-            <div>
-              Payments fetched: <strong>{result.summary.total_payments_rows}</strong>
-            </div>
+            <div>Payment Captured but Order not found (#N/A count): <strong className="text-red-700">{result.summary.na_count}</strong></div>
+            <div>Date window: <strong>{result.summary.date_window.from_date}</strong> → <strong>{result.summary.date_window.to_date}</strong></div>
+            
+            <div>Payments fetched: <strong>{result.summary.total_payments_rows}</strong></div>
           </div>
 
           <div className="mt-2">
@@ -393,19 +482,12 @@ export default function ReconcileUploader() {
               <p className="text-sm text-gray-600">No NA payment IDs 🎉</p>
             ) : (
               <ul className="text-xs max-h-64 overflow-auto list-disc pl-5">
-                {naIds.map((id) => (
-                  <li key={id} className="break-all">{id}</li>
-                ))}
+                {naIds.map((id) => (<li key={id} className="break-all">{id}</li>))}
               </ul>
             )}
           </div>
 
-          <details className="mt-3">
-            <summary className="cursor-pointer text-sm text-gray-700">Show raw JSON</summary>
-            <pre className="bg-gray-100 p-3 rounded text-xs overflow-auto mt-2">
-{JSON.stringify(result, null, 2)}
-            </pre>
-          </details>
+          
 
           {!!naIds.length && (
             <div className="mt-6">
@@ -419,71 +501,52 @@ export default function ReconcileUploader() {
                 <p className="text-sm text-gray-600 mt-2">No details available.</p>
               ) : (
                 <div className="overflow-auto border rounded mt-2">
-                  <table className="min-w-[1100px] w-full text-sm">
+                  <table className="min-w-[1350px] w-full text-sm">
                     <thead className="bg-gray-50">
                       <tr className="text-left">
-                        <th className="px-3 py-2">Payment ID</th>
-                        <th className="px-3 py-2">Email</th>
-                        <th className="px-3 py-2">Contact</th>
-                        <th className="px-3 py-2">Payment Date</th>
-                        <th className="px-3 py-2">Amount</th>
-                        <th className="px-3 py-2">Currency</th>
-                        <th className="px-3 py-2">Status</th>
-                        <th className="px-3 py-2">Method</th>
-                        <th className="px-3 py-2">Paid</th>
-                        <th className="px-3 py-2">Preview</th>
-                        <th className="px-3 py-2">job_id</th>
-                        <th className="px-3 py-2">Actions</th>
+                        <th className="px-2 py-2">Payment ID</th>
+                        <th className="px-2 py-2">Email</th>
+                       
+                        <th className="px-2 py-2">Payment Date</th>
+                        <th className="px-2 py-2">Amount (paid)</th>
+                        
+                        <th className="px-2 py-2">Paid</th>
+                        <th className="px-2 py-2">Preview</th>
+                        <th className="px-2 py-2">job_id</th>
+                        
+                        <th className="px-2 py-2">Actions</th>
                       </tr>
                     </thead>
                     <tbody>
                       {details.map((d) => {
-                        const pid = d.id;
-                        const vErr = verifyError[pid];
-                        const vOk = !!verifySuccess[pid];
-                        const vLoad = !!verifyLoading[pid];
-
                         const canVerify = d.paid === false && !!d.job_id;
                         const needsOrderId = !d.order_id;
-
                         return (
-                          <tr key={pid} className="border-t">
-                            <td className="px-3 py-2 font-mono">{d.id}</td>
-                            <td className="px-3 py-2">{d.email ?? "—"}</td>
-                            <td className="px-3 py-2">{d.contact ?? "—"}</td>
-                            <td className="px-3 py-2">{d.created_at || "—"}</td>
-                            <td className="px-3 py-2">{d.amount_display || "—"}</td>
-                            <td className="px-3 py-2">{d.currency || "—"}</td>
-                            <td className="px-3 py-2">{d.status || "—"}</td>
-                            <td className="px-3 py-2">{d.method || "—"}</td>
-                            <td className="px-3 py-2">{d.paid === null ? "—" : d.paid ? "true" : "false"}</td>
-                            <td className="px-3 py-2">
+                          <tr key={d.id} className="border-t">
+                            <td className="px-2 py-2 font-mono">{d.id}</td>
+                            <td className="px-2 py-2">{d.email ?? "—"}</td>
+
+                            <td className="px-2 py-2">{d.created_at || "—"}</td>
+                            <td className="px-2 py-2">{d.amount_display || "—"}</td>
+
+                            <td className="px-2 py-2">{d.paid === null ? "—" : d.paid ? "true" : "false"}</td>
+                            <td className="px-2 py-2">
                               {d.preview_url ? (
-                                <a
-                                  href={d.preview_url}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="text-blue-600 underline"
-                                >
-                                  preview
-                                </a>
+                                <a href={d.preview_url} target="_blank" rel="noopener noreferrer" className="text-blue-600 underline">preview</a>
                               ) : "—"}
                             </td>
-                            <td className="px-3 py-2 font-mono">{d.job_id ?? "—"}</td>
-                            <td className="px-3 py-2 space-x-2">
+                            
+                            <td className="px-2 py-2">{d.job_id ?? "—"}</td>
+                            <td className="px-2 py-2">
                               {canVerify ? (
-                                <>
-                                  <button
-                                    onClick={() => autoVerify(d)}
-                                    disabled={vLoad || needsOrderId}
-                                    className="px-3 py-1.5 rounded border text-xs"
-                                    title={needsOrderId ? "Missing razorpay_order_id — cannot auto-verify" : ""}
-                                  >
-                                    {vLoad ? "Verifying…" : "Auto Verify"}
-                                  </button>
-                                  {vOk && <span className="text-xs text-green-700 ml-2">✔ Paid</span>}
-                                  {vErr && <span className="text-xs text-red-700 ml-2">{vErr}</span>}
-                                </>
+                                <button
+                                  onClick={() => autoVerify(d)}
+                                  disabled={needsOrderId}
+                                  className="px-2 py-1.5 rounded border text-xs"
+                                  title={needsOrderId ? "Missing razorpay_order_id — cannot auto-verify" : ""}
+                                >
+                                  Auto Verify
+                                </button>
                               ) : (
                                 <span className="text-xs text-gray-400">—</span>
                               )}

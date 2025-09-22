@@ -13,8 +13,12 @@ from app.routers.razorpay_export import (
     ts_to_ddmmyyyy_hhmmss,
 )
 import hmac, hashlib
+from datetime import timedelta
+from dateutil import parser as dtparser, tz as dttz
+from zoneinfo import ZoneInfo
 
 router = APIRouter(prefix="/reconcile", tags=["reconcile"])
+REPORT_TZ = ZoneInfo(os.getenv("RECONCILE_TZ", "Asia/Kolkata"))  # default IST
 
 def norm(s: str | None, *, case_insensitive: bool) -> str:
     t = (s or "").replace("\u00A0", " ").strip()
@@ -37,6 +41,32 @@ orders_collection = db["user_details"]
 _UUID_RE = re.compile(
     r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}\b"
 )
+
+def _to_unix_start(s: str | None) -> int | None:
+    if not s:
+        return None
+    dt = dtparser.parse(s)
+    # If no tz provided, interpret in REPORT_TZ, not server tz
+    if dt.tzinfo is None:
+        # date-only → midnight in REPORT_TZ
+        if len(s.strip()) <= 10:
+            dt = dt.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=REPORT_TZ)
+        else:
+            dt = dt.replace(tzinfo=REPORT_TZ)
+    return int(dt.timestamp())
+
+def _to_unix_end(s: str | None) -> int | None:
+    if not s:
+        return None
+    dt = dtparser.parse(s)
+    if dt.tzinfo is None:
+        if len(s.strip()) <= 10:
+            # end of day in REPORT_TZ
+            dt = dt.replace(hour=23, minute=59, second=59, microsecond=0, tzinfo=REPORT_TZ)
+        else:
+            dt = dt.replace(tzinfo=REPORT_TZ)
+    return int(dt.timestamp())
+
 
 # ------------------------------ KEEP: /orders --------------------------------
 @router.get("/orders")
@@ -148,7 +178,9 @@ async def vlookup_payment_to_orders_auto(
             return None
         from dateutil import parser as dtparser
         return int(dtparser.parse(s).timestamp())
-
+    
+    from_unix = _to_unix_start(from_date)
+    to_unix   = _to_unix_end(to_date)
     # 1) Razorpay: fetch ALL (status=None => all statuses)
     try:
         async with httpx.AsyncClient(
@@ -158,8 +190,8 @@ async def vlookup_payment_to_orders_auto(
             payments: List[Dict[str, Any]] = await fetch_payments(
                 client=client,
                 status_filter=status,   # None => all
-                from_unix=_to_unix(from_date),
-                to_unix=_to_unix(to_date),
+                from_unix=from_unix,
+                to_unix=to_unix,
                 max_fetch=max_fetch,
             )
     except httpx.HTTPStatusError as e:
@@ -410,3 +442,32 @@ def sign_razorpay(body: Dict[str, Any]) -> Dict[str, str]:
     message = f"{order_id}|{payment_id}".encode("utf-8")
     digest = hmac.new(secret.encode("utf-8"), message, hashlib.sha256).hexdigest()
     return {"razorpay_signature": digest}
+
+@router.post("/email-report")
+async def email_report(
+    from_date: Optional[str] = Query(None),
+    to_date: Optional[str]   = Query(None),
+    status: Optional[str]    = Query(None),           # keep parity with the UI (None → ALL)
+    na_status: Optional[str] = Query("captured"),     # same default as UI
+    max_fetch: int = Query(200_000, ge=1, le=1_000_000),
+):
+    # 1) Call the same core logic via the existing route (or refactor into a shared function)
+    data = await vlookup_payment_to_orders_auto(
+        status=status,
+        max_fetch=max_fetch,
+        from_date=from_date,
+        to_date=to_date,
+        case_insensitive_ids=False,
+        orders_batch_size=50_000,
+        na_status=na_status,
+    )
+
+    # 2) Build your email from the returned 'summary' and 'na_payment_ids'
+    payload = data.body if isinstance(data, JSONResponse) else data  # FastAPI returns JSONResponse
+    summary = payload["summary"]
+    na_ids  = payload["na_payment_ids"]  # <- EXACTLY the same list UI uses
+
+    # TODO: render HTML and send email here (omitted)
+    # Include summary['date_window'], summary['na_count'], and a table of na_ids
+
+    return {"ok": True, "emailed": len(na_ids)}

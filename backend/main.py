@@ -35,9 +35,11 @@ from io import BytesIO
 from typing import Tuple
 from zoneinfo import ZoneInfo
 import re
+import json
+import httpx, html
 
 IST_TZ = pytz.timezone("Asia/Kolkata")
-
+API_BASE = os.getenv("NEXT_PUBLIC_API_BASE_URL", "http://127.0.0.1:8000")
 # Setup logger
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -224,14 +226,190 @@ def format_processed_date(value):
         logger.error(f"🔥 Failed to format processed_at: {value} | Error: {e}")
         return ""
 
+def _send_html_email(
+    to_email: Union[str, List[str], None],
+    subject: str,
+    html_body: str
+) -> None:
+    email_user = (os.getenv("EMAIL_ADDRESS") or "").strip()
+    email_pass = (os.getenv("EMAIL_PASSWORD") or "").strip()
+    if not email_user or not email_pass:
+        raise RuntimeError("EMAIL_ADDRESS/EMAIL_PASSWORD not configured")
 
+    # Normalize recipients
+    if to_email is None:
+        recipients = EMAIL_TO[:]  # from env
+    elif isinstance(to_email, list):
+        recipients = [e.strip() for e in to_email if e and e.strip()]
+    else:  # string
+        recipients = [e.strip() for e in to_email.split(",") if e.strip()]
+
+    if not recipients:
+        raise RuntimeError("No recipients found. Configure EMAIL_TO in .env or pass a recipient.")
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = f"Diffrun <{email_user}>"
+    msg["To"] = ", ".join(recipients)
+    msg.set_content("This message contains HTML.")
+    msg.add_alternative(html_body, subtype="html")
+
+    # Send to all recipients
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+        smtp.login(email_user, email_pass)
+        # send_message uses the headers for recipients; passing explicitly is extra safe:
+        smtp.sendmail(email_user, recipients, msg.as_string())
+        
 def _now_ist():
     return datetime.now(IST_TZ)
-
 
 def _ist_midnight(dt_ist: datetime) -> datetime:
     return dt_ist.replace(hour=0, minute=0, second=0, microsecond=0)
 
+VLOOKUP_PATH = "/reconcile/vlookup-payment-to-orders/auto"
+DETAILS_PATH  = "/reconcile/na-payment-details"
+
+def _hourly_reconcile_and_email():
+    IST = ZoneInfo(os.getenv("RECONCILE_TZ", "Asia/Kolkata"))
+    now_ist = datetime.now(IST)
+
+    # Same window the UI uses: [yesterday 00:00 → today 23:59:59] IST
+    y_date = now_ist.date() - timedelta(days=1)
+    t_date = now_ist.date()
+    from_date = y_date.strftime("%Y-%m-%d")
+    to_date   = t_date.strftime("%Y-%m-%d")
+
+    logger.info("[RECONCILE-HOURLY] Calling vlookup for IST window %s → %s", from_date, to_date)
+
+    # 1) Pull summary + NA payment IDs via the same UI endpoint
+    try:
+        with httpx.Client(timeout=60.0) as client:
+            resp = client.get(
+                f"{API_BASE}{VLOOKUP_PATH}",
+                params={
+                    "from_date": from_date,
+                    "to_date": to_date,
+                    "na_status": "captured",
+                    "max_fetch": 200000,
+                },
+            )
+            logger.info("[RECONCILE-HOURLY] vlookup GET %s -> %s", resp.request.url, resp.status_code)
+            resp.raise_for_status()
+            lookup_json = resp.json()
+    except Exception as e:
+        logger.exception("[RECONCILE-HOURLY] vlookup API failed: %s", e)
+        return
+
+    summary = lookup_json.get("summary", {}) or {}
+    na_ids  = lookup_json.get("na_payment_ids", []) or []
+    na_count = int(summary.get("na_count", len(na_ids)))
+    window   = summary.get("date_window", {}) or {}
+    wnd_from = window.get("from_date", from_date)
+    wnd_to   = window.get("to_date", to_date)
+
+    # ✅ Only email if there are NA IDs
+    if not na_ids:
+        logger.info("[RECONCILE-HOURLY] No NA payment IDs in window (%s → %s) — skipping email.", wnd_from, wnd_to)
+        return
+
+    logger.info("[RECONCILE-HOURLY] NA count: %d — preparing email.", na_count)
+
+    # 2) Enrich those NA IDs just like the UI (email, created_at, amount, paid, preview_url, job_id, etc.)
+    details_items = []
+    try:
+        with httpx.Client(timeout=60.0) as client:
+            dresp = client.post(
+                f"{API_BASE}{DETAILS_PATH}",
+                json={"ids": na_ids},
+                headers={"Content-Type": "application/json"},
+            )
+            logger.info("[RECONCILE-HOURLY] details POST %s -> %s", dresp.request.url, dresp.status_code)
+            dresp.raise_for_status()
+            djson = dresp.json() or {}
+            details_items = djson.get("items", []) or []
+    except Exception as e:
+        logger.exception("[RECONCILE-HOURLY] details API failed: %s", e)
+        # We still send the email, but with just the IDs table if enrichment failed.
+
+    # 3) Render a compact HTML table with the requested columns
+    subject = f"[Reconcile] NA payments: {na_count} (IST {wnd_from} → {wnd_to})"
+    html_body = _render_na_table(
+        title="Razorpay NA Reconciliation",
+        wnd_from=wnd_from,
+        wnd_to=wnd_to,
+        rows=details_items,
+    )
+
+    logger.info("[RECONCILE-HOURLY] Sending email: %s", subject)
+    try:
+        _send_html_email(EMAIL_TO, subject, html_body)
+        logger.info("[RECONCILE-HOURLY] Email sent successfully")
+    except Exception as e:
+        logger.exception("[RECONCILE-HOURLY] Email send failed: %s", e)
+
+
+
+def _render_na_table(title: str, wnd_from: str, wnd_to: str, rows: list[dict]) -> str:
+    """Render an HTML table with: Payment ID, Email, Payment Date, Amount, Paid, Preview, Job ID."""
+    def safe(v):  # basic escape
+        return html.escape(str(v)) if v is not None else "—"
+
+    header = f"""
+    <h2 style="margin:0 0 8px 0;font-family:Arial,sans-serif">{safe(title)}</h2>
+    <div style="font-family:Arial,sans-serif;font-size:13px;margin:0 0 12px 0">
+      <strong>Window (IST):</strong> {safe(wnd_from)} → {safe(wnd_to)}
+    </div>
+    """
+
+    if not rows:
+        return header + '<p style="font-family:Arial,sans-serif">No NA payment details.</p>'
+
+    # Build table rows
+    tr_html = []
+    for r in rows:
+        pid   = r.get("id") or r.get("payment_id") or "—"
+        email = r.get("email") or "—"
+        dt    = r.get("created_at") or "—"
+        amt   = r.get("amount_display") or "—"
+        paid  = r.get("paid")
+        paid_str = "true" if paid is True else ("false" if paid is False else "—")
+        prev  = r.get("preview_url") or ""
+        job   = r.get("job_id") or "—"
+
+        prev_link = f'<a href="{html.escape(prev)}" target="_blank">preview</a>' if prev else "—"
+
+        tr_html.append(f"""
+          <tr>
+            <td style="padding:6px 8px;border:1px solid #e5e7eb;font-family:Consolas,Menlo,monospace">{safe(pid)}</td>
+            <td style="padding:6px 8px;border:1px solid #e5e7eb">{safe(email)}</td>
+            <td style="padding:6px 8px;border:1px solid #e5e7eb">{safe(dt)}</td>
+            <td style="padding:6px 8px;border:1px solid #e5e7eb">{safe(amt)}</td>
+            <td style="padding:6px 8px;border:1px solid #e5e7eb">{safe(paid_str)}</td>
+            <td style="padding:6px 8px;border:1px solid #e5e7eb">{prev_link}</td>
+            <td style="padding:6px 8px;border:1px solid #e5e7eb;font-family:Consolas,Menlo,monospace">{safe(job)}</td>
+          </tr>
+        """)
+
+    table = f"""
+    <table cellspacing="0" cellpadding="0" style="border-collapse:collapse;border:1px solid #e5e7eb;font-family:Arial,sans-serif;font-size:13px">
+      <thead>
+        <tr style="background:#f9fafb">
+          <th style="text-align:left;padding:6px 8px;border:1px solid #e5e7eb">Payment ID</th>
+          <th style="text-align:left;padding:6px 8px;border:1px solid #e5e7eb">Email</th>
+          <th style="text-align:left;padding:6px 8px;border:1px solid #e5e7eb">Payment Date</th>
+          <th style="text-align:left;padding:6px 8px;border:1px solid #e5e7eb">Amount</th>
+          <th style="text-align:left;padding:6px 8px;border:1px solid #e5e7eb">Paid</th>
+          <th style="text-align:left;padding:6px 8px;border:1px solid #e5e7eb">Preview</th>
+          <th style="text-align:left;padding:6px 8px;border:1px solid #e5e7eb">Job ID</th>
+        </tr>
+      </thead>
+      <tbody>
+        {''.join(tr_html)}
+      </tbody>
+    </table>
+    """
+
+    return header + table
 
 @app.get("/stats/orders-rolling7")
 def stats_orders_rolling7(
@@ -2154,6 +2332,18 @@ def debug_scheduler_jobs():
                    "trigger": str(j.trigger)})
     return out
 
+try:
+    scheduler.add_job(
+        _hourly_reconcile_and_email,
+        CronTrigger(minute=0, timezone=IST_TZ),
+        id="reconcile_email_hourly",
+        replace_existing=True,
+        max_instances=1,  # don't overlap runs
+        coalesce=True     # skip missed to one
+    )
+except Exception:
+    logger.exception("Failed to register reconcile email hourly job")
+
 
 @app.post("/debug/run-export-now")
 def debug_run_export_now():
@@ -2338,3 +2528,49 @@ def run_feedback_emails_job():
         cron_feedback_emails(limit=200)
     except Exception:
         logger.exception("Error running feedback emails job")
+
+@app.get("/orders/meta/by-job/{job_id}")
+def order_meta_by_job(job_id: str):
+    doc = orders_collection.find_one(
+        {"job_id": job_id},
+        {"_id": 0, "book_id": 1, "book_style": 1}
+    )
+    if not doc:
+        raise HTTPException(status_code=404, detail="Not found")
+    # normalize keys if you want
+    return {
+        "book_id": doc.get("book_id"),
+        "book_style": doc.get("book_style")
+    }
+
+@app.post("/reconcile/mark")
+def mark_reconciled(payload: dict):
+    job_id = payload.get("job_id")
+    razorpay_payment_id = payload.get("razorpay_payment_id")  # optional, nice to store
+
+    if not job_id:
+        raise HTTPException(status_code=400, detail="job_id is required")
+
+    now = datetime.now(timezone.utc)
+    update = {
+        "reconcile": True,
+        "reconciled_at": now,
+    }
+    if razorpay_payment_id:
+        # doesn’t overwrite your verify logic—just stores it if you want
+        update["transaction_id"] = razorpay_payment_id
+
+    result = orders_collection.update_one(
+        {"job_id": job_id},
+        {"$set": update}
+    )
+
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="job_id not found")
+
+    return {"ok": True, "matched": result.matched_count, "modified": result.modified_count}
+
+@app.post("/debug/run-reconcile-now")
+def debug_run_reconcile_now():
+    _hourly_reconcile_and_email()
+    return {"ok": True}
