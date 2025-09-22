@@ -1,3 +1,4 @@
+// src/app/(dashboard)/jobs/page.tsx
 "use client";
 
 import { useEffect, useState } from "react";
@@ -16,6 +17,8 @@ type RawOrder = {
     paymentDate?: string;
     approvalDate?: string;
     locale?: string;
+    partial_preview?: string;
+    final_preview?: string;
 };
 
 type Order = {
@@ -28,6 +31,8 @@ type Order = {
     paymentDate: string;
     approvalDate: string;
     locale: string; 
+    partialPreview: string;
+    finalPreview: string;
 };
 
 const formatDate = (dateInput: any) => {
@@ -107,6 +112,8 @@ export default function JobsPage() {
                     paymentDate: formatDate(order.processed_at) || order.paymentDate || "",
                     approvalDate: order.approvalDate || "",
                     locale: order.locale || "",
+                    partialPreview: (order.partial_preview ?? "").toString(),
+                    finalPreview: (order.final_preview ?? "").toString(),
                 }));
 
                 console.log("Transformed orders:", transformed); // Debug log
@@ -172,6 +179,8 @@ export default function JobsPage() {
                             <th className="p-3">Name</th>
                             <th className="p-3">Paid</th>
                             <th className="p-3">Approved</th>
+                            <th className="p-3">Partial Preview</th>
+                            <th className="p-3">Final Preview</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -209,6 +218,8 @@ export default function JobsPage() {
                                         {order.approvalDate ? 'Yes' : 'No'}
                                     </span>
                                 </td>
+                                <td className="p-3 text-black">{order.partialPreview || "-"}</td>
+                                <td className="p-3 text-black">{order.finalPreview || "-"}</td>
                             </tr>
                         ))}
                     </tbody>
