@@ -34,6 +34,7 @@ type RawOrder = {
   currency?: string;
   locale?: string;
   shippedAt?: string;
+  quantity?: number;
 };
 
 type Order = {
@@ -57,6 +58,7 @@ type Order = {
   currency: string;
   locale: string;
   shippedAt: string;
+  quantity: number;
 };
 
 type PrinterResponse = {
@@ -184,6 +186,7 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
           currency: order.currency || "INR", // fallback to INR
           locale: order.locale || "", // default locale
           shippedAt: order.shippedAt || "",
+          quantity: order.quantity || 1,
         };
       });
 
@@ -320,6 +323,7 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
             currency: order.currency || "INR", // fallback to INR
             locale: order.locale || "", // default locale
             shippedAt: order.shippedAt || "",
+            quantity: order.quantity || 1,
           };
         });
 
@@ -482,27 +486,27 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
   const currentOrders = orders.slice(startIdx, startIdx + ordersPerPage);
 
   function formatDayMonUTC(dateInput: any): string {
-  if (!dateInput) return "";
+    if (!dateInput) return "";
 
-  let dt: Date | null = null;
-  try {
-    if (typeof dateInput === "object" && dateInput.$date?.$numberLong) {
-      dt = new Date(Number(dateInput.$date.$numberLong));  // epoch ms (UTC)
-    } else if (typeof dateInput === "string" && dateInput.trim() !== "") {
-      dt = new Date(dateInput); // ISO string
-    }
-  } catch { /* ignore */ }
-  if (!dt || isNaN(dt.getTime())) return "";
+    let dt: Date | null = null;
+    try {
+      if (typeof dateInput === "object" && dateInput.$date?.$numberLong) {
+        dt = new Date(Number(dateInput.$date.$numberLong));  // epoch ms (UTC)
+      } else if (typeof dateInput === "string" && dateInput.trim() !== "") {
+        dt = new Date(dateInput); // ISO string
+      }
+    } catch { /* ignore */ }
+    if (!dt || isNaN(dt.getTime())) return "";
 
-  // Format as DD MMM in UTC (ignore IST shift)
-  const s = dt.toLocaleString("en-GB", {
-    day: "2-digit",
-    month: "short",
-    timeZone: "UTC",   // force UTC day, not IST
-  });
+    // Format as DD MMM in UTC (ignore IST shift)
+    const s = dt.toLocaleString("en-GB", {
+      day: "2-digit",
+      month: "short",
+      timeZone: "UTC",   // force UTC day, not IST
+    });
 
-  return s.replace(/\bSep\b/, "Sept");
-}
+    return s.replace(/\bSep\b/, "Sept");
+  }
 
 
   return (
@@ -672,7 +676,7 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
               </th>
               {[
                 "Order ID", "Name", "City", "Loc", "Book ID", "Book Style", "Price", "Payment Date",
-                "Approval Date", "Status", "Print Approval", "Preview", "Cover PDF", "Interior PDF", "Print Status", "Shipped At", "Discount Code", "Feedback Email",
+                "Approval Date", "Status", "Print Approval", "Preview", "Cover PDF", "Interior PDF", "Print Status", "Quantity", "Shipped At", "Discount Code", "Feedback Email",
               ].map((heading, i) => (
                 <th key={i} className="p-3 whitespace-nowrap">{heading}</th>
               ))}
@@ -740,6 +744,9 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
                   <span className={`px-2 py-1 rounded text-xs font-medium ${order.printStatus === "sent_to_printer" ? "bg-blue-100 text-blue-800" : "bg-gray-100 text-gray-800"}`}>
                     {order.printStatus === "sent_to_printer" ? "Sent" : "-"}
                   </span>
+                </td>
+                <td className="px-2 py-2 text-xs text-center">
+                  {order.quantity && order.quantity > 1 ? `${order.quantity}` : "1"}
                 </td>
                 <td className="px-2 py-2 text-xs">
                   {order.shippedAt && formatDayMonUTC(order.shippedAt)}

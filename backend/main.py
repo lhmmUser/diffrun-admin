@@ -707,6 +707,7 @@ def get_orders(
         "discount_code": 1,
         "currency": 1,
         "locale": 1,
+        "quantity": 1,
         "_id": 0,
         "shipped_at": 1,
         "cust_status": 1,
@@ -739,6 +740,7 @@ def get_orders(
             "currency": doc.get("currency", ""),
             "locale": doc.get("locale", ""),
             "shippedAt": doc.get("shipped_at"),
+            "quantity": doc.get("quantity", 1),
         })
 
     return result
