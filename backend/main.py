@@ -993,6 +993,7 @@ async def approve_printing(order_ids: List[str], background_tasks: BackgroundTas
             # Calculate MD5 sums for the PDFs
             book_url = order.get("book_url", "")
             cover_url = order.get("cover_url", "")
+            quantity = order.get("quantity", 1)
 
             print(f"Downloading and calculating MD5 for cover PDF...")
             cover_md5 = hashlib.md5(requests.get(
@@ -1052,7 +1053,7 @@ async def approve_printing(order_ids: List[str], background_tasks: BackgroundTas
                     "product": product_code,
                     "shipping_level": shipping_level,
                     "title": f"{order.get('order_id', '')}_{order.get('name', 'Book')}",
-                    "count": "1",
+                    "count": quantity,
                     "files": [
                         {
                             "type": "cover",
