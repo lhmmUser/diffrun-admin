@@ -840,13 +840,33 @@ def get_pdf_page_count(pdf_url: str) -> int:
         return 35  # Fallback to default value
 
 
-def get_product_details(book_style: str) -> tuple[str, str]:
-    if book_style == "paperback":  # Exact match with database value
+def get_product_details(book_style: str | None, book_id: str | None) -> tuple[str, str]:
+    """
+    Returns (reference_label, cloudprinter_product_code) based on book_id and book_style.
+    - WIGU uses landscape 270x200 mm codes.
+    - All others use square s210 codes.
+    - Falls back to Hardcover if style is unknown.
+    """
+    style = (book_style or "").lower()
+    bid = (book_id or "").lower()
+
+    if bid == "wigu":
+        if style == "paperback":
+            return ("Paperback", "photobook_pb_270x200_mm_l_fc")
+        if style == "hardcover":
+            return ("Hardcover", "photobook_cw_270x200_mm_l_fc")
+        # Fallback for WIGU
+        return ("Hardcover", "photobook_cw_270x200_mm_l_fc")
+
+    # Default (non-WIGU): square s210 products
+    if style == "paperback":
         return ("Paperback", "photobook_pb_s210_s_fc")
-    elif book_style == "hardcover":  # Exact match with database value
+    if style == "hardcover":
         return ("Hardcover", "photobook_cw_s210_s_fc")
-    else:  # Fallback to hardcover if unknown
-        return ("Hardcover", "photobook_cw_s210_s_fc")
+
+    # Fallback to Hardcover for unknown styles
+    return ("Hardcover", "photobook_cw_s210_s_fc")
+
 
 
 def get_shipping_level(country_code: str) -> str:
@@ -1022,7 +1042,8 @@ async def approve_printing(order_ids: List[str], background_tasks: BackgroundTas
 
             # Get product details based on book style
             book_style = order.get("book_style", "hardcover")
-            reference, product_code = get_product_details(book_style)
+            book_id = order.get("book_id", "")
+            reference, product_code = get_product_details(book_style, book_id)
             print(f"Selected product: {reference} ({product_code})")
 
             shipping_level = get_shipping_level(country_code)
