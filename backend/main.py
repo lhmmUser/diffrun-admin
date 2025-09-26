@@ -1013,7 +1013,7 @@ async def approve_printing(order_ids: List[str], background_tasks: BackgroundTas
             # Calculate MD5 sums for the PDFs
             book_url = order.get("book_url", "")
             cover_url = order.get("cover_url", "")
-            quantity = order.get("quantity", 1)
+            quantity = order.get("quantity")
 
             print(f"Downloading and calculating MD5 for cover PDF...")
             cover_md5 = hashlib.md5(requests.get(
