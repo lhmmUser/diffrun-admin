@@ -1,5 +1,9 @@
 # app/routers/cloudprinter_webhook.py
-import json, time, hmac, os, smtplib
+import json
+import time
+import hmac
+import os
+import smtplib
 from email.message import EmailMessage
 from fastapi import APIRouter, Request, HTTPException, status, Depends, BackgroundTasks
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
@@ -9,13 +13,15 @@ router = APIRouter()
 security = HTTPBasic(auto_error=False)
 
 WEBHOOK_KEY = (os.getenv("CLOUDPRINTER_WEBHOOK_KEY") or "").strip()
-BASIC_USER  = (os.getenv("CP_WEBHOOK_USER") or "").strip()
-BASIC_PASS  = (os.getenv("CP_WEBHOOK_PASS") or "").strip()
-EMAIL_USER  = (os.getenv("EMAIL_ADDRESS") or "").strip()
-EMAIL_PASS  = (os.getenv("EMAIL_PASSWORD") or "").strip()
+BASIC_USER = (os.getenv("CP_WEBHOOK_USER") or "").strip()
+BASIC_PASS = (os.getenv("CP_WEBHOOK_PASS") or "").strip()
+EMAIL_USER = (os.getenv("EMAIL_ADDRESS") or "").strip()
+EMAIL_PASS = (os.getenv("EMAIL_PASSWORD") or "").strip()
+
 
 def _eq(a: str, b: str) -> bool:
     return hmac.compare_digest(str(a or ""), str(b or ""))
+
 
 class ItemShippedPayload(BaseModel):
     apikey: str
@@ -28,14 +34,12 @@ class ItemShippedPayload(BaseModel):
     shipping_option: str
     datetime: str  # ISO 8601 from Cloudprinter
 
-def _carrier_slug(shipping_option: str) -> str:
-    # Cloudprinter uses identifiers like "bluedart_in_domestic"; AfterShip wants slug-style
-    return (shipping_option or "").strip().lower().replace(" ", "-")
 
 def _tracking_link(shipping_option: str, tracking: str) -> str:
     if shipping_option and tracking:
-        return f"https://track.aftership.com/{_carrier_slug(shipping_option)}/{tracking}"
+        return f"https://parcelsapp.com/en/tracking/{tracking}"
     return ""
+
 
 def _send_tracking_email(to_email: str,
                          order_ref: str,
@@ -49,6 +53,19 @@ def _send_tracking_email(to_email: str,
 
     display_name = (user_name or "there").strip().title() or "there"
     child_name = (name or "Your").strip().title() or "Your"
+
+    track_url = _tracking_link(shipping_option, tracking)
+    track_button_html = (
+        f"""
+        <p style="margin: 20px 0;">
+          <a href="{track_url}"
+             style="background-color:#5784ba; color:#ffffff; text-decoration:none; font-weight:bold;
+                    padding:12px 18px; border-radius:30px; display:inline-block;">
+            Track your order
+          </a>
+        </p>
+        """ if track_url else ""
+    )
 
     subject = f"Your order from Diffrun {order_ref} has been shipped!"
     html = f"""
@@ -98,9 +115,10 @@ def _send_tracking_email(to_email: str,
 
                   <ul>
                     <li><strong>Order:</strong> {order_ref}</li>
-                    <li><strong>Carrier:</strong> {shipping_option}</li>
                     <li><strong>Tracking:</strong> {tracking}</li>
                   </ul>
+
+                  {track_button_html}
 
                   <p>Thanks,<br />Team Diffrun</p>
 
@@ -142,7 +160,8 @@ def _send_tracking_email(to_email: str,
     msg["Subject"] = subject
     msg["From"] = f"Diffrun <{EMAIL_USER}>"
     msg["To"] = to_email
-    msg.set_content("Your order has been shipped. View this email in HTML to see the formatted message.")
+    msg.set_content(
+        "Your order has been shipped. View this email in HTML to see the formatted message.")
     msg.add_alternative(html, subtype="html")
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
@@ -150,8 +169,9 @@ def _send_tracking_email(to_email: str,
         smtp.send_message(msg)
     print(f"[MAIL] sent shipped-email to {to_email} for order {order_ref}")
 
+
 @router.post("/api/webhook/cloudprinter")
-@router.post("/api/webhook/cloudprinter/") 
+@router.post("/api/webhook/cloudprinter/")
 async def cloudprinter_webhook(
     request: Request,
     background_tasks: BackgroundTasks,
@@ -162,8 +182,10 @@ async def cloudprinter_webhook(
     # ---- Basic Auth (only if BOTH are configured)
     if BASIC_USER and BASIC_PASS:
         if not credentials or not (_eq(credentials.username, BASIC_USER) and _eq(credentials.password, BASIC_PASS)):
-            print(f"[CP WEBHOOK] 401 basic-auth failed (user={getattr(credentials,'username',None)!r})")
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
+            print(
+                f"[CP WEBHOOK] 401 basic-auth failed (user={getattr(credentials, 'username', None)!r})")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
 
     # ---- parse JSON
     raw = await request.body()
@@ -176,7 +198,8 @@ async def cloudprinter_webhook(
 
     # ---- apikey check
     if not _eq(payload.get("apikey"), WEBHOOK_KEY):
-        print(f"[CP WEBHOOK] 401 bad webhook key for order_ref={payload.get('order_reference')}")
+        print(
+            f"[CP WEBHOOK] 401 bad webhook key for order_ref={payload.get('order_reference')}")
         raise HTTPException(status_code=401, detail="Bad webhook apikey")
 
     evt = payload.get("type")
@@ -206,7 +229,8 @@ async def cloudprinter_webhook(
         "shipped_at": data.datetime,
         "print_status": "shipped",
     }
-    orders_collection.update_one({"order_id": data.order_reference}, {"$set": update_fields})
+    orders_collection.update_one({"order_id": data.order_reference}, {
+                                 "$set": update_fields})
 
     # 2) Idempotent email: set shipped_email_sent=True only once; send email iff we flipped it now
     filter_once = {
@@ -222,7 +246,8 @@ async def cloudprinter_webhook(
             {"order_id": data.order_reference},
             {"customer_email": 1, "email": 1, "user_name": 1, "name": 1, "_id": 0},
         )
-        to_email = (order.get("customer_email") or order.get("email") or "").strip() if order else "support@diffrun.com"
+        to_email = (order.get("customer_email") or order.get("email")
+                    or "").strip() if order else "support@diffrun.com"
         # to_email = "support@diffrun.com"
         user_name = (order.get("user_name") if order else None)
         name = order.get("name") if order else None
@@ -238,11 +263,14 @@ async def cloudprinter_webhook(
                 user_name,
                 name
             )
-            print(f"[CP WEBHOOK] queued shipped-email to {to_email} for {data.order_reference}")
+            print(
+                f"[CP WEBHOOK] queued shipped-email to {to_email} for {data.order_reference}")
         else:
-            print(f"[CP WEBHOOK] no customer_email/email in DB for {data.order_reference}; email skipped")
+            print(
+                f"[CP WEBHOOK] no customer_email/email in DB for {data.order_reference}; email skipped")
     else:
-        print(f"[CP WEBHOOK] shipped-email already sent for {data.order_reference}; skipping")
+        print(
+            f"[CP WEBHOOK] shipped-email already sent for {data.order_reference}; skipping")
 
     dt_ms = (time.perf_counter() - t0) * 1000
     print(f"[CP WEBHOOK] --> 200 ok ({dt_ms:.1f} ms) ItemShipped {order_ref}")
