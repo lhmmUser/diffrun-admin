@@ -876,114 +876,175 @@ def get_shipping_level(country_code: str) -> str:
         return "cp_ground"
     return "cp_ground"  # default fallback
 
+
 def _send_production_email(
     to_email: str,
     display_name: str,
     child_name: str,
     job_id: str | None,
-    order_id: str | None, 
+    order_id: str | None,
 ):
     if not to_email:
         print("[MAIL] skipped: empty recipient for production email")
         return
 
     display = (display_name or "there").strip().title() or "there"
-    child   = (child_name or "Your").strip().title() or "Your"
+    child = (child_name or "Your").strip().title() or "Your"
     track_href = f"https://diffrun.com/track-your-order?job_id={job_id}"
     safe_order = order_id or "—"
-    subject = f"Order {safe_order}: {child_name}'s storybook is now in production 🎉"
+    subject = f"Order {safe_order}: {child}'s storybook is now in production 🎉"
 
-    html = f"""\
-        <html>
-        <head>
-            <meta charset="UTF-8">
-            <meta name="color-scheme" content="light">
-            <meta name="supported-color-schemes" content="light">
-            <style>
-                @media only screen and (max-width: 480px) {{
-                    .container {{
-                        width: 100% !important;
-                        max-width: 100% !important;
-                        padding: 16px !important;
-                    }}
-                    .col, .img-col {{
-                        display: block !important;
-                        width: 100% !important;
-                    }}
-                    .img-col img {{
-                        width: 100% !important;
-                        height: auto !important;
-                    }}
-                    .browse-now-btn {{
-                        font-size: 14px !important;
-                        padding: 12px 16px !important;
-                    }}
-                    p, li, a {{
-                        font-size: 15px !important;
-                        line-height: 1.5 !important;
-                    }}
-                }}
-            </style>
-        </head>
-        <body style="font-family: Arial, sans-serif; background:#f7f7f7; margin:0; padding:20px;">
-            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
+    html_template = """<!doctype html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="x-apple-disable-message-reformatting">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="supported-color-schemes" content="light">
+  <style>
+    body { margin:0; padding:20px; background:#f7f7f7; -webkit-text-size-adjust:100%; -ms-text-size-adjust:100%; }
+    .container { width:100%; max-width:768px; margin:0 auto; background:#ffffff; border-radius:8px; box-shadow:0 0 10px rgba(0,0,0,0.08); overflow:hidden; }
+    .inner { padding:24px; font-family:Arial, Helvetica, sans-serif; color:#111; }
+    p { margin:0 0 14px 0; font-size:16px; line-height:1.5; }
+    .row { width:100%; }
+    .col { vertical-align:top; }
+    .col-text { padding:20px; }
+    .col-img { padding:0 20px 0 0; }
+    img { border:0; outline:none; text-decoration:none; display:block; height:auto; }
+    .badge { display:inline-block; padding:0; margin:0; }
+
+    @keyframes shine-sweep {
+      0%   { transform: translateX(-100%) rotate(45deg); }
+      50%  { transform: translateX(100%)  rotate(45deg); }
+      100% { transform: translateX(100%)  rotate(45deg); }
+    }
+
+    .cta {
+      position: relative;
+      overflow: hidden;
+      border-radius:9999px; text-align:center; mso-line-height-rule:exactly;
+      font-family:Arial, Helvetica, sans-serif; font-weight:bold; text-decoration:none; display:block;
+      color:#ffffff !important; background:#5784ba;
+    }
+    .cta::before {
+      content: "";
+      position: absolute;
+      top: 0;
+      left: -50%;
+      height: 100%;
+      width: 200%;
+      background: linear-gradient(120deg, transparent 0%, rgba(255,255,255,0.6) 50%, transparent 100%);
+      animation: shine-sweep 4s infinite;
+    }
+
+    .cta-wrap { width:auto; }
+    .cta-text { font-size:15px; line-height:1.2; padding:12px 24px; display:block; color:#ffffff !important; text-decoration:none; }
+    .cta-secondary { background:#5784ba; } /* static secondary */
+
+    .banner { background:#f7f6cf; border-radius:8px; }
+    .banner p { font-size:15px; }
+    .center { text-align:center; }
+
+    @media only screen and (max-width:480px) {
+      .inner { padding:16px !important; }
+      p { font-size:15px !important; }
+      .stack { display:block !important; width:100% !important; }
+      .col-text { padding:0px !important; text-align:center !important; }
+      .col-img { padding:16px 0 0 0 !important; text-align:center !important; }
+      .cta-wrap { width:100% !important; }
+      .cta-text { font-size:13px !important; padding:10px 14px !important; }
+      .center-sm { text-align:center !important; }
+      .banner { padding:12px !important; }
+      .mt-sm { margin-top:12px !important; }
+      .banner .row { display:block !important; width:100% !important; }
+      .banner .col { display:block !important; width:100% !important; }
+      .banner img { margin:0 auto !important; }
+    }
+  </style>
+</head>
+<body>
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+    <tr>
+      <td align="center">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" class="container">
+          <tr>
+            <td class="inner">
+              <p>Hey {display},</p>
+              <p><strong>{child}'s storybook</strong> has been moved to production at our print factory. 🎉</p>
+              <p>It will be shipped within the next 3–4 business days. We will notify you with the tracking ID once your order is shipped.</p>
+
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0" class="cta-wrap" style="margin:8px 0 18px 0;">
                 <tr>
-                    <td align="center">
-                        <table role="presentation" class="container" width="100%" cellpadding="0" cellspacing="0" border="0"
-                            style="max-width: 48rem; margin: 0 auto; background:#ffffff; border-radius:8px; box-shadow:0 0 10px rgba(0,0,0,0.08); overflow:hidden;">
-                            <tr>
-                                <td style="padding:24px;">
-                                    <p>Hey {display},</p>
-                                    <p><strong>{child}'s storybook</strong> has been moved to production at our print factory. 🎉</p>
-                                    <p>It will be shipped within the next 3–4 business days. We will notify you with the tracking ID once your order is shipped.</p>
-                                    <a href="{track_href}"
-                                        style="display: inline-block; background:#5784ba; color: white; text-decoration: none; border-radius: 18px; padding: 12px 24px; font-weight: bold;">
-                                        Track your order
-                                    </a>
-                                    <p>Thanks,<br />Team Diffrun</p>
-                                    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
-                                        style="margin-top: 30px; background-color: #f7f6cf; border-radius: 8px;">
-                                        <tr>
-                                            <td class="col" style="padding: 20px; vertical-align: middle;">
-                                                <p style="font-size: 15px; margin: 0;">
-                                                    Explore more magical books in our growing collection &nbsp;
-                                                    <button class="browse-now-btn"
-                                                        style="background-color:#5784ba; margin-top: 20px; border-radius: 30px; border: none; padding:10px 15px;">
-                                                        <a href="https://diffrun.com"
-                                                            style="color:white; font-weight: bold; text-decoration: none; display:inline-block;">
-                                                            Browse Now
-                                                        </a>
-                                                    </button>
-                                                </p>
-                                            </td>
-                                            <td class="img-col" width="300"
-                                                style="padding: 0 20px 0 0; margin: 0; vertical-align: middle;">
-                                                <img src="https://diffrungenerations.s3.ap-south-1.amazonaws.com/email_image+(2).jpg"
-                                                    alt="Storybook Preview" width="300"
-                                                    style="display: block; border-radius: 0; margin: 0; padding: 0;">
-                                            </td>
-                                        </tr>
-                                    </table>
-                                </td>
-                            </tr>
-                        </table>
-                    </td>
+                  <td>
+                    <a href="{track_href}" class="cta">
+                      <span class="cta-text">Track your order</span>
+                    </a>
+                  </td>
                 </tr>
-            </table>
-        </body>
-        </html>
-        """
+              </table>
+
+              <p>Thanks,<br>Team Diffrun</p>
+
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" class="banner" style="margin-top:24px;">
+                <tr>
+                  <td>
+                    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" class="row">
+                      <tr>
+                        <td class="col col-text stack" width="60%">
+                          <p>Explore more magical books in our growing collection</p>
+
+                          <table role="presentation" cellpadding="0" cellspacing="0" border="0" class="cta-wrap mt-sm" style="margin-top:16px;">
+                            <tr>
+                              <td>
+                                <a href="https://diffrun.com" class="cta cta-secondary">
+                                  <span class="cta-text">Browse Now</span>
+                                </a>
+                              </td>
+                            </tr>
+                          </table>
+                        </td>
+
+                        <td class="col col-img stack" width="40%" align="right">
+                          <img src="https://diffrungenerations.s3.ap-south-1.amazonaws.com/email_image+(2).jpg"
+                               alt="Storybook Preview" width="300" style="max-width:100%;">
+                        </td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+              </table>
+
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>"""
+
+    html = (html_template
+            .replace("{display}", display)
+            .replace("{child}", child)
+            .replace("{track_href}", track_href))
 
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = f"Diffrun <{EMAIL_USER}>"
     msg["To"] = to_email
-    msg.set_content("Your book has moved to production. View this email in HTML to see the formatted message.")
+    msg.set_content(
+        f"Hey {display},\n\n"
+        f"{child}'s storybook has been moved to production. "
+        f"Track here: {track_href}\n\n"
+        "Thanks,\nTeam Diffrun"
+    )
     msg.add_alternative(html, subtype="html")
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
         smtp.login(EMAIL_USER, EMAIL_PASS)
         smtp.send_message(msg)
+
 
 @app.post("/orders/approve-printing")
 async def approve_printing(order_ids: List[str], background_tasks: BackgroundTasks):
@@ -1332,6 +1393,34 @@ def send_feedback_email(job_id: str, background_tasks: BackgroundTasks):
         <meta name="supported-color-schemes" content="light">
         <title>We'd love your feedback</title>
         <style>
+        @keyframes shine-sweep {{
+          0%   {{ transform: translateX(-100%) rotate(45deg); }}
+          50%  {{ transform: translateX(100%)  rotate(45deg); }}
+          100% {{ transform: translateX(100%)  rotate(45deg); }}
+        }}
+        .review-btn {{
+          position: relative;
+          display: inline-block;
+          border-radius: 20px;
+          font-family: Arial, Helvetica, sans-serif;
+          font-weight: bold;
+          text-decoration: none;
+          color: #ffffff !important;
+          background-color: #5784ba;
+          overflow: hidden;
+          padding: 12px 24px;
+          font-size: 16px;
+        }}
+        .review-btn::before {{
+          content: "";
+          position: absolute;
+          top: 0;
+          left: -50%;
+          height: 100%;
+          width: 200%;
+          background: linear-gradient(120deg, transparent 0%, rgba(255,255,255,0.6) 50%, transparent 100%);
+          animation: shine-sweep 4s infinite;
+        }}
         @media only screen and (max-width: 480px) {{
             h2 {{ font-size: 15px !important; }}
             p {{ font-size: 15px !important; }}
@@ -1339,11 +1428,11 @@ def send_feedback_email(job_id: str, background_tasks: BackgroundTasks):
             .title-text {{ font-size: 18px !important; }}
             .small-text {{ font-size: 12px !important; }}
             .logo-img {{ width: 300px !important; }}
-            .review-btn {{ font-size: 14px !important; padding: 12px 20px ; font-size: 8px !important; }}
+            .review-btn {{ font-size: 13px !important; padding: 10px 16px !important; width: 100% !important; text-align: center !important; }}
             .browse-now-btn {{
-            font-size: 12px !important;
-            padding: 8px 12px !important;
-        }}
+              font-size: 12px !important;
+              padding: 8px 12px !important;
+            }}
         }}
         </style>
 
@@ -1369,7 +1458,7 @@ def send_feedback_email(job_id: str, background_tasks: BackgroundTasks):
                 <p style="text-align: left; margin: 30px 0;">
                 <a href="https://search.google.com/local/writereview?placeid=ChIJn5mGENoTrjsRPHxH86vgui0"
                     class="review-btn"
-                    style="background-color: #5784ba; color: #ffffff; text-decoration: none; padding: 10px 20px; border-radius: 20px; font-weight: bold; font-size: 16px;">
+                    style="background-color: #5784ba; color: #ffffff; text-decoration: none; border-radius: 20px;">
                     Leave a Review
                 </a>
                 </p>
@@ -1380,7 +1469,6 @@ def send_feedback_email(job_id: str, background_tasks: BackgroundTasks):
 
                 <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
 
-                <!-- Explore More Row -->
                 <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top: 30px;">
                 <tr>
                     <td colspan="2" style="padding: 10px 0; text-align: left;">
@@ -1390,7 +1478,6 @@ def send_feedback_email(job_id: str, background_tasks: BackgroundTasks):
                     </td>
                 </tr>
 
-                <!-- Order reference -->
                 <tr>
                     <td style="padding: 0; vertical-align: top; font-size: 12px; color: #333; font-weight: 500;">
                     Order reference ID: <span>{order.get("order_id", "N/A")}</span>
@@ -1400,15 +1487,13 @@ def send_feedback_email(job_id: str, background_tasks: BackgroundTasks):
                     </td>
                 </tr>
 
-                <!-- Book title and image block -->
                 <tr>
                     <td colspan="2" style="padding: 0; margin: 0; background-color: #f7f6cf;">
                     <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse: collapse; padding: 0; margin: 0;">
                         <tr>
-                        <!-- Left Title -->
                         <td style="padding: 20px; vertical-align: middle; margin: 0;">
                             
-                            <p style="font-size: 15px; margin: 0; ">
+                            <p style="font-size: 15px; margin: 0;">
                         Explore more magical books in our growing collection &nbsp;
                         <button class="browse-now-btn" style="background-color:#5784ba; margin-top: 20px; border-radius: 30px;border: none;padding:10px 15px"><a href="https://diffrun.com" style="color:white; font-weight: bold; text-decoration: none;">
                         Browse Now
@@ -1416,7 +1501,6 @@ def send_feedback_email(job_id: str, background_tasks: BackgroundTasks):
                     </p>
                         </td>
 
-                        <!-- Right Image -->
                         <td width="300" style="padding: 0; margin: 0; vertical-align: middle;">
                             <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse: collapse;">
                             <tr>
@@ -1468,7 +1552,6 @@ def send_feedback_email(job_id: str, background_tasks: BackgroundTasks):
         logger.error(f"❌ Failed to send feedback email: {e}")
         raise HTTPException(status_code=500, detail="Failed to send email.")
 
-    # background_tasks.add_task(send_email, recipient_email, subject, html_body)
     return {"message": "Feedback email queued"}
 
 
