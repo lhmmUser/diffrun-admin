@@ -1445,7 +1445,7 @@ def send_feedback_email(job_id: str, background_tasks: BackgroundTasks):
                 <img src="https://diffrungenerations.s3.ap-south-1.amazonaws.com/Diffrun_logo+(1).png" alt="Diffrun" class="logo-img" style="max-width: 100px;">
                 </div>
 
-                <h2 style="color: #333; font-size: 15px;">Hey there {order.get("user_name")},</h2>
+                <h2 style="color: #333; font-size: 15px;">Hey {order.get("user_name")},</h2>
 
                 <p style="font-size: 14px; color: #555;">
                 We truly hope {order.get("name", "")} is enjoying {personalize_pronoun(order.get("gender", "   "))} magical storybook, <strong>{generate_book_title(order.get("book_id"), order.get("name"))}</strong>! 
@@ -1459,7 +1459,7 @@ def send_feedback_email(job_id: str, background_tasks: BackgroundTasks):
                 <a href="https://search.google.com/local/writereview?placeid=ChIJn5mGENoTrjsRPHxH86vgui0"
                     class="review-btn"
                     style="background-color: #5784ba; color: #ffffff; text-decoration: none; border-radius: 20px;">
-                    Leave a Review
+                    Leave a Google Review
                 </a>
                 </p>
 
