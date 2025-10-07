@@ -2547,7 +2547,7 @@ def cron_feedback_emails(limit: int = 200):
                                         "timezone": "Asia/Kolkata",
                                     }
                                 },
-                                6,
+                                10,
                             ]
                         },
                         {
@@ -2560,7 +2560,7 @@ def cron_feedback_emails(limit: int = 200):
                                         "timezone": "Asia/Kolkata",
                                     }
                                 },
-                                7,
+                                11,
                             ]
                         },
                     ]
