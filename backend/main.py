@@ -15,7 +15,7 @@ import smtplib
 from email.message import EmailMessage
 import logging
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr, Field
 from contextlib import asynccontextmanager
 from apscheduler.schedulers.background import BackgroundScheduler
 import boto3
@@ -139,6 +139,10 @@ COUNTRY_CODES = {
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
+
+@app.get("/health")
+def health_check():
+    return {"status": "ok"}
 
 def split_full_name(full_name: str) -> tuple[str, str]:
     """Split a full name into first name and last name."""
@@ -821,6 +825,51 @@ def get_order_detail(order_id: str):
         }
     }
 
+class ShippingAddressUpdate(BaseModel):
+    street: Optional[str] = None
+    city:   Optional[str] = None
+    state:  Optional[str] = None
+    country:Optional[str] = None
+    zip:    Optional[str] = Field(None, alias="postal_code")
+
+class OrderUpdate(BaseModel):
+    # only editable fields
+    name: Optional[str] = None
+    email: Optional[EmailStr] = None
+    phone: Optional[str] = None
+    gender: Optional[str] = None
+    book_style: Optional[str] = None  # "paperback" | "hardcover"
+    discount_code: Optional[str] = None
+    quantity: Optional[int] = None
+    cust_status: Optional[str] = None  # "red" | "green" | None
+    shipping_address: Optional[ShippingAddressUpdate] = None
+
+@app.patch("/orders/{order_id}")
+def patch_order(order_id: str, update: OrderUpdate):
+    doc = update.model_dump(exclude_unset=True, by_alias=True)
+
+    # build $set only for provided fields
+    set_ops = {}
+    for k, v in doc.items():
+        if v is None:
+            continue
+        if k == "shipping_address":
+            for sk, sv in v.items():
+                if sv is not None:
+                    set_ops[f"shipping_address.{sk}"] = sv
+        else:
+            set_ops[k] = v
+
+    if not set_ops:
+        return {"updated": False, "message": "No changes"}
+
+    res = orders_collection.update_one({"order_id": order_id}, {"$set": set_ops})
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    # return fresh copy (optionally project only what UI needs)
+    updated = orders_collection.find_one({"order_id": order_id}, {"_id": 0})
+    return {"updated": bool(res.modified_count), "order": updated}
 
 def get_pdf_page_count(pdf_url: str) -> int:
     try:
