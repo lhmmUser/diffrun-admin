@@ -104,9 +104,9 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
   const orderIdInUrl = searchParams.get("order_id") || null;
 
   const openOrder = (orderId: string) => {
-    const sp = new URLSearchParams(window.location.search);
-    sp.set("order_id", orderId);
-    router.push(`?${sp.toString()}`, { scroll: false });
+    router.push(`/orders/order-detail?order_id=${encodeURIComponent(orderId)}`, {
+      scroll: false,
+    });
   };
 
   const closeOrder = () => {
@@ -153,7 +153,7 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
           city: detailOrder.shipping_address?.city || "",
           state: detailOrder.shipping_address?.state || "",
           country: detailOrder.shipping_address?.country || "",
-          postal_code: detailOrder.shipping_address?.zip || "", // maps to zip
+          postal_code: detailOrder.shipping_address?.zip || "",
         },
       });
       setDirty(false);
@@ -280,29 +280,9 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
       params.append("sort_dir", sortDir);
 
       const res = await fetch(`${baseUrl}/orders?${params.toString()}`);
-      console.log(baseUrl, 'baseUrl');
       const rawData: RawOrder[] = await res.json();
 
       const transformed: Order[] = rawData.map((order: RawOrder): Order => {
-        // Helper function to safely format the approval date
-        const formatApprovalDate = (approved_at: any) => {
-          if (!approved_at) return "";
-          if (typeof approved_at === "string") return approved_at;
-          if (approved_at.$date && approved_at.$date.$numberLong) {
-            return new Date(Number(approved_at.$date.$numberLong)).toLocaleString('en-IN', {
-              day: 'numeric',
-              month: 'numeric',
-              year: 'numeric',
-              hour: 'numeric',
-              minute: 'numeric',
-              hour12: true,
-              timeZone: 'Asia/Kolkata'
-            });
-          };
-
-
-          return "";
-        };
 
         return {
           orderId: order.order_id || "N/A",
@@ -336,8 +316,6 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
   };
 
   useEffect(() => {
-
-
     fetchOrders();
   }, [filterStatus, filterPrintApproval, filterDiscountCode, filterBookStyle, sortBy, sortDir]);
 
@@ -412,7 +390,7 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
           },
           body: JSON.stringify(selectedOrderIds),
         });
-        console.log(baseUrl, 'baseUrl');
+
         if (!response.ok) {
           throw new Error(`HTTP error! status: ${response.status}`);
         }
@@ -448,23 +426,6 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
         const rawData: RawOrder[] = await ordersRes.json();
 
         const transformed: Order[] = rawData.map((order: RawOrder): Order => {
-          // Helper function to safely format the approval date
-          const formatApprovalDate = (approved_at: any) => {
-            if (!approved_at) return "";
-            if (typeof approved_at === "string") return approved_at;
-            if (approved_at.$date && approved_at.$date.$numberLong) {
-              return new Date(Number(approved_at.$date.$numberLong)).toLocaleString('en-IN', {
-                day: 'numeric',
-                month: 'numeric',
-                year: 'numeric',
-                hour: 'numeric',
-                minute: 'numeric',
-                hour12: true,
-                timeZone: 'Asia/Kolkata'
-              });
-            }
-            return "";
-          };
 
           return {
             orderId: order.order_id || "N/A",
@@ -562,24 +523,47 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
         alert(`❌ Failed to unapprove orders: ${error instanceof Error ? error.message : 'Unknown error'}`);
       }
     } else if (action === "mark_green" || action === "mark_red") {
-      const size = selectedOrders.size;
-      if (size !== 1) return; // hard guard
-      const [orderId] = Array.from(selectedOrders);
       const status = action === "mark_green" ? "green" : "red";
+      const orderIds = Array.from(selectedOrders);
+      if (orderIds.length === 0) return;
 
-      const res = await fetch(`${baseUrl}/orders/set-cust-status/${encodeURIComponent(orderId)}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ status }),
-      });
+      try {
+        const results = await Promise.allSettled(
+          orderIds.map(async (orderId) => {
+            const res = await fetch(
+              `${baseUrl}/orders/set-cust-status/${encodeURIComponent(orderId)}`,
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ status }),
+              }
+            );
+            if (!res.ok) {
+              const err = await res.json().catch(() => ({}));
+              throw new Error(err.detail || `HTTP ${res.status}`);
+            }
+            return orderId;
+          })
+        );
 
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.detail || `HTTP ${res.status}`);
+        const successes = results.filter(r => r.status === "fulfilled").length;
+        const failures = results.filter(r => r.status === "rejected");
+
+        if (successes > 0) {
+          alert(`Set ${status.toUpperCase()} for ${successes} order(s)`);
+        }
+        if (failures.length > 0) {
+          console.error("Failed to set status for:", failures);
+          alert(`❌ Failed to set status for ${failures.length} order(s). Check console for details.`);
+        }
+
+        // Refresh table and clear selection
+        await fetchOrders();
+        setSelectedOrders(new Set());
+      } catch (e) {
+        console.error(e);
+        alert("❌ Something went wrong while updating statuses.");
       }
-
-      alert(`Set ${status.toUpperCase()} for ${orderId}`);
-      // optionally refresh your table here
     }
 
   }
@@ -634,12 +618,10 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
     return "";
   };
 
-
   function convertToIST24HourFormat(utcDateStr: string): string {
-    const date = new Date(utcDateStr); // Assume input is UTC ISO string
+    const date = new Date(utcDateStr);
     if (isNaN(date.getTime())) return "Invalid date";
 
-    // IST offset = UTC + 5:30
     const istDate = new Date(date.getTime() + (5.5 * 60 * 60 * 1000));
 
     const day = istDate.getDate().toString().padStart(2, '0');
@@ -664,14 +646,15 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
       } else if (typeof dateInput === "string" && dateInput.trim() !== "") {
         dt = new Date(dateInput); // ISO string
       }
-    } catch { /* ignore */ }
+    } catch {
+      return "";
+    }
     if (!dt || isNaN(dt.getTime())) return "";
 
-    // Format as DD MMM in UTC (ignore IST shift)
     const s = dt.toLocaleString("en-GB", {
       day: "2-digit",
       month: "short",
-      timeZone: "UTC",   // force UTC day, not IST
+      timeZone: "UTC",
     });
 
     return s.replace(/\bSep\b/, "Sept");
@@ -683,7 +666,7 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
 
 
       <h2 className="text-2xl font-semibold text-black">{title}</h2>
-      {/* Action Buttons */}
+
       <div className="flex flex-wrap gap-2 items-center">
         <button
           onClick={() => handleAction('approve')}
@@ -753,16 +736,16 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
         <button
           type="button"
           onClick={() => handleAction("mark_red")}
-          disabled={selectedOrders.size !== 1}
-          className={`px-3 py-2 rounded text-sm ${selectedOrders.size !== 1
-            ? "bg-gray-200 text-gray-500 cursor-not-allowed"
-            : "bg-rose-600 text-white hover:bg-rose-700"}`}
+          disabled={selectedOrders.size === 0} // <= was: selectedOrders.size !== 1
+          className={`px-4 py-2 rounded text-sm font-medium transition ${selectedOrders.size === 0
+              ? "bg-gray-200 text-gray-500 cursor-not-allowed"
+              : "bg-rose-600 text-white hover:bg-rose-700"
+            }`}
         >
           Mark Red
         </button>
       </div>
 
-      {/* Filters */}
       <div className="flex flex-wrap gap-2">
         <select
           className="border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring focus:ring-blue-200 text-black"
@@ -830,7 +813,7 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
 
 
       </div>
-      {/* Table */}
+
       <div className="overflow-auto rounded border border-gray-200">
         <table className="min-w-full table-auto text-sm text-left">
           <thead className="bg-gray-100 sticky top-0 z-10">
@@ -867,18 +850,7 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
                     className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
                   />
                 </td>
-                <td className="px-2 py-2 text-xs">
-                  {order.orderId !== "N/A" ? (
-                    <button
-                      type="button"
-                      onClick={() => openOrder(order.orderId)}
-                      className="text-blue-600 hover:underline"
-                      title="View full order details"
-                    >
-                      {order.orderId}
-                    </button>
-                  ) : <span>N/A</span>}
-                </td>
+                <td className="px-2 py-2 text-xs"> {order.orderId !== "N/A" ? (<button type="button" onClick={() => openOrder(order.orderId)} className="text-blue-600 hover:underline" title="View full order details" > {order.orderId} </button>) : <span>N/A</span>} </td>
 
                 <td className="px-2 py-2 text-black text-xs">{order.name}</td>
                 <td className="px-2 py-2 text-black text-xs">{order.city}</td>
@@ -1011,26 +983,24 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
 
       </div>
 
-      {/* Progress Tracker */}
       <PrintProgress isVisible={showProgress} results={printResults} />
 
       {orderIdInUrl && (
         <div className="fixed inset-0 z-50">
-          {/* Backdrop */}
+
           <div
             className="absolute inset-0 bg-black/30 backdrop-blur-sm transition-opacity duration-200"
             onClick={closeOrder}
             aria-label="Close order details"
           />
 
-          {/* Panel */}
           <div className="absolute right-0 top-0 h-full w-full max-w-md bg-white shadow-2xl transition-transform duration-200">
             <div className="flex flex-col h-full">
-              {/* Header */}
+
               <div className="flex items-center justify-between p-6 border-b border-gray-100 bg-white">
                 <div>
                   <h3 className="text-xl font-semibold text-gray-900">Order Details</h3>
-                  <p className="text-sm text-gray-500 mt-1">{orderIdInUrl}</p>
+                  <p className="text-xl text-gray-700 mt-1 font-bold">{orderIdInUrl}</p>
                 </div>
                 <button
                   onClick={closeOrder}
@@ -1043,7 +1013,6 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
                 </button>
               </div>
 
-              {/* Body */}
               <div className="flex-1 overflow-y-auto p-6">
                 {detailLoading && (
                   <div className="flex items-center justify-center py-8">
@@ -1058,13 +1027,12 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
                   </div>
                 )}
 
-                {/* ✅ Editable form INSIDE the drawer */}
                 {form && !detailLoading && !detailError && (
                   <form
                     className="space-y-4 text-sm"
                     onSubmit={(e) => { e.preventDefault(); saveOrder(); }}
                   >
-                    {/* Customer */}
+
                     <div>
                       <h4 className="font-medium text-gray-900 text-xs uppercase tracking-wide mb-2">Customer</h4>
                       <div className="space-y-3">
@@ -1096,7 +1064,6 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
                       </div>
                     </div>
 
-                    {/* Contact */}
                     <div>
                       <h4 className="font-medium text-gray-900 text-xs uppercase tracking-wide mb-2">Contact</h4>
                       <div className="grid grid-cols-2 gap-3">
@@ -1113,7 +1080,6 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
                       </div>
                     </div>
 
-                    {/* Book */}
                     <div>
                       <h4 className="font-medium text-gray-900 text-xs uppercase tracking-wide mb-2">Book</h4>
                       <div className="grid grid-cols-3 gap-3">
@@ -1124,14 +1090,32 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
                         </div>
                         <div>
                           <label className="block font-medium">Quantity</label>
-                          <input type="number" min={1} value={form.quantity}
-                            onChange={(e) => updateForm("quantity", parseInt(e.target.value || "1", 10))}
-                            className="w-full border rounded px-2 py-1" />
+                          <input
+                            type="number"
+                            min={1}
+                            value={form.quantity}
+                            onChange={(e) => {
+                              const v = e.target.value;
+                              if (v === "") {
+                                updateForm("quantity", "");
+                                return;
+                              }
+                              const n = Number(v);
+                              if (Number.isNaN(n)) return;
+                              updateForm("quantity", Math.max(1, n));
+                            }}
+                            onBlur={() => {
+                              if (form.quantity === "" || Number.isNaN(Number(form.quantity))) {
+                                updateForm("quantity", 1);
+                              }
+                            }}
+                            className="w-full border rounded px-2 py-1"
+                          />
+
                         </div>
                       </div>
                     </div>
 
-                    {/* Status */}
                     <div>
                       <h4 className="font-medium text-gray-900 text-xs uppercase tracking-wide mb-2">Status</h4>
                       <div>
@@ -1145,7 +1129,6 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
                       </div>
                     </div>
 
-                    {/* Shipping */}
                     <div>
                       <h4 className="font-medium text-gray-900 text-xs uppercase tracking-wide mb-2">Shipping Address</h4>
                       <div className="grid grid-cols-2 gap-3">
@@ -1172,11 +1155,10 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
                 )}
               </div>
 
-              {/* Footer actions */}
               {form && !detailLoading && !detailError && (
                 <div className="p-4 border-t bg-white flex gap-2 justify-end">
                   <button
-                    onClick={() => setForm((f: any) => ({ ...f }))} // simple no-op reset (keep if you implement real reset)
+                    onClick={() => setForm((f: any) => ({ ...f }))}
                     className="px-3 py-2 rounded text-sm border"
                     type="button"
                   >
