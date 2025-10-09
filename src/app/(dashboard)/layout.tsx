@@ -27,7 +27,7 @@ export default function RootLayout({
         
           <aside
             style={{ backgroundColor: "#5784ba" }}
-            className={` text-white w-60 h-full p-6 fixed top-0 left-0 z-50 transform md:translate-x-0 transition-transform duration-200 ease-in-out
+            className={` text-white w-60 h-full sm:min-h-screen p-6 fixed top-0 left-0 z-50 transform md:translate-x-0 transition-transform duration-200 ease-in-out
               ${sidebarOpen ? "translate-x-0" : "-translate-x-full"} md:relative md:block`}
           >
             <div className="mb-8 pt-4">
