@@ -15,7 +15,7 @@ import smtplib
 from email.message import EmailMessage
 import logging
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, ConfigDict
 from contextlib import asynccontextmanager
 from apscheduler.schedulers.background import BackgroundScheduler
 import boto3
@@ -619,6 +619,10 @@ def generate_book_title(book_id, child_name):
         return f"{child_name}'s Storybook"
 
 
+import re
+from typing import Optional, List
+from fastapi import Query
+
 @app.get("/orders")
 def get_orders(
     sort_by: Optional[str] = Query(None, description="Field to sort by"),
@@ -628,12 +632,13 @@ def get_orders(
     filter_print_approval: Optional[str] = Query(None),
     filter_discount_code: Optional[str] = Query(None),
     exclude_discount_code: Optional[List[str]] = Query(None),
+    q: Optional[str] = Query(None, description="Search by job_id, order_id, email, name, discount_code, city, locale, book_id"),
 ):
-    # Base query: only show paid orders
+    # Base query
     query = {"paid": True}
     ex_values: List[str] = []
 
-    # Add additional filters
+    # --- Filters (same as before) ---
     if filter_status == "approved":
         query["approved"] = True
     elif filter_status == "uploaded":
@@ -653,43 +658,50 @@ def get_orders(
         print(f"[DEBUG] Filter discount code: {filter_discount_code}")
         if filter_discount_code.lower() == "none":
             query["discount_amount"] = 0
-            # already set by default, but explicit is good
             query["paid"] = True
         else:
             query["discount_code"] = filter_discount_code.upper()
 
+    # Exclude discount codes
     if exclude_discount_code:
-    # Normalize to a list
         if isinstance(exclude_discount_code, list):
             ex_values = exclude_discount_code
         else:
-            # support CSV in a single param too (e.g., "TEST,REJECTED")
             ex_values = [p.strip() for p in str(exclude_discount_code).split(",")]
 
-    # Build exclusion only if we have values
     ex_values = [v for v in (s.strip() for s in ex_values) if v]
     if ex_values:
-        # Case-insensitive exact match using anchored regexes
         regexes = [re.compile(rf"^{re.escape(v)}$", re.IGNORECASE) for v in ex_values]
-
-        # If you already have a discount_code filter, AND them together
         existing = query.pop("discount_code", None)
-
         exclude_cond = {"discount_code": {"$nin": regexes}}
-
         if existing is None:
-            # no prior condition → just set the exclusion
             query["discount_code"] = exclude_cond["discount_code"]
         else:
-            # merge with prior one using $and
-            # existing might be a scalar or a dict; both are fine
             query["$and"] = [{"discount_code": existing}, exclude_cond]
 
-    # Fetch and sort records
+    # --- Extended free-text search ---
+    if q:
+        term = q.strip()
+        if term:
+            rx = re.compile(re.escape(term), re.IGNORECASE)
+            query.setdefault("$and", []).append({
+                "$or": [
+                    {"order_id": {"$regex": rx}},
+                    {"job_id": {"$regex": rx}},
+                    {"email": {"$regex": rx}},
+                    {"name": {"$regex": rx}},
+                    {"discount_code": {"$regex": rx}},
+                    {"book_id": {"$regex": rx}},
+                    {"locale": {"$regex": rx}},
+                    {"shipping_address.city": {"$regex": rx}},
+                ]
+            })
+
+    # Sorting
     sort_field = sort_by if sort_by else "created_at"
     sort_order = 1 if sort_dir == "asc" else -1
 
-    # Only fetch the fields we need
+    # Projection
     projection = {
         "order_id": 1,
         "job_id": 1,
@@ -720,12 +732,10 @@ def get_orders(
         "cust_status": 1,
     }
 
-    records = list(orders_collection.find(
-        query, projection).sort(sort_field, sort_order))
+    records = list(orders_collection.find(query, projection).sort(sort_field, sort_order))
     result = []
 
     for doc in records:
-
         result.append({
             "order_id": doc.get("order_id", ""),
             "job_id": doc.get("job_id", ""),
@@ -735,8 +745,8 @@ def get_orders(
             "name": doc.get("name", ""),
             "city": doc.get("shipping_address", {}).get("city", ""),
             "price": doc.get("price", doc.get("total_price", doc.get("amount", doc.get("total_amount", 0)))),
-            "paymentDate": ((doc.get("processed_at", ""))),
-            "approvalDate": ((doc.get("approved_at", ""))),
+            "paymentDate": doc.get("processed_at", ""),
+            "approvalDate": doc.get("approved_at", ""),
             "status": "Approved" if doc.get("approved") else "Uploaded",
             "bookId": doc.get("book_id", ""),
             "bookStyle": doc.get("book_style", ""),
@@ -751,7 +761,6 @@ def get_orders(
         })
 
     return result
-
 
 @app.post("/orders/set-cust-status/{order_id}")
 async def set_cust_status(
@@ -2811,6 +2820,7 @@ def _build_order_response(order: Dict[str, Any]) -> Dict[str, Any]:
         "book_style": order.get("book_style", ""),
         "book_id": order.get("book_id", ""),
         "preview_url": order.get("preview_url", ""),
+        "locale": order.get("locale", ""),
         "child": child_details,
         "customer": customer_details,
         "order": order_details,
@@ -2826,37 +2836,106 @@ def get_order_detail(order_id: str):
     return _build_order_response(order)
 
 class ShippingAddressUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     street: Optional[str] = None
     city:   Optional[str] = None
     state:  Optional[str] = None
     country:Optional[str] = None
-    zip:    Optional[str] = Field(None, alias="postal_code") 
+    zip:    Optional[str] = Field(None, alias="postal_code")
+
+class TimelineUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    created_at:    Optional[str] = None
+    processed_at:  Optional[str] = None
+    approved_at:   Optional[str] = None
+    print_sent_at: Optional[str] = None
+    shipped_at:    Optional[str] = None
 
 class OrderUpdate(BaseModel):
-    name: Optional[str] = None
-    email: Optional[EmailStr] = None
-    phone: Optional[str] = None
-    gender: Optional[str] = None                 
-    book_style: Optional[str] = None           
-    discount_code: Optional[str] = None
-    quantity: Optional[int] = None
-    cust_status: Optional[str] = None         
+    model_config = ConfigDict(extra="forbid")
+    name:   Optional[str] = None
+    age:    Optional[Union[str, int]] = None
+    gender: Optional[str] = None
+    book_id:        Optional[str] = None
+    job_id:         Optional[str] = None
+    locale:        Optional[str] = None
+    book_style:     Optional[str] = None
+    discount_code:  Optional[str] = None
+    quantity:       Optional[int] = None
+    preview_url:    Optional[str] = None
+    total_price:        Optional[Union[str, float, int]] = None
+    transaction_id:     Optional[str] = None
+    paypal_capture_id:  Optional[str] = None
+    paypal_order_id:    Optional[str] = None
+    cover_url:          Optional[str] = None
+    book_url:           Optional[str] = None
+    user_name: Optional[str] = None
+    email:     Optional[EmailStr] = None
+    phone:     Optional[str] = None 
+    cust_status: Optional[str] = None
     shipping_address: Optional[ShippingAddressUpdate] = None
+    timeline:         Optional[TimelineUpdate] = None
+    order_id: Optional[str] = None
+
+IMMUTABLE_PATHS = {
+    "saved_files",
+    "child.saved_files",
+    "child.saved_file_urls",
+    "cover_image",
+    "order.cover_image",
+}
+def _is_forbidden(path: str) -> bool:
+    return any(path == p or path.startswith(p + ".") for p in IMMUTABLE_PATHS)
 
 @app.patch("/orders/{order_id}")
 def patch_order(order_id: str, update: OrderUpdate):
-    doc = update.model_dump(exclude_unset=True, by_alias=True)
+    payload = update.model_dump(exclude_unset=True, by_alias=True)
 
-    set_ops: Dict[str, Any] = {}
-    for k, v in doc.items():
-        if v is None:
-            continue
-        if k == "shipping_address":
-            for sk, sv in v.items():
-                if sv is not None:
-                    set_ops[f"shipping_address.{sk}"] = sv
-        else:
-            set_ops[k] = v
+    set_ops: dict[str, object] = {}
+
+    if "shipping_address" in payload and payload["shipping_address"]:
+        for sk, sv in payload["shipping_address"].items():
+            if sv is not None:
+                path = f"shipping_address.{sk}"
+                if _is_forbidden(path):
+                    raise HTTPException(status_code=400, detail=f"Field '{path}' is not editable")
+                set_ops[path] = sv
+
+    if "timeline" in payload and payload["timeline"]:
+        for tk, tv in payload["timeline"].items():
+            if tv is not None:
+                path = tk 
+                if _is_forbidden(path):
+                    raise HTTPException(status_code=400, detail=f"Field '{path}' is not editable")
+                set_ops[path] = tv
+
+    field_map = {
+        "name": "name",
+        "age": "age",
+        "gender": "gender",
+        "book_id": "book_id",
+        "book_style": "book_style",
+        "discount_code": "discount_code",
+        "quantity": "quantity",
+        "preview_url": "preview_url",
+        "total_price": "total_price",
+        "transaction_id": "transaction_id",
+        "paypal_capture_id": "paypal_capture_id",
+        "paypal_order_id": "paypal_order_id",
+        "cover_url": "cover_url",
+        "book_url": "book_url",
+        "user_name": "user_name",
+        "email": "email",
+        "phone": "phone_number",
+        "cust_status": "cust_status",
+        "order_id": "order_id"
+    }
+
+    for incoming, doc_path in field_map.items():
+        if incoming in payload and payload[incoming] is not None:
+            if _is_forbidden(doc_path):
+                raise HTTPException(status_code=400, detail=f"Field '{doc_path}' is not editable")
+            set_ops[doc_path] = payload[incoming]
 
     if not set_ops:
         existing = orders_collection.find_one({"order_id": order_id})
@@ -3009,3 +3088,57 @@ def _find_cover_image_url_from_generations(job_id: str, expires_in: int = 3600) 
     except ClientError:
         return None
     
+# JOB_ID Detail API
+
+@app.get("/jobs/{job_id}/mini")
+def get_job_mini(job_id: str) -> Dict[str, Any]:
+    """
+    Return minimal details for a job:
+    name, gender, created_at, book_id, preview_url, input images (pre-signed from S3),
+    email, age, paid, approved, partial_preview, and final_preview.
+    """
+
+    # Look up the order by job_id
+    order = orders_collection.find_one({"job_id": job_id})
+    if not order:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    # Email may be stored under multiple keys in your data model
+    email = _first_non_empty(
+        order,
+        ["email", "customer_email", "paypal_email"],
+        default=""
+    )
+
+    # Select the best preview URL
+    preview_url = (
+        order.get("preview_url")
+        or order.get("final_preview")
+        or order.get("partial_preview")
+        or ""
+    )
+
+    # Gather up to 3 input images and generate S3 pre-signed URLs
+    saved_files = _pick_image_list(order)  # pulls from root or child.saved_files
+    input_image_urls = (
+        _presigned_urls_for_saved_files(saved_files, expires_in=3600)
+        if saved_files
+        else []
+    )
+
+    # Return structured minimal job info
+    return {
+        "job_id": job_id,
+        "name": order.get("name", ""),
+        "gender": (order.get("gender", "") or "").lower(),
+        "age": order.get("age", ""),
+        "email": email,
+        "created_at": _iso(order.get("created_at")),
+        "book_id": order.get("book_id", ""),
+        "preview_url": preview_url,
+        "partial_preview": order.get("partial_preview", ""),
+        "final_preview": order.get("final_preview", ""),
+        "input_images": input_image_urls,
+        "paid": bool(order.get("paid", False)),
+        "approved": bool(order.get("approved", False)),
+    }

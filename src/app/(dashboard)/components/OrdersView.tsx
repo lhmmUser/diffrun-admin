@@ -70,8 +70,6 @@ type PrinterResponse = {
   cloudprinter_reference?: string;
 };
 
-
-
 export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFilter = false, title = "Orders", excludeTestDiscount }: OrdersViewProps) {
 
   const router = useRouter();
@@ -99,6 +97,8 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
+  const [search, setSearch] = useState<string>(searchParams.get("q") || "");
+  const [typing, setTyping] = useState<NodeJS.Timeout | null>(null);
 
   const totalPages = Math.ceil(orders.length / ordersPerPage);
   const orderIdInUrl = searchParams.get("order_id") || null;
@@ -107,6 +107,13 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
     router.push(`/orders/order-detail?order_id=${encodeURIComponent(orderId)}`, {
       scroll: false,
     });
+  };
+
+  const setUrlParam = (key: string, value: string | null) => {
+    const sp = new URLSearchParams(window.location.search);
+    if (value && value.trim() !== "") sp.set(key, value);
+    else sp.delete(key);
+    router.push(`?${sp.toString()}`, { scroll: false });
   };
 
   const closeOrder = () => {
@@ -278,46 +285,45 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
       }
       params.append("sort_by", sortBy);
       params.append("sort_dir", sortDir);
+      if (search && search.trim() !== "") params.append("q", search.trim());
 
       const res = await fetch(`${baseUrl}/orders?${params.toString()}`);
       const rawData: RawOrder[] = await res.json();
 
-      const transformed: Order[] = rawData.map((order: RawOrder): Order => {
-
-        return {
-          orderId: order.order_id || "N/A",
-          jobId: order.job_id || "N/A",
-          coverPdf: order.coverPdf || "",
-          interiorPdf: order.interiorPdf || "",
-          previewUrl: order.previewUrl || "",
-          name: order.name || "",
-          city: order.city || "",
-          price: order.price || 0,
-          paymentDate: order.paymentDate || "",
-          approvalDate: order.approvalDate || "",
-          status: order.status || "",
-          bookId: order.bookId || "",
-          bookStyle: order.bookStyle || "",
-          printStatus: order.printStatus || "",
-          feedback_email: order.feedback_email === true,
-          printApproval: typeof order.print_approval === "boolean" ? order.print_approval : "not found",
-          discountCode: order.discount_code || "",
-          currency: order.currency || "INR", // fallback to INR
-          locale: order.locale || "", // default locale
-          shippedAt: order.shippedAt || "",
-          quantity: order.quantity || 1,
-        };
-      });
+      // ... map to your Order[] exactly as before ...
+      const transformed: Order[] = rawData.map((order) => ({
+        orderId: order.order_id || "N/A",
+        jobId: order.job_id || "N/A",
+        coverPdf: order.coverPdf || "",
+        interiorPdf: order.interiorPdf || "",
+        previewUrl: order.previewUrl || "",
+        name: order.name || "",
+        city: order.city || "",
+        price: order.price || 0,
+        paymentDate: order.paymentDate || "",
+        approvalDate: order.approvalDate || "",
+        status: order.status || "",
+        bookId: order.bookId || "",
+        bookStyle: order.bookStyle || "",
+        printStatus: order.printStatus || "",
+        feedback_email: order.feedback_email === true,
+        printApproval: typeof order.print_approval === "boolean" ? order.print_approval : "not found",
+        discountCode: order.discount_code || "",
+        currency: order.currency || "INR",
+        locale: order.locale || "",
+        shippedAt: order.shippedAt || "",
+        quantity: order.quantity || 1,
+      }));
 
       setOrders(transformed);
-    } catch (error) {
-      console.error("❌ Failed to fetch orders:", error);
+    } catch (e) {
+      console.error("❌ Failed to fetch orders:", e);
     }
   };
 
   useEffect(() => {
     fetchOrders();
-  }, [filterStatus, filterPrintApproval, filterDiscountCode, filterBookStyle, sortBy, sortDir]);
+  }, [filterStatus, filterPrintApproval, filterDiscountCode, filterBookStyle, sortBy, sortDir, search]);
 
   useEffect(() => {
     if (!orderIdInUrl) {
@@ -738,8 +744,8 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
           onClick={() => handleAction("mark_red")}
           disabled={selectedOrders.size === 0} // <= was: selectedOrders.size !== 1
           className={`px-4 py-2 rounded text-sm font-medium transition ${selectedOrders.size === 0
-              ? "bg-gray-200 text-gray-500 cursor-not-allowed"
-              : "bg-rose-600 text-white hover:bg-rose-700"
+            ? "bg-gray-200 text-gray-500 cursor-not-allowed"
+            : "bg-rose-600 text-white hover:bg-rose-700"
             }`}
         >
           Mark Red
@@ -814,6 +820,39 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
 
       </div>
 
+      <div className="relative">
+        <input
+          type="text"
+          value={search}
+          onChange={(e) => {
+            const v = e.target.value;
+            setSearch(v);
+            if (typing) clearTimeout(typing);
+            const t = setTimeout(() => setUrlParam("q", v || null), 300);
+            setTyping(t);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              if (typing) clearTimeout(typing);
+              setUrlParam("q", search || null);
+              fetchOrders();
+            }
+          }}
+          placeholder="Looking for your order? Search here..."
+          className="sm:w-72 rounded border border-gray-300 px-3 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+        />
+        {search && (
+          <button
+            type="button"
+            onClick={() => { setSearch(""); setUrlParam("q", null); }}
+            className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500 text-xs"
+            aria-label="Clear"
+          >
+            ✕
+          </button>
+        )}
+      </div>
+
       <div className="overflow-auto rounded border border-gray-200">
         <table className="min-w-full table-auto text-sm text-left">
           <thead className="bg-gray-100 sticky top-0 z-10">
@@ -840,7 +879,7 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
 
               <tr
                 key={`${order.orderId}-${index}`}
-                className="border-t hover:bg-gray-50"
+                className="border-t hover:bg-gray-50 odd:bg-white even:bg-gray-50 transition-colors"
               >
                 <td className="px-2 py-2 ">
                   <input
@@ -850,22 +889,22 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
                     className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
                   />
                 </td>
-                <td className="px-2 py-2 text-xs"> {order.orderId !== "N/A" ? (<button type="button" onClick={() => openOrder(order.orderId)} className="text-blue-600 hover:underline" title="View full order details" > {order.orderId} </button>) : <span>N/A</span>} </td>
+                <td className="px-2 text-xs"> {order.orderId !== "N/A" ? (<button type="button" onClick={() => openOrder(order.orderId)} className="text-blue-600 hover:underline" title="View full order details" > {order.orderId} </button>) : <span>N/A</span>} </td>
 
-                <td className="px-2 py-2 text-black text-xs">{order.name}</td>
-                <td className="px-2 py-2 text-black text-xs">{order.city}</td>
-                <td className="px-2 py-2 text-black text-xs">{order.locale}</td>
-                <td className="px-2 py-2 text-black text-xs">{order.bookId}</td>
-                <td className="px-2 py-2 text-black text-xs">{order.bookStyle}</td>
-                <td className="px-2 py-2 text-black text-xs">{getCurrencySymbol(order.currency)}{order.price.toLocaleString("en-IN")}</td>
-                <td className="px-2 py-2 text-black text-xs">{order.paymentDate && formatDate(order.paymentDate)}</td>
-                <td className="px-2 py-2 text-black text-xs">{order.approvalDate && formatDate(order.approvalDate)}</td>
-                <td className="px-2 py-2">
+                <td className="px-2 text-black text-xs">{order.name}</td>
+                <td className="px-2 text-black text-xs">{order.city}</td>
+                <td className="px-2 text-black text-xs">{order.locale}</td>
+                <td className="px-2 text-black text-xs">{order.bookId}</td>
+                <td className="px-2 text-black text-xs">{order.bookStyle}</td>
+                <td className="px-2 text-black text-xs">{getCurrencySymbol(order.currency)}{order.price.toLocaleString("en-IN")}</td>
+                <td className="px-2 text-black text-xs">{order.paymentDate && formatDate(order.paymentDate)}</td>
+                <td className="px-2 text-black text-xs">{order.approvalDate && formatDate(order.approvalDate)}</td>
+                <td className="px-2">
                   <span className={`px-2 py-1 rounded text-xs font-medium ${order.status === "Approved" ? "bg-green-100 text-green-800" : "bg-yellow-100 text-yellow-800"}`}>
                     {order.status}
                   </span>
                 </td>
-                <td className="px-1 py-2">
+                <td className="px-1">
                   {order.printApproval === true && (
                     <span className="px-2 py-1 rounded text-xs font-medium bg-green-100 text-green-800">Yes</span>
                   )}
@@ -876,28 +915,28 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
                     <span className="px-2 py-1 rounded text-xs font-medium bg-gray-100 text-gray-800">Not Found</span>
                   )}
                 </td>
-                <td className="px-1 py-2">{order.previewUrl ? <a href={order.previewUrl} target="_blank" className="text-blue-600 hover:underline">Preview</a> : "-"}</td>
-                <td className="px-1 py-2">
+                <td className="px-1">{order.previewUrl ? <a href={order.previewUrl} target="_blank" className="text-blue-600 hover:underline">Preview</a> : "-"}</td>
+                <td className="px-1">
                   {order.coverPdf ? (
                     <a href={order.coverPdf} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">
                       View
                     </a>
                   ) : <span className="text-gray-400">-</span>}
                 </td>
-                <td className="px-2 py-2">{order.interiorPdf ? <a href={order.interiorPdf} target="_blank" className="text-blue-600 hover:underline">View PDF</a> : "-"}</td>
+                <td className="px-2">{order.interiorPdf ? <a href={order.interiorPdf} target="_blank" className="text-blue-600 hover:underline">View PDF</a> : "-"}</td>
 
-                <td className="px-2 py-2">
+                <td className="px-2">
                   <span className={`px-2 py-1 rounded text-xs font-medium ${order.printStatus === "sent_to_printer" ? "bg-blue-100 text-blue-800" : "bg-gray-100 text-gray-800"}`}>
                     {order.printStatus === "sent_to_printer" ? "Sent" : "-"}
                   </span>
                 </td>
-                <td className="px-2 py-2 text-xs text-center">
+                <td className="px-2 text-xs text-center">
                   {order.quantity && order.quantity > 1 ? `${order.quantity}` : "1"}
                 </td>
-                <td className="px-2 py-2 text-xs">
+                <td className="px-2 text-xs">
                   {order.shippedAt && formatDayMonUTC(order.shippedAt)}
                 </td>
-                <td className="px-2 py-2">
+                <td className="px-2">
                   {order.discountCode ? (
                     <span className="px-2 py-1 rounded text-xs font-medium bg-blue-100 text-blue-800">
                       {order.discountCode}
@@ -906,7 +945,7 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
                     <span className="text-gray-400">-</span>
                   )}
                 </td>
-                <td className="px-2 py-2">
+                <td className="px-2">
                   <span className={`px-2 py-1 rounded text-xs font-medium ${order.feedback_email ? "bg-green-100 text-green-800" : "bg-gray-100 text-gray-800"}`}>
                     {order.feedback_email ? "Sent" : "-"}
                   </span>
