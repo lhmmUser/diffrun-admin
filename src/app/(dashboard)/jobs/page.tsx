@@ -1,9 +1,8 @@
-// src/app/(dashboard)/jobs/page.tsx
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 
-// Types for the API response
 type RawOrder = {
     order_id: string;
     job_id: string;
@@ -30,7 +29,7 @@ type Order = {
     name: string;
     paymentDate: string;
     approvalDate: string;
-    locale: string; 
+    locale: string;
     partialPreview: string;
     finalPreview: string;
 };
@@ -65,6 +64,7 @@ const formatDate = (dateInput: any) => {
 };
 
 export default function JobsPage() {
+
     const [orders, setOrders] = useState<Order[]>([]);
     const [filterBookStyle, setFilterBookStyle] = useState<string>("all");
     const [sortBy, setSortBy] = useState<string>("created_at");
@@ -72,6 +72,7 @@ export default function JobsPage() {
     const baseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || "";
     const [currentPage, setCurrentPage] = useState(1);
     const [itemsPerPage, setItemsPerPage] = useState(12);
+    const router = useRouter();
 
     useEffect(() => {
         const calculateItemsPerPage = () => {
@@ -79,7 +80,7 @@ export default function JobsPage() {
             const headerHeight = 200;
             const footerHeight = 80;
             const rowHeight = 45;
-            const usableHeight = windowHeight - headerHeight ;
+            const usableHeight = windowHeight - headerHeight;
             const visibleRows = Math.floor(usableHeight / rowHeight);
             setItemsPerPage(Math.max(4, visibleRows));
         };
@@ -88,7 +89,7 @@ export default function JobsPage() {
         window.addEventListener("resize", calculateItemsPerPage);
         return () => window.removeEventListener("resize", calculateItemsPerPage);
     }, []);
-    
+
     useEffect(() => {
         const fetchOrders = async () => {
             try {
@@ -98,7 +99,7 @@ export default function JobsPage() {
                 params.append("sort_dir", sortDir);
 
                 const res = await fetch(`${baseUrl}/jobs?${params.toString()}`);
-                console.log(baseUrl,'baseUrl');
+                console.log(baseUrl, 'baseUrl');
                 const rawData: RawOrder[] = await res.json();
 
                 // Transform the data to match our Order type
@@ -129,6 +130,12 @@ export default function JobsPage() {
     const totalPages = Math.ceil(orders.length / itemsPerPage);
     const startIdx = (currentPage - 1) * itemsPerPage;
     const currentOrders = orders.slice(startIdx, startIdx + itemsPerPage);
+
+    const openJobDetail = (jobId: string) => {
+        router.push(`/jobs/job-detail?job_id=${encodeURIComponent(jobId)}`, {
+            scroll: false,
+        });
+    }
 
     return (
         <div className="px-4 py-2 space-y-3">
@@ -189,7 +196,14 @@ export default function JobsPage() {
                                 key={order.jobId}
                                 className="border-t hover:bg-gray-50"
                             >
-                                <td className="p-3 text-black">{order.jobId}</td>
+
+
+                                <td className="p-3">
+                                    <button className="text-blue-600 hover:text-blue-800 hover:cursor-pointer" onClick={() => openJobDetail(order.jobId)}>
+                                        {order.jobId}
+                                    </button>
+                                </td>
+
                                 <td className="p-3">
                                     {order.previewUrl ? (
                                         <a
@@ -224,8 +238,8 @@ export default function JobsPage() {
                         ))}
                     </tbody>
                 </table>
-                </div>
-                 {/* Pagination */}
+            </div>
+            {/* Pagination */}
             <div className="flex justify-center items-center gap-2 py-4">
                 <button
                     onClick={() => setCurrentPage(p => Math.max(p - 1, 1))}

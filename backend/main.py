@@ -5,7 +5,7 @@ from pymongo import MongoClient
 from dotenv import load_dotenv
 import os
 from fastapi.encoders import jsonable_encoder
-from typing import Optional, List, Literal,  Union
+from typing import Any, Dict, List, Optional, Union, Literal, Tuple
 from datetime import datetime, time, timedelta, timezone
 import requests
 import hashlib
@@ -15,7 +15,7 @@ import smtplib
 from email.message import EmailMessage
 import logging
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr, Field, ConfigDict
 from contextlib import asynccontextmanager
 from apscheduler.schedulers.background import BackgroundScheduler
 import boto3
@@ -37,6 +37,9 @@ from zoneinfo import ZoneInfo
 import re
 import json
 import httpx, html
+import boto3
+from botocore.config import Config
+from botocore.exceptions import ClientError, NoCredentialsError, PartialCredentialsError
 
 IST_TZ = pytz.timezone("Asia/Kolkata")
 API_BASE = os.getenv("NEXT_PUBLIC_API_BASE_URL", "http://127.0.0.1:8000")
@@ -139,6 +142,10 @@ COUNTRY_CODES = {
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
+
+@app.get("/health")
+def health_check():
+    return {"status": "ok"}
 
 def split_full_name(full_name: str) -> tuple[str, str]:
     """Split a full name into first name and last name."""
@@ -612,6 +619,10 @@ def generate_book_title(book_id, child_name):
         return f"{child_name}'s Storybook"
 
 
+import re
+from typing import Optional, List
+from fastapi import Query
+
 @app.get("/orders")
 def get_orders(
     sort_by: Optional[str] = Query(None, description="Field to sort by"),
@@ -621,12 +632,13 @@ def get_orders(
     filter_print_approval: Optional[str] = Query(None),
     filter_discount_code: Optional[str] = Query(None),
     exclude_discount_code: Optional[List[str]] = Query(None),
+    q: Optional[str] = Query(None, description="Search by job_id, order_id, email, name, discount_code, city, locale, book_id"),
 ):
-    # Base query: only show paid orders
+    # Base query
     query = {"paid": True}
     ex_values: List[str] = []
 
-    # Add additional filters
+    # --- Filters (same as before) ---
     if filter_status == "approved":
         query["approved"] = True
     elif filter_status == "uploaded":
@@ -646,43 +658,50 @@ def get_orders(
         print(f"[DEBUG] Filter discount code: {filter_discount_code}")
         if filter_discount_code.lower() == "none":
             query["discount_amount"] = 0
-            # already set by default, but explicit is good
             query["paid"] = True
         else:
             query["discount_code"] = filter_discount_code.upper()
 
+    # Exclude discount codes
     if exclude_discount_code:
-    # Normalize to a list
         if isinstance(exclude_discount_code, list):
             ex_values = exclude_discount_code
         else:
-            # support CSV in a single param too (e.g., "TEST,REJECTED")
             ex_values = [p.strip() for p in str(exclude_discount_code).split(",")]
 
-    # Build exclusion only if we have values
     ex_values = [v for v in (s.strip() for s in ex_values) if v]
     if ex_values:
-        # Case-insensitive exact match using anchored regexes
         regexes = [re.compile(rf"^{re.escape(v)}$", re.IGNORECASE) for v in ex_values]
-
-        # If you already have a discount_code filter, AND them together
         existing = query.pop("discount_code", None)
-
         exclude_cond = {"discount_code": {"$nin": regexes}}
-
         if existing is None:
-            # no prior condition → just set the exclusion
             query["discount_code"] = exclude_cond["discount_code"]
         else:
-            # merge with prior one using $and
-            # existing might be a scalar or a dict; both are fine
             query["$and"] = [{"discount_code": existing}, exclude_cond]
 
-    # Fetch and sort records
+    # --- Extended free-text search ---
+    if q:
+        term = q.strip()
+        if term:
+            rx = re.compile(re.escape(term), re.IGNORECASE)
+            query.setdefault("$and", []).append({
+                "$or": [
+                    {"order_id": {"$regex": rx}},
+                    {"job_id": {"$regex": rx}},
+                    {"email": {"$regex": rx}},
+                    {"name": {"$regex": rx}},
+                    {"discount_code": {"$regex": rx}},
+                    {"book_id": {"$regex": rx}},
+                    {"locale": {"$regex": rx}},
+                    {"shipping_address.city": {"$regex": rx}},
+                ]
+            })
+
+    # Sorting
     sort_field = sort_by if sort_by else "created_at"
     sort_order = 1 if sort_dir == "asc" else -1
 
-    # Only fetch the fields we need
+    # Projection
     projection = {
         "order_id": 1,
         "job_id": 1,
@@ -713,12 +732,10 @@ def get_orders(
         "cust_status": 1,
     }
 
-    records = list(orders_collection.find(
-        query, projection).sort(sort_field, sort_order))
+    records = list(orders_collection.find(query, projection).sort(sort_field, sort_order))
     result = []
 
     for doc in records:
-
         result.append({
             "order_id": doc.get("order_id", ""),
             "job_id": doc.get("job_id", ""),
@@ -728,8 +745,8 @@ def get_orders(
             "name": doc.get("name", ""),
             "city": doc.get("shipping_address", {}).get("city", ""),
             "price": doc.get("price", doc.get("total_price", doc.get("amount", doc.get("total_amount", 0)))),
-            "paymentDate": ((doc.get("processed_at", ""))),
-            "approvalDate": ((doc.get("approved_at", ""))),
+            "paymentDate": doc.get("processed_at", ""),
+            "approvalDate": doc.get("approved_at", ""),
             "status": "Approved" if doc.get("approved") else "Uploaded",
             "bookId": doc.get("book_id", ""),
             "bookStyle": doc.get("book_style", ""),
@@ -744,7 +761,6 @@ def get_orders(
         })
 
     return result
-
 
 @app.post("/orders/set-cust-status/{order_id}")
 async def set_cust_status(
@@ -791,35 +807,6 @@ def format_booking_date(processed_at):
     except Exception as e:
         print(f"Error formatting processed_at: {e}")
         return "N/A"
-
-
-@app.get("/orders/{order_id}")
-def get_order_detail(order_id: str):
-    # Find the order with the given order_id
-    order = orders_collection.find_one({"order_id": order_id})
-
-    if not order:
-        raise HTTPException(status_code=404, detail="Order not found")
-
-    # Format the response with all necessary fields
-    return {
-        "order_id": order.get("order_id", ""),
-        "name": order.get("name", ""),
-        "book_id": order.get("book_id", ""),
-        "book_style": order.get("book_style", ""),
-        "preview_url": f"https://diffrun.com/preview/{order.get('job_id', '')}",
-        "gender": order.get("gender", ""),
-        "user_name": order.get("user_name", ""),
-        "email": order.get("email", ""),
-        "phone": order.get("phone", ""),
-        "shipping_address": {
-            "street": order.get("shipping_address", {}).get("street", ""),
-            "city": order.get("shipping_address", {}).get("city", ""),
-            "state": order.get("shipping_address", {}).get("state", ""),
-            "country": order.get("shipping_address", {}).get("country", ""),
-            "zip": order.get("shipping_address", {}).get("zip", "")
-        }
-    }
 
 
 def get_pdf_page_count(pdf_url: str) -> int:
@@ -1842,14 +1829,14 @@ def export_orders_csv():
         "approved", "created_date", "created_time", "creation_hour",
         "payment_date", "payment_time", "payment_hour",
         "locale", "name", "user_name", "shipping_address.city", "shipping_address.province",
-        "order_id", "discount_code", "paypal_capture_id", "transaction_id",
+        "order_id", "discount_code", "paypal_capture_id", "transaction_id", "tracking_code", "partial_preview", "final_preview"
     ]
 
     projection = {
         "email": 1, "phone_number": 1, "age": 1, "book_id": 1, "book_style": 1, "total_price": 1,
         "gender": 1, "paid": 1, "approved": 1, "created_at": 1, "processed_at": 1,
         "locale": 1, "name": 1, "user_name": 1, "shipping_address": 1, "order_id": 1,
-        "discount_code": 1, "paypal_capture_id": 1, "transaction_id": 1
+        "discount_code": 1, "paypal_capture_id": 1, "transaction_id": 1, "tracking_code": 1, "partial_preview": 1, "final_preview": 1,
     }
 
     cursor = orders_collection.find({}, projection).sort("created_at", -1)
@@ -2547,7 +2534,7 @@ def cron_feedback_emails(limit: int = 200):
                                         "timezone": "Asia/Kolkata",
                                     }
                                 },
-                                6,
+                                10,
                             ]
                         },
                         {
@@ -2560,7 +2547,7 @@ def cron_feedback_emails(limit: int = 200):
                                         "timezone": "Asia/Kolkata",
                                     }
                                 },
-                                7,
+                                11,
                             ]
                         },
                     ]
@@ -2681,3 +2668,477 @@ def mark_reconciled(payload: dict):
 def debug_run_reconcile_now():
     _hourly_reconcile_and_email()
     return {"ok": True}
+
+##################################
+# START OF ORDER DETAILS LOGIC
+##################################
+
+def _iso(dt: Any) -> Optional[str]:
+    if dt is None:
+        return None
+    if isinstance(dt, datetime):
+        return dt.isoformat()
+    if isinstance(dt, str):
+        return dt
+    try:
+        return datetime.fromtimestamp(dt).isoformat()
+    except Exception:
+        return str(dt)
+
+def _first_non_empty(d: Dict[str, Any], keys: List[str], default=None):
+    for k in keys:
+        val = d.get(k)
+        if val not in (None, "", []):
+            return val
+    return default
+
+def _pick_image_list(doc: Dict[str, Any]) -> List[str]:
+
+    candidate_keys = [
+        "saved_files",             
+    ]
+
+    # helper to normalize a value to a list of basenames
+    def _norm(x: Any) -> List[str]:
+        if isinstance(x, list):
+            items = x
+        elif isinstance(x, str) and x.strip():
+            items = [x.strip()]
+        else:
+            return []
+        # keep basenames (in case a full path/key was stored)
+        return [os.path.basename(s) for s in items if isinstance(s, str) and s.strip()]
+
+    # 1) check keys at the root
+    for key in candidate_keys:
+        v = doc.get(key)
+        lst = _norm(v)
+        if lst:
+            return lst[:3]
+
+    # 2) check nested under "child" if present
+    child = doc.get("child")
+    if isinstance(child, dict):
+        for key in candidate_keys:
+            v = child.get(key)
+            lst = _norm(v)
+            if lst:
+                return lst[:3]
+
+    return []
+
+def _build_order_response(order: Dict[str, Any]) -> Dict[str, Any]:
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    job_id = _first_non_empty(order, ["job_id", "JobId", "jobID"], default="")
+
+    user_doc = {}
+    if job_id:
+        user_doc = orders_collection.find_one({"job_id": job_id}) or {}
+
+    # child details
+    child_name = _first_non_empty(order, ["name"], default=_first_non_empty(user_doc, ["name"]))
+    child_age = _first_non_empty(order, ["age"], default=_first_non_empty(user_doc, ["age"]))
+    child_gender = _first_non_empty(order, ["gender"], default=_first_non_empty(user_doc, ["gender"]))
+
+    saved_files = _pick_image_list(order) or _pick_image_list(user_doc)
+
+    # Try to produce S3 pre-signed URLs for the saved files; skip if none
+    saved_file_urls: list[str] = []
+    if saved_files:
+        saved_file_urls = _presigned_urls_for_saved_files(saved_files, expires_in=3600)  # 1 hour expiry
+
+    child_details = {
+        "name": child_name or "",
+        "age": child_age or "",
+        "gender": (child_gender or "").lower(),
+        "saved_files": saved_files[:3],
+        "saved_file_urls": saved_file_urls,   # <-- UI can render these directly
+    }
+
+    # customer details
+    customer_email = _first_non_empty(order, ["email", "customer_email", "paypal_email"], default="")
+    ship = order.get("shipping_address", {}) or {}
+    phone_number = _first_non_empty(order, ["phone_number", "phone"], default=_first_non_empty(ship, ["phone"], default=""))
+    customer_details = {
+        "user_name": order.get("user_name", ""),
+        "email": customer_email or "",
+        "phone_number": phone_number or "",
+    }
+
+    cover_url_from_gen = _find_cover_image_url_from_generations(job_id, expires_in=3600)
+
+    # order financials/ids
+    order_details = {
+        "order_id": order.get("order_id", ""),
+        "discount_code": order.get("discount_code", ""),
+        "total_price": _first_non_empty(order, ["total_price", "amount", "total"], default=""),
+        "transaction_id": _first_non_empty(order, ["transaction_id", "razorpay_payment_id", "payment_id"], default=""),
+        "cover_url": order.get("cover_url", ""),
+        "book_url": order.get("book_url", ""),
+        "paypal_capture_id": order.get("paypal_capture_id", ""),
+        "paypal_order_id": order.get("paypal_order_id", ""),
+        "cover_image": cover_url_from_gen or "",
+    }
+
+    # timeline
+    timeline = {
+        "created_at": _iso(order.get("created_at")),
+        "processed_at": _iso(order.get("processed_at")),
+        "approved_at": _iso(order.get("approved_at")),
+        "print_sent_at": _iso(order.get("print_sent_at")),
+        "shipped_at": _iso(order.get("shipped_at")),
+    }
+
+    # base legacy fields (preserved)
+    response = {
+        "order_id": order.get("order_id", ""),
+        "name": order.get("name", ""),
+        "book_id": order.get("book_id", ""),
+        "book_style": order.get("book_style", ""),
+        "preview_url": order.get("preview_url", ""),
+        "gender": order.get("gender", ""),
+        "user_name": order.get("user_name", ""),
+        "email": order.get("email", ""),
+        "discount_code": order.get("discount_code", ""),
+        "quantity": order.get("quantity", 1),
+        "phone": order.get("phone_number"),
+        "shipping_address": {
+            "street": ship.get("address1", ""),
+            "city": ship.get("city", ""),
+            "state": ship.get("province", ""),
+            "country": ship.get("country", ""),
+            "zip": ship.get("zip", ""),
+            "phone": ship.get("phone", ""),
+        },
+    }
+
+    # enrich
+    response.update({
+        "job_id": job_id,
+        "book_style": order.get("book_style", ""),
+        "book_id": order.get("book_id", ""),
+        "preview_url": order.get("preview_url", ""),
+        "locale": order.get("locale", ""),
+        "child": child_details,
+        "customer": customer_details,
+        "order": order_details,
+        "timeline": timeline,
+    })
+    return response
+
+@app.get("/orders/{order_id}")
+def get_order_detail(order_id: str):
+    order = orders_collection.find_one({"order_id": order_id})
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    return _build_order_response(order)
+
+class ShippingAddressUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    street: Optional[str] = None
+    city:   Optional[str] = None
+    state:  Optional[str] = None
+    country:Optional[str] = None
+    zip:    Optional[str] = Field(None, alias="postal_code")
+
+class TimelineUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    created_at:    Optional[str] = None
+    processed_at:  Optional[str] = None
+    approved_at:   Optional[str] = None
+    print_sent_at: Optional[str] = None
+    shipped_at:    Optional[str] = None
+
+class OrderUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name:   Optional[str] = None
+    age:    Optional[Union[str, int]] = None
+    gender: Optional[str] = None
+    book_id:        Optional[str] = None
+    job_id:         Optional[str] = None
+    locale:        Optional[str] = None
+    book_style:     Optional[str] = None
+    discount_code:  Optional[str] = None
+    quantity:       Optional[int] = None
+    preview_url:    Optional[str] = None
+    total_price:        Optional[Union[str, float, int]] = None
+    transaction_id:     Optional[str] = None
+    paypal_capture_id:  Optional[str] = None
+    paypal_order_id:    Optional[str] = None
+    cover_url:          Optional[str] = None
+    book_url:           Optional[str] = None
+    user_name: Optional[str] = None
+    email:     Optional[EmailStr] = None
+    phone:     Optional[str] = None 
+    cust_status: Optional[str] = None
+    shipping_address: Optional[ShippingAddressUpdate] = None
+    timeline:         Optional[TimelineUpdate] = None
+    order_id: Optional[str] = None
+
+IMMUTABLE_PATHS = {
+    "saved_files",
+    "child.saved_files",
+    "child.saved_file_urls",
+    "cover_image",
+    "order.cover_image",
+}
+def _is_forbidden(path: str) -> bool:
+    return any(path == p or path.startswith(p + ".") for p in IMMUTABLE_PATHS)
+
+@app.patch("/orders/{order_id}")
+def patch_order(order_id: str, update: OrderUpdate):
+    payload = update.model_dump(exclude_unset=True, by_alias=True)
+
+    set_ops: dict[str, object] = {}
+
+    if "shipping_address" in payload and payload["shipping_address"]:
+        for sk, sv in payload["shipping_address"].items():
+            if sv is not None:
+                path = f"shipping_address.{sk}"
+                if _is_forbidden(path):
+                    raise HTTPException(status_code=400, detail=f"Field '{path}' is not editable")
+                set_ops[path] = sv
+
+    if "timeline" in payload and payload["timeline"]:
+        for tk, tv in payload["timeline"].items():
+            if tv is not None:
+                path = tk 
+                if _is_forbidden(path):
+                    raise HTTPException(status_code=400, detail=f"Field '{path}' is not editable")
+                set_ops[path] = tv
+
+    field_map = {
+        "name": "name",
+        "age": "age",
+        "gender": "gender",
+        "book_id": "book_id",
+        "book_style": "book_style",
+        "discount_code": "discount_code",
+        "quantity": "quantity",
+        "preview_url": "preview_url",
+        "total_price": "total_price",
+        "transaction_id": "transaction_id",
+        "paypal_capture_id": "paypal_capture_id",
+        "paypal_order_id": "paypal_order_id",
+        "cover_url": "cover_url",
+        "book_url": "book_url",
+        "user_name": "user_name",
+        "email": "email",
+        "phone": "phone_number",
+        "cust_status": "cust_status",
+        "order_id": "order_id"
+    }
+
+    for incoming, doc_path in field_map.items():
+        if incoming in payload and payload[incoming] is not None:
+            if _is_forbidden(doc_path):
+                raise HTTPException(status_code=400, detail=f"Field '{doc_path}' is not editable")
+            set_ops[doc_path] = payload[incoming]
+
+    if not set_ops:
+        existing = orders_collection.find_one({"order_id": order_id})
+        if not existing:
+            raise HTTPException(status_code=404, detail="Order not found")
+        return {"updated": False, "order": _build_order_response(existing)}
+
+    res = orders_collection.update_one({"order_id": order_id}, {"$set": set_ops})
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    updated = orders_collection.find_one({"order_id": order_id})
+    return {"updated": bool(res.modified_count), "order": _build_order_response(updated)}
+
+
+def _get_s3_client() -> Tuple[boto3.client, str]:
+    bucket = os.getenv("REPLICACOMFY_BUCKET", "").strip()
+    region = os.getenv("AWS_REGION", "").strip()
+    access_key = os.getenv("AWS_ACCESS_KEY_ID", "").strip()
+    secret_key = os.getenv("AWS_SECRET_ACCESS_KEY", "").strip()
+
+    if not bucket:
+        raise HTTPException(status_code=500, detail="REPLICACOMFY_BUCKET not configured")
+    if not region:
+        raise HTTPException(status_code=500, detail="AWS_REGION not configured")
+    if not access_key or not secret_key:
+        raise HTTPException(status_code=500, detail="AWS credentials not configured")
+
+    cfg = Config(signature_version="s3v4", region_name=region, retries={"max_attempts": 3, "mode": "standard"})
+    s3 = boto3.client(
+        "s3",
+        region_name=region,
+        aws_access_key_id=access_key,
+        aws_secret_access_key=secret_key,
+        config=cfg,
+    )
+    return s3, bucket
+
+
+def _s3_key_for_input(filename: str) -> str:
+    base = os.path.basename(filename).strip()
+    return f"input/{base}"
+
+
+def _generate_presigned_url(s3, bucket: str, key: str, expires_in: int = 3600) -> str:
+    return s3.generate_presigned_url(
+        "get_object",
+        Params={"Bucket": bucket, "Key": key},
+        ExpiresIn=expires_in,
+    )
+
+
+def _presigned_urls_for_saved_files(files: List[str], expires_in: int = 3600) -> List[str]:
+    if not files:
+        return []
+    try:
+        s3, bucket = _get_s3_client()
+    except HTTPException:
+        raise
+
+    urls: List[str] = []
+    for f in files[:3]:
+        key = _s3_key_for_input(f)
+        try:
+            # Verify the object exists before signing
+            s3.head_object(Bucket=bucket, Key=key)
+            urls.append(_generate_presigned_url(s3, bucket, key, expires_in=expires_in))
+        except NoCredentialsError:
+            raise HTTPException(status_code=500, detail="AWS credentials not available")
+        except PartialCredentialsError:
+            raise HTTPException(status_code=500, detail="AWS credentials are incomplete")
+        except ClientError as e:
+            code = getattr(e, "response", {}).get("Error", {}).get("Code")
+            if code in ("404", "NoSuchKey", "NotFound", "AccessDenied"):
+                # Skip silently—don’t break the whole order response
+                continue
+            raise HTTPException(status_code=502, detail="S3 error while generating image URLs")
+        except Exception:
+            raise HTTPException(status_code=502, detail="Unexpected error while generating image URLs")
+    return urls
+
+
+def _get_s3_client_generic() -> boto3.client:
+    region = (os.getenv("AWS_REGION") or "").strip()
+    access = (os.getenv("AWS_ACCESS_KEY_ID") or "").strip()
+    secret = (os.getenv("AWS_SECRET_ACCESS_KEY") or "").strip()
+    if not region or not access or not secret:
+        raise HTTPException(status_code=500, detail="AWS credentials/region not configured")
+
+    return boto3.client(
+        "s3",
+        region_name=region,
+        aws_access_key_id=access,
+        aws_secret_access_key=secret,
+        endpoint_url=f"https://s3.{region}.amazonaws.com",  # force regional endpoint
+        config=Config(
+            signature_version="s3v4",
+            retries={"max_attempts": 3, "mode": "standard"},
+            s3={"addressing_style": "virtual"}  # virtual-hosted–style URLs
+        ),
+    )
+
+
+def _list_objects_with_prefix(s3, bucket: str, prefix: str, max_collect: int = 1000) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    token: Optional[str] = None
+    while True:
+        kwargs = {"Bucket": bucket, "Prefix": prefix, "MaxKeys": 1000}
+        if token:
+            kwargs["ContinuationToken"] = token
+        resp = s3.list_objects_v2(**kwargs)
+        out.extend(resp.get("Contents", []) or [])
+        if not resp.get("IsTruncated") or len(out) >= max_collect:
+            break
+        token = resp.get("NextContinuationToken")
+    return out
+
+
+def _find_cover_image_url_from_generations(job_id: str, expires_in: int = 3600) -> Optional[str]:
+    bucket = (os.getenv("DIFFRUN_GENERATIONS_BUCKET") or "").strip()
+    if not bucket or not job_id:
+        return None
+
+    s3 = _get_s3_client_generic()
+    prefix = f"jpg_output/{job_id}_pg0_"
+
+    try:
+        objs = _list_objects_with_prefix(s3, bucket, prefix, max_collect=2000)
+    except ClientError:
+        return None
+
+    if not objs:
+        return None
+
+    preferred = [o for o in objs if str(o.get("Key", "")).lower().endswith("_001.jpg")]
+    chosen = min(preferred or objs, key=lambda o: o.get("LastModified"))
+
+    try:
+        return s3.generate_presigned_url(
+            "get_object",
+            Params={
+                "Bucket": bucket,
+                "Key": chosen["Key"],
+                # Force browser-friendly headers for inline display
+                "ResponseContentType": "image/jpeg",
+                "ResponseContentDisposition": "inline",
+            },
+            ExpiresIn=expires_in,
+        )
+    except ClientError:
+        return None
+    
+# JOB_ID Detail API
+
+@app.get("/jobs/{job_id}/mini")
+def get_job_mini(job_id: str) -> Dict[str, Any]:
+    """
+    Return minimal details for a job:
+    name, gender, created_at, book_id, preview_url, input images (pre-signed from S3),
+    email, age, paid, approved, partial_preview, and final_preview.
+    """
+
+    # Look up the order by job_id
+    order = orders_collection.find_one({"job_id": job_id})
+    if not order:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    # Email may be stored under multiple keys in your data model
+    email = _first_non_empty(
+        order,
+        ["email", "customer_email", "paypal_email"],
+        default=""
+    )
+
+    # Select the best preview URL
+    preview_url = (
+        order.get("preview_url")
+        or order.get("final_preview")
+        or order.get("partial_preview")
+        or ""
+    )
+
+    # Gather up to 3 input images and generate S3 pre-signed URLs
+    saved_files = _pick_image_list(order)  # pulls from root or child.saved_files
+    input_image_urls = (
+        _presigned_urls_for_saved_files(saved_files, expires_in=3600)
+        if saved_files
+        else []
+    )
+
+    # Return structured minimal job info
+    return {
+        "job_id": job_id,
+        "name": order.get("name", ""),
+        "gender": (order.get("gender", "") or "").lower(),
+        "age": order.get("age", ""),
+        "email": email,
+        "created_at": _iso(order.get("created_at")),
+        "book_id": order.get("book_id", ""),
+        "preview_url": preview_url,
+        "partial_preview": order.get("partial_preview", ""),
+        "final_preview": order.get("final_preview", ""),
+        "input_images": input_image_urls,
+        "paid": bool(order.get("paid", False)),
+        "approved": bool(order.get("approved", False)),
+    }

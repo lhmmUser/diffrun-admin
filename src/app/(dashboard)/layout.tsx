@@ -17,7 +17,7 @@ export default function RootLayout({
       <SignedIn>
       
         <div className="md:hidden flex justify-between items-center bg-gray-900 text-white p-4">
-          <h1 className="text-lg font-bold">Diffrun Admin</h1>
+          <h1 className="text-lg font- medium">Diffrun Admin</h1>
           <button onClick={() => setSidebarOpen(!sidebarOpen)}>
             {sidebarOpen ? <HiX className="h-6 w-6" /> : <HiMenu className="h-6 w-6" />}
           </button>
@@ -26,39 +26,38 @@ export default function RootLayout({
         <div className="flex min-h-screen">
         
           <aside
-            style={{ backgroundColor: "#5784ba" }}
-            className={` text-white w-60 p-6 fixed top-0 left-0 z-50 transform md:translate-x-0 transition-transform duration-200 ease-in-out
+            
+            className={` bg-white text-gray-800 w-52 min-h-screen p-6 fixed top-0 left-0 z-50 transform md:translate-x-0 transition-transform duration-200 ease-in-out
               ${sidebarOpen ? "translate-x-0" : "-translate-x-full"} md:relative md:block`}
           >
             <div className="mb-8 pt-4">
-              <h2 className="text-xl font-bold mb-2 ">Diffrun Admin</h2>
-              <p className="text-sm text-white">Manage your books</p>
+              <h2 className="text-xl font-medium mb-2 ">Diffrun Admin</h2>
             </div>
             <nav>
-              <ul className="space-y-2">
+              <ul className="text-sm">
                 <li>
-                  <Link href="/dashboard" className="block px-3 py-2 rounded hover:bg-gray-800 hover:text-blue-300 font-bold">Dashboard</Link>
+                  <Link href="/dashboard" className="block px-3 py-2 rounded hover:bg-gray-800 hover:text-blue-300 font-medium">Dashboard</Link>
                 </li>
                 <li>
-                  <Link href="/orders" className="block px-3 py-2 rounded hover:bg-gray-800 hover:text-blue-300 font-bold">Orders</Link>
+                  <Link href="/orders" className="block px-3 py-2 rounded hover:bg-gray-800 hover:text-blue-300 font-medium">Orders</Link>
                 </li>
                 <li>
-                  <Link href="/jobs" className="block px-3 py-2 rounded hover:bg-gray-800 hover:text-blue-300 font-bold">Jobs</Link>
+                  <Link href="/jobs" className="block px-3 py-2 rounded hover:bg-gray-800 hover:text-blue-300 font-medium">Jobs</Link>
                 </li>
                 <li>
-                  <Link href="/test" className="block px-3 py-2 rounded hover:bg-gray-800 hover:text-blue-300 font-bold">Test Orders</Link>
+                  <Link href="/test" className="block px-3 py-2 rounded hover:bg-gray-800 hover:text-blue-300 font-medium">Test Orders</Link>
                 </li>
                 <li>
-                  <Link href="/rejected-orders" className="block px-3 py-2 rounded hover:bg-gray-800 hover:text-blue-300 font-bold">Rejected Orders</Link>
+                  <Link href="/rejected-orders" className="block px-3 py-2 rounded hover:bg-gray-800 hover:text-blue-300 font-medium">Rejected Orders</Link>
                 </li>
                 <li>
-                  <Link href="/export" className="block px-3 py-2 rounded hover:bg-gray-800 hover:text-blue-300 font-bold">Export</Link>
+                  <Link href="/export" className="block px-3 py-2 rounded hover:bg-gray-800 hover:text-blue-300 font-medium">Export</Link>
                 </li>
                 <li>
-                  <Link href="/darkfantasy" className="block px-3 py-2 rounded hover:bg-gray-800 hover:text-blue-300 font-bold">Dark Fantasy</Link>
+                  <Link href="/darkfantasy" className="block px-3 py-2 rounded hover:bg-gray-800 hover:text-blue-300 font-medium">Dark Fantasy</Link>
                 </li>
                 <li>
-                  <Link href="/razorpay_analysis" className="block px-3 py-2 rounded hover:bg-gray-800 hover:text-blue-300 font-bold">Razorpay Analysis</Link>
+                  <Link href="/razorpay_analysis" className="block px-3 py-2 rounded hover:bg-gray-800 hover:text-blue-300 font-medium">Razorpay Analysis</Link>
                 </li>
               </ul>
             </nav>
