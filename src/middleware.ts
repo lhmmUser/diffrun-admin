@@ -6,11 +6,7 @@ import { NextResponse } from "next/server";
 const isPublicRoute = createRouteMatcher(["/", "/unauthorized"]);
 
 // Define the list of allowed email addresses
-<<<<<<< Updated upstream
-const allowedEmails = ["husain@lhmm.in", "hello@lhmm.in", "haripriya@lhmm.in", "kush@lhmm.in", "fazil@lhmm.in"];
-=======
-const allowedEmails = ["husain@lhmm.in", "hello@lhmm.in", "haripriya@lhmm.in", "kush@lhmm.in","manish@lhmm.in","arnav@lhmm.in"];
->>>>>>> Stashed changes
+const allowedEmails = ["husain@lhmm.in", "hello@lhmm.in", "haripriya@lhmm.in", "kush@lhmm.in","manish@lhmm.in","arnav@lhmm.in", "fazil@lhmm.in"];
 
 export default clerkMiddleware(async (auth, req) => {
   console.log("✅ Clerk middleware hit for:", req.nextUrl.pathname);
