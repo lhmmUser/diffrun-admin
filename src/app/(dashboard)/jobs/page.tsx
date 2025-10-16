@@ -72,7 +72,16 @@ export default function JobsPage() {
     const baseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || "";
     const [currentPage, setCurrentPage] = useState(1);
     const [itemsPerPage, setItemsPerPage] = useState(12);
+    const [searchJobId, setSearchJobId] = useState("");
+    const [search, setSearch] = useState("");
     const router = useRouter();
+
+    const handleSearch = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter" && search.trim() !== "") {
+        router.push(`/jobs/job-detail?job_id=${encodeURIComponent(search.trim())}`);
+    }
+    };
+
 
     useEffect(() => {
         const calculateItemsPerPage = () => {
@@ -127,15 +136,33 @@ export default function JobsPage() {
         fetchOrders();
     }, [filterBookStyle, sortBy, sortDir]);
 
-    const totalPages = Math.ceil(orders.length / itemsPerPage);
+    {/* const totalPages = Math.ceil(orders.length / itemsPerPage);
     const startIdx = (currentPage - 1) * itemsPerPage;
-    const currentOrders = orders.slice(startIdx, startIdx + itemsPerPage);
+    const currentOrders = orders.slice(startIdx, startIdx + itemsPerPage); */}
+
+    // Live filter by Job ID (case-insensitive, partial)
+    const normalizedQuery = searchJobId.trim().toLowerCase();
+    const filteredOrders = normalizedQuery
+    ? orders.filter(o => o.jobId.toLowerCase().includes(normalizedQuery))
+    : orders;
+
+    // When the filter changes, go back to page 1
+    useEffect(() => {
+    setCurrentPage(1);
+    }, [normalizedQuery]);
+
+    // Paginate the *filtered* list
+    const totalPages = Math.max(1, Math.ceil(filteredOrders.length / itemsPerPage));
+    const startIdx = (currentPage - 1) * itemsPerPage;
+    const currentOrders = filteredOrders.slice(startIdx, startIdx + itemsPerPage);
+
 
     const openJobDetail = (jobId: string) => {
         router.push(`/jobs/job-detail?job_id=${encodeURIComponent(jobId)}`, {
             scroll: false,
         });
     }
+    
 
     return (
         <div className="px-4 py-2 space-y-3">
@@ -171,6 +198,17 @@ export default function JobsPage() {
                     <option value="desc">↓ Descending</option>
                     <option value="asc">↑ Ascending</option>
                 </select>
+            </div>
+
+            {/* Search bar */}
+            <div>
+                <input type="text"
+                value={searchJobId}
+                onChange={(e) => setSearchJobId(e.target.value)}
+                placeholder="Search here..."
+                className="sm:w-72 rounded border border-gray-300 px-3 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+
+        
             </div>
 
             {/* Table */}

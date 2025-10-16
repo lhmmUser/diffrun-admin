@@ -42,7 +42,7 @@ from botocore.config import Config
 from botocore.exceptions import ClientError, NoCredentialsError, PartialCredentialsError
 
 IST_TZ = pytz.timezone("Asia/Kolkata")
-API_BASE = os.getenv("NEXT_PUBLIC_API_BASE_URL", "http://127.0.0.1:8000")
+API_BASE = os.getenv("NEXT_PUBLIC_API_BASE_URL", "http://127.0.0.1:5000")
 # Setup logger
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -2797,6 +2797,7 @@ def _build_order_response(order: Dict[str, Any]) -> Dict[str, Any]:
         "paypal_capture_id": order.get("paypal_capture_id", ""),
         "paypal_order_id": order.get("paypal_order_id", ""),
         "cover_image": cover_url_from_gen or "",
+        "tracking_code": order.get("tracking_code")
     }
 
     # timeline
@@ -2893,6 +2894,7 @@ class OrderUpdate(BaseModel):
     shipping_address: Optional[ShippingAddressUpdate] = None
     timeline:         Optional[TimelineUpdate] = None
     order_id: Optional[str] = None
+    tracking_code: Optional[str] = None
 
 IMMUTABLE_PATHS = {
     "saved_files",
@@ -2950,7 +2952,8 @@ def patch_order(order_id: str, update: OrderUpdate):
         "email": "email",
         "phone": "phone_number",
         "cust_status": "cust_status",
-        "order_id": "order_id"
+        "order_id": "order_id",
+        "tracking_code": "tracking_code"
     }
 
     for incoming, doc_path in field_map.items():

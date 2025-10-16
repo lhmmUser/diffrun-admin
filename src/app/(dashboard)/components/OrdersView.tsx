@@ -838,7 +838,7 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
               fetchOrders();
             }
           }}
-          placeholder="Looking for your order? Search here..."
+          placeholder="Search here..."
           className="sm:w-72 rounded border border-gray-300 px-3 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
         />
         {search && (

@@ -81,6 +81,7 @@ type OrderFinancial = {
     book_url?: string;
     paypal_capture_id?: string;
     paypal_order_id?: string;
+    tracking_code?: string;
     cover_image?: string;
 };
 
@@ -113,6 +114,7 @@ type OrderDetail = {
     order?: OrderFinancial;
     timeline?: Timeline;
     cover_image?: string;
+    tracking_code?: string | null; // NEW
 };
 
 type FormState = {
@@ -149,6 +151,7 @@ type FormState = {
         print_sent_at: string;
         shipped_at: string;
     };
+    tracking_code: string;
 };
 
 function ThumbGrid({ urls }: { urls: string[] }) {
@@ -168,7 +171,24 @@ function ThumbGrid({ urls }: { urls: string[] }) {
     );
 }
 
-const TimelineItem = ({ label, date, isLast = false }: { label: string; date: string; isLast?: boolean }) => (
+function ThumbGrid({ urls }: { urls: string[] }) {
+    if (!urls?.length) return null;
+    return (
+        <div className="grid grid-cols-3 gap-1">
+            {urls.map((u, i) => (
+                <a key={i} href={u} target="_blank" rel="noreferrer" className="block" title={u}>
+                    <img
+                        src={u}
+                        alt={`child_input_${i + 1}`}
+                        className="w-20 h-20 object-cover rounded border border-gray-200 hover:border-[#5784ba]"
+                    />
+                </a>
+            ))}
+        </div>
+    );
+}
+
+const TimelineItem = ({ label, date, isLast = false, subtext, }: { label: string; date: string; isLast?: boolean; subtext?: React.ReactNode; }) => (
     <div className="flex items-start">
         <div className="flex flex-col items-center mr-3">
             <div className="w-2 h-2 rounded-full bg-[#5784ba]"></div>
@@ -177,6 +197,7 @@ const TimelineItem = ({ label, date, isLast = false }: { label: string; date: st
         <div className="flex-1 pb-2">
             <p className="text-xs font-medium text-gray-900">{label}</p>
             <p className="text-xs text-gray-600">{date}</p>
+            {subtext ? <p className="text-xs text-gray-600 mt-0.5">{subtext}</p> : null}
         </div>
     </div>
 );
@@ -236,6 +257,7 @@ export default function OrderDetailPage() {
             print_sent_at: o.timeline?.print_sent_at || "",
             shipped_at: o.timeline?.shipped_at || "",
         },
+        tracking_code: o.tracking_code || ""
     });
 
     useEffect(() => {
@@ -570,8 +592,19 @@ export default function OrderDetailPage() {
                                             <TimelineItem label="Order Processed" date={formatIso(order.timeline?.processed_at)} />
                                             <TimelineItem label="Order Approved" date={formatIso(order.timeline?.approved_at)} />
                                             <TimelineItem label="Sent for Printing" date={prettyDate(order.timeline?.print_sent_at)} />
-                                            <TimelineItem label="Order Shipped" date={formatIso(order.timeline?.shipped_at)} isLast />
+                                            <TimelineItem
+                                                label="Order Shipped"
+                                                date={formatIso(order.timeline?.shipped_at)}
+                                                subtext={
+                                                    order.timeline?.shipped_at && order.order?.tracking_code
+                                                        ? <>Tracking ID: <span>{order.order.tracking_code}</span></>
+                                                        : undefined
+                                                }
+                                                isLast
+                                            />
                                         </div>
+
+
                                         {isEditing && (
                                             <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-3 gap-y-1.5 mt-3">
                                                 <InfoField label="created_at" value={form.timeline.created_at} editable onChange={(v) => updateForm("timeline.created_at", v)} />
