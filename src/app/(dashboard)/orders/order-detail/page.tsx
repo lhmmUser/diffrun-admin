@@ -171,23 +171,6 @@ function ThumbGrid({ urls }: { urls: string[] }) {
     );
 }
 
-function ThumbGrid({ urls }: { urls: string[] }) {
-    if (!urls?.length) return null;
-    return (
-        <div className="grid grid-cols-3 gap-1">
-            {urls.map((u, i) => (
-                <a key={i} href={u} target="_blank" rel="noreferrer" className="block" title={u}>
-                    <img
-                        src={u}
-                        alt={`child_input_${i + 1}`}
-                        className="w-20 h-20 object-cover rounded border border-gray-200 hover:border-[#5784ba]"
-                    />
-                </a>
-            ))}
-        </div>
-    );
-}
-
 const TimelineItem = ({ label, date, isLast = false, subtext, }: { label: string; date: string; isLast?: boolean; subtext?: React.ReactNode; }) => (
     <div className="flex items-start">
         <div className="flex flex-col items-center mr-3">
