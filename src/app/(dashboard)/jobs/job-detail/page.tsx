@@ -17,6 +17,19 @@ type MiniJob = {
   paid?: boolean;
   approved?: boolean;
   input_images: string[];
+
+  // twin support
+  is_twin?: boolean;
+  child1_age?: string | number | null;
+  child2_age?: string | number | null;
+
+  // filenames (optional, keep for audit)
+  child1_image_filenames?: string[];
+  child2_image_filenames?: string[];
+
+  // NEW: presigned URLs to show images
+  child1_input_images?: string[];
+  child2_input_images?: string[];
 };
 
 const ACCENT = "#5784ba";
@@ -26,7 +39,7 @@ const prettyIso = (s?: string | null): string => {
   const m = String(s).trim().match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/);
   if (!m) return String(s);
   const [, y, mo, d, hh, mm] = m;
-  const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   const h = parseInt(hh, 10);
   const h12 = h % 12 === 0 ? 12 : h % 12;
   const ampm = h >= 12 ? "pm" : "am";
@@ -90,7 +103,7 @@ const JobDetail = () => {
   const copy = async (text: string) => {
     try {
       await navigator.clipboard.writeText(text);
-    } catch {}
+    } catch { }
   };
 
   if (!jobIdFromQS) {
@@ -108,6 +121,45 @@ const JobDetail = () => {
     );
   }
 
+  // show either single Age OR per-child ages
+  const showChildAges =
+    Boolean(data?.is_twin) ||
+    (data?.child1_age !== undefined && data?.child1_age !== null && String(data?.child1_age).trim() !== "") ||
+    (data?.child2_age !== undefined && data?.child2_age !== null && String(data?.child2_age).trim() !== "");
+
+  const overviewRows = [
+    { label: "Name", value: data?.name ?? "" },
+    { label: "Gender", value: (data?.gender || "-") as string },
+    ...(showChildAges
+      ? [
+        { label: "Child 1 Age", value: data?.child1_age ? String(data.child1_age) : "-" },
+        { label: "Child 2 Age", value: data?.child2_age ? String(data.child2_age) : "-" },
+      ]
+      : [{ label: "Age", value: data?.age ? String(data.age) : "-" }]),
+    { label: "Email", value: data?.email ?? "", copyable: true },
+    { label: "Book ID", value: data?.book_id || "-" },
+    { label: "Created", value: prettyIso(data?.created_at ?? null) },
+    { label: "Partial Preview Generated", value: prettyIso(data?.partial_preview ?? null) },
+    { label: "Final Preview Generated", value: prettyIso(data?.final_preview ?? null) },
+  ];
+
+  // helpers to render a simple thumbnail grid
+  const ThumbGrid = ({ urls }: { urls: string[] }) => (
+    <div className="grid grid-cols-3 gap-2">
+      {urls.map((u, i) => (
+        <a key={i} href={u} target="_blank" rel="noreferrer" className="group block" title="Open original">
+          <div className="aspect-square overflow-hidden rounded-lg border border-gray-100 bg-gray-50">
+            <img
+              src={u}
+              alt={`Input ${i + 1}`}
+              className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.03]"
+            />
+          </div>
+        </a>
+      ))}
+    </div>
+  );
+
   return (
     <main className="min-h-screen bg-gray-50">
       <div className="max-w-5xl mx-auto px-3 py-6">
@@ -116,7 +168,6 @@ const JobDetail = () => {
             <h1 className="text-xs md:text-2xl font-bold text-gray-900 leading-tight">
               Job • <span style={{ color: ACCENT }}>{jobIdFromQS}</span>
             </h1>
-            <p className="hidden md:block text-sm text-gray-500 mt-0.5">Compact snapshot for quick review</p>
           </div>
           <div className="flex items-center gap-2">
             <button
@@ -168,20 +219,7 @@ const JobDetail = () => {
                   <Pill ok={data.approved} label="Approved" />
                 </div>
 
-                <DetailsGrid
-                  rows={[
-                    { label: "Name", value: data.name },
-                    { label: "Gender", value: data.gender || "-" },
-                    { label: "Age", value: data.age ? String(data.age) : "-" },
-                    { label: "Email", value: data.email, copyable: true },
-                    { label: "Book ID", value: data.book_id || "-" },
-                    { label: "Created", value: prettyIso(data.created_at) },
-                    { label: "Partial Preview Generated", value: prettyIso(data.partial_preview) },
-                    { label: "Final Preview Generated", value: prettyIso(data.final_preview) },
-                  ]}
-                  onCopy={copy}
-                  accent={ACCENT}
-                />
+                <DetailsGrid rows={overviewRows} onCopy={copy} accent={ACCENT} />
 
                 <div className="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2">
                   <div className="rounded-xl border border-gray-200 p-4">
@@ -200,44 +238,51 @@ const JobDetail = () => {
                       )}
                     </div>
                     <div className="rounded-lg border border-dashed border-gray-200 bg-gray-50 px-3 py-4 text-sm text-gray-500">
-                      {data.preview_url
-                        ? "A direct link to the preview file."
-                        : "No preview URL found for this job."}
+                      {data.preview_url ? "A direct link to the preview file." : "No preview URL found for this job."}
                     </div>
                   </div>
 
                   <div className="rounded-xl border border-gray-200 p-4">
                     <div className="flex items-center justify-between mb-3">
                       <h3 className="text-sm font-semibold text-gray-900">Input Images</h3>
-                      <span className="text-xs text-gray-500">{data.input_images?.length || 0} file(s)</span>
+                      <span className="text-xs text-gray-500">
+                        {data.input_images?.length || 0} file(s)
+                      </span>
                     </div>
+
                     {data.input_images?.length ? (
-                      <div className="grid grid-cols-3 gap-2">
-                        {data.input_images.map((u, i) => (
-                          <a
-                            key={i}
-                            href={u}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="group block"
-                            title="Open original"
-                          >
-                            <div className="aspect-square overflow-hidden rounded-lg border border-gray-100 bg-gray-50">
-                              <img
-                                src={u}
-                                alt={`Input ${i + 1}`}
-                                className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.03]"
-                              />
-                            </div>
-                          </a>
-                        ))}
+                      <div className="mb-4">
+                        <ThumbGrid urls={data.input_images} />
+                      </div>
+                    ) : (data?.child1_input_images?.length || data?.child2_input_images?.length) ? (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        <div>
+                          <div className="text-sm font-semibold text-gray-900 mb-2">Child 1</div>
+                          {data.child1_input_images?.length ? (
+                            <ThumbGrid urls={data.child1_input_images} />
+                          ) : (
+                            <div className="text-sm text-gray-400">No files</div>
+                          )}
+                        </div>
+
+                        {(data.is_twin || data.child2_input_images?.length) ? (
+                          <div>
+                            <div className="text-sm font-semibold text-gray-900 mb-2">Child 2</div>
+                            {data.child2_input_images?.length ? (
+                              <ThumbGrid urls={data.child2_input_images} />
+                            ) : (
+                              <div className="text-sm text-gray-400">No files</div>
+                            )}
+                          </div>
+                        ) : null}
                       </div>
                     ) : (
-                      <div className="h-[140px] rounded-lg border border-dashed border-gray-200 bg-gray-50 flex items-center justify-center text-sm text-gray-400">
+                      <div className="h-[140px] rounded-lg border border-dashed border-gray-200 bg-gray-50 flex items-center justify-center text-sm text-gray-400 mb-4">
                         No input images
                       </div>
                     )}
                   </div>
+
                 </div>
               </>
             ) : (
@@ -261,7 +306,10 @@ const DetailsGrid = ({
 }) => (
   <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-3">
     {rows.map((r, idx) => (
-      <div key={idx} className="flex items-start justify-between gap-2 rounded-lg border border-gray-100 p-3 hover:shadow-sm transition">
+      <div
+        key={idx}
+        className="flex items-start justify-between gap-2 rounded-lg border border-gray-100 p-3 hover:shadow-sm transition"
+      >
         <div>
           <div className="text-xs uppercase tracking-wide text-gray-500">{r.label}</div>
           <div className="mt-0.5 text-sm font-medium text-gray-900 break-all">{r.value || "-"}</div>
