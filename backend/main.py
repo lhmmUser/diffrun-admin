@@ -147,6 +147,11 @@ COUNTRY_CODES = {
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
+def _to_naive_utc(x):
+    if isinstance(x, datetime):
+        # convert tz-aware -> naive UTC; leave others unchanged
+        return x.astimezone(timezone.utc).replace(tzinfo=None) if x.tzinfo else x
+    return x
 
 @app.get("/health")
 def health_check():
@@ -2044,6 +2049,89 @@ def _get_ec2_status_rows():
         return [], f"AWS error: {e}"
     except Exception as e:
         return [], f"Unexpected error: {e}"
+def _get_ec2_status_rows() -> Tuple[List[dict], Optional[str]]:
+    """
+    Return (rows, err).  Skips any missing instance IDs instead of failing.
+    rows schema includes keys used later: OnOff, Name, InstanceId (plus extras).
+    """
+    ec2 = boto3.client("ec2", region_name=os.getenv("AWS_REGION", None))
+
+    # Source of instance IDs: keep whatever you already use
+    # Example: a global/list env. Do NOT change your current source; just read it.
+    # If you already have EC2_INSTANCE_IDS somewhere, keep that.
+    instance_ids: List[str] = INSTANCE_IDS  # type: ignore[name-defined]
+
+    rows: List[dict] = []
+    if not instance_ids:
+        # Nothing to do; do not error
+        return rows, None
+
+    def chunks(lst, n):
+        for i in range(0, len(lst), n):
+            yield lst[i:i + n]
+
+    skipped: List[str] = []
+
+    for chunk in chunks(instance_ids, 100):
+        to_query = list(chunk)
+        if not to_query:
+            continue
+
+        while to_query:
+            try:
+                resp = ec2.describe_instances(InstanceIds=to_query)
+            except ClientError as e:
+                code = e.response.get("Error", {}).get("Code")
+                if code == "InvalidInstanceID.NotFound":
+                    # Extract bad IDs from the message and drop them
+                    msg = e.response.get("Error", {}).get("Message", "")
+                    bad = re.findall(r"i-[0-9a-f]+", msg)
+                    if not bad:
+                        # If we can't parse, skip this whole chunk and move on
+                        logging.warning("EC2: could not parse missing IDs from: %s", msg)
+                        break
+                    skipped.extend(bad)
+                    to_query = [i for i in to_query if i not in bad]
+                    if not to_query:
+                        break
+                    # retry with the remaining IDs
+                    continue
+                else:
+                    # Any other AWS error: surface a single error string (optional)
+                    logging.exception("EC2 describe_instances failed")
+                    return rows, f"AWS error: {e}"
+
+            # Process reservations -> instances
+            for r in resp.get("Reservations", []):
+                for inst in r.get("Instances", []):
+                    iid = inst.get("InstanceId", "")
+                    state = (inst.get("State", {}) or {}).get("Name", "")
+                    # OnOff field as int (1 running, 0 otherwise), matches your sort later
+                    onoff = 1 if state == "running" else 0
+                    # Name tag
+                    name = ""
+                    for t in inst.get("Tags", []) or []:
+                        if t.get("Key") == "Name":
+                            name = t.get("Value", "")
+                            break
+                    rows.append({
+                        "OnOff": onoff,
+                        "Name": name,
+                        "InstanceId": iid,
+                        "State": state,
+                        "Type": inst.get("InstanceType", ""),
+                        "AZ": (inst.get("Placement", {}) or {}).get("AvailabilityZone", ""),
+                        "PrivateIP": inst.get("PrivateIpAddress", ""),
+                        "PublicIP": inst.get("PublicIpAddress", ""),
+                        "LaunchTime": inst.get("LaunchTime", ""),
+                    })
+            break  # exit the inner while after successful call
+
+    if skipped:
+        logging.warning("EC2: skipped missing instance IDs: %s", ", ".join(skipped))
+
+    # IMPORTANT: we return no error so the caller writes 'ec2_status' (not *_error)
+    return rows, None
 
 
 @app.get("/download-csv")
@@ -2206,9 +2294,12 @@ def download_xlsx(from_date: str = Query(...), to_date: str = Query(...)):
             else:
                 ec2_df = pd.DataFrame(ec2_rows)
                 if not ec2_df.empty:
-                    ec2_df = ec2_df.sort_values(
-                        ["OnOff", "Name", "InstanceId"], ascending=[False, True, True]
-                    )
+                    for col in ec2_df.columns:
+                        if pd.api.types.is_datetime64tz_dtype(ec2_df[col]):
+                            ec2_df[col] = ec2_df[col].dt.tz_convert('UTC').dt.tz_localize(None)
+                        elif ec2_df[col].dtype == "object":
+                            if ec2_df[col].apply(lambda v: isinstance(v, datetime) and getattr(v, "tzinfo", None) is not None).any():
+                                ec2_df[col] = ec2_df[col].apply(_to_naive_utc)
                 ec2_df.to_excel(writer, index=False, sheet_name="ec2_status")
 
             # Freeze panes (engine-specific)
@@ -2339,9 +2430,12 @@ def download_xlsx_yippee(from_date: str = Query(...), to_date: str = Query(...))
             else:
                 ec2_df = pd.DataFrame(ec2_rows)
                 if not ec2_df.empty:
-                    ec2_df = ec2_df.sort_values(
-                        ["OnOff", "Name", "InstanceId"], ascending=[False, True, True]
-                    )
+                    for col in ec2_df.columns:
+                        if pd.api.types.is_datetime64tz_dtype(ec2_df[col]):
+                            ec2_df[col] = ec2_df[col].dt.tz_convert('UTC').dt.tz_localize(None)
+                        elif ec2_df[col].dtype == "object":
+                            if ec2_df[col].apply(lambda v: isinstance(v, datetime) and getattr(v, "tzinfo", None) is not None).any():
+                                ec2_df[col] = ec2_df[col].apply(_to_naive_utc)
                 ec2_df.to_excel(writer, index=False, sheet_name="ec2_status")
 
             # Freeze panes
@@ -2370,6 +2464,63 @@ def download_xlsx_yippee(from_date: str = Query(...), to_date: str = Query(...))
         )
     except Exception as e:
         return Response(f"❌ Error building XLSX: {e}", media_type="text/plain", status_code=500)
+
+def _format_ec2_status_table(rows: List[dict]) -> pd.DataFrame:
+    """
+    Shape EC2 rows into the exact table:
+    Name, InstanceId, State, OnOff('on'/'off'), InstanceStatus, SystemStatus,
+    PublicIP, PrivateIP, LaunchTime_ISO (YYYY-MM-DD), CheckedAt_IST (YYYY-MM-DD)
+    """
+    df = pd.DataFrame(rows or [])
+    if df.empty:
+        # return empty frame with expected columns so Excel writer doesn't choke
+        return pd.DataFrame(columns=[
+            "Name","InstanceId","State","OnOff","InstanceStatus","SystemStatus",
+            "PublicIP","PrivateIP","LaunchTime_ISO","CheckedAt_IST"
+        ])
+
+    # Map OnOff 1/0 -> "on"/"off"
+    df["OnOff"] = df.get("OnOff", 0).map({1: "on", 0: "off"}).fillna("off")
+
+    # Resolve statuses from DescribeInstanceStatus (include stopped)
+    status_map = {}
+    ec2 = boto3.client("ec2", region_name=os.getenv("AWS_REGION", None))
+    ids = [i for i in df.get("InstanceId", []).tolist() if isinstance(i, str) and i.startswith("i-")]
+    for i in range(0, len(ids), 100):
+        chunk = ids[i:i+100]
+        try:
+            resp = ec2.describe_instance_status(InstanceIds=chunk, IncludeAllInstances=True)
+            for st in resp.get("InstanceStatuses", []):
+                iid = st.get("InstanceId", "")
+                inst_status = (st.get("InstanceStatus", {}) or {}).get("Status", "not-applicable")
+                sys_status  = (st.get("SystemStatus", {}) or {}).get("Status", "not-applicable")
+                status_map[iid] = (inst_status or "not-applicable", sys_status or "not-applicable")
+        except ClientError as e:
+            logging.warning("describe_instance_status failed for %s: %s", chunk, e)
+
+    df["InstanceStatus"] = df["InstanceId"].map(lambda x: status_map.get(x, ("not-applicable","not-applicable"))[0])
+    df["SystemStatus"]  = df["InstanceId"].map(lambda x: status_map.get(x, ("not-applicable","not-applicable"))[1])
+
+    # LaunchTime -> UTC date string (YYYY-MM-DD), safe for Excel
+    def _to_naive_utc(x):
+        if isinstance(x, datetime):
+            return x.astimezone(timezone.utc).replace(tzinfo=None) if x.tzinfo else x
+        return x
+    launch_col = "LaunchTime" if "LaunchTime" in df.columns else "LaunchTime_ISO"
+    df["LaunchTime_ISO"] = df.get(launch_col, "").apply(_to_naive_utc).apply(
+        lambda d: d.strftime("%Y-%m-%d") if isinstance(d, datetime) else (str(d) if d else "")
+    )
+
+    # CheckedAt_IST = today's IST date
+    df["CheckedAt_IST"] = datetime.now(IST_TZ).date().isoformat()
+
+    # Select & order columns
+    out = df.reindex(columns=[
+        "Name","InstanceId","State","OnOff","InstanceStatus","SystemStatus",
+        "PublicIP","PrivateIP","LaunchTime_ISO","CheckedAt_IST"
+    ])
+    # Fill NAs with empty string
+    return out.fillna("")
 
 
 def _export_xlsx_bytes(from_dt_utc: datetime, to_dt_utc: datetime) -> Tuple[bytes, str]:
@@ -2547,9 +2698,10 @@ def _export_xlsx_bytes(from_dt_utc: datetime, to_dt_utc: datetime) -> Tuple[byte
             ec2_df = pd.DataFrame([{"error": ec2_err}])
             ec2_sheet_name = "ec2_status_error"
         else:
-            ec2_df = pd.DataFrame(ec2_rows)
+            ec2_df = _format_ec2_status_table(ec2_rows)
             if not ec2_df.empty:
-                ec2_df = ec2_df.sort_values(["OnOff", "Name", "InstanceId"], ascending=[False, True, True])
+                ec2_df["__on__"] = (ec2_df["OnOff"] == "on").astype(int)
+                ec2_df = ec2_df.sort_values(["__on__", "Name", "InstanceId"], ascending=[False, True, True]).drop(columns="__on__")
             ec2_sheet_name = "ec2_status"
         ec2_df.to_excel(writer, index=False, sheet_name=ec2_sheet_name)
 
