@@ -5,7 +5,6 @@ import { useRouter, useSearchParams } from "next/navigation";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "";
 
-// Map locale → currency code + preferred number-formatting locale
 const LOCALE_TO_CURRENCY_CODE: Record<string, string> = {
     US: "USD",
     CA: "CAD",
@@ -25,9 +24,6 @@ const LOCALE_TO_NUMBER_LOCALE: Record<string, string> = {
     AE: "en-AE",
 };
 
-// Format money with the *symbol* for the given locale; shows ₹ for IN, CA$ for CA, etc.
-// Falls back to USD + en-US if locale is missing/unsupported.
-// NOTE: This is used only for read-only display; editing keeps a plain input.
 function formatMoney(amount: string | number | "", locale?: string) {
     const cleanLocale = String(locale || "US").toUpperCase();
     const code = LOCALE_TO_CURRENCY_CODE[cleanLocale] || "USD";
@@ -36,7 +32,6 @@ function formatMoney(amount: string | number | "", locale?: string) {
     const n = typeof amount === "number" ? amount : Number(String(amount).trim());
     if (!Number.isFinite(n)) return String(amount ?? "");
 
-    // Use Intl to render the symbol (₹, CA$, A$, £, AED, etc.)
     return new Intl.NumberFormat(nfLocale, {
         style: "currency",
         currency: code,
@@ -61,7 +56,15 @@ type ChildDetails = {
     gender?: string;
     saved_files?: string[];
     saved_file_urls?: string[];
+    is_twin?: boolean;
+    child1_age?: string | number | null;
+    child2_age?: string | number | null;
+    child1_image_filenames?: string[];
+    child2_image_filenames?: string[];
+    child1_input_images?: string[];
+    child2_input_images?: string[];
 };
+
 
 type CustomerDetails = {
     user_name?: string;
@@ -78,6 +81,7 @@ type OrderFinancial = {
     book_url?: string;
     paypal_capture_id?: string;
     paypal_order_id?: string;
+    tracking_code?: string;
     cover_image?: string;
 };
 
@@ -110,6 +114,7 @@ type OrderDetail = {
     order?: OrderFinancial;
     timeline?: Timeline;
     cover_image?: string;
+    tracking_code?: string | null; // NEW
 };
 
 type FormState = {
@@ -146,9 +151,27 @@ type FormState = {
         print_sent_at: string;
         shipped_at: string;
     };
+    tracking_code: string;
 };
 
-const TimelineItem = ({ label, date, isLast = false }: { label: string; date: string; isLast?: boolean }) => (
+function ThumbGrid({ urls }: { urls: string[] }) {
+    if (!urls?.length) return null;
+    return (
+        <div className="grid grid-cols-3 gap-1">
+            {urls.map((u, i) => (
+                <a key={i} href={u} target="_blank" rel="noreferrer" className="block" title={u}>
+                    <img
+                        src={u}
+                        alt={`child_input_${i + 1}`}
+                        className="w-20 h-20 object-cover rounded border border-gray-200 hover:border-[#5784ba]"
+                    />
+                </a>
+            ))}
+        </div>
+    );
+}
+
+const TimelineItem = ({ label, date, isLast = false, subtext, }: { label: string; date: string; isLast?: boolean; subtext?: React.ReactNode; }) => (
     <div className="flex items-start">
         <div className="flex flex-col items-center mr-3">
             <div className="w-2 h-2 rounded-full bg-[#5784ba]"></div>
@@ -157,6 +180,7 @@ const TimelineItem = ({ label, date, isLast = false }: { label: string; date: st
         <div className="flex-1 pb-2">
             <p className="text-xs font-medium text-gray-900">{label}</p>
             <p className="text-xs text-gray-600">{date}</p>
+            {subtext ? <p className="text-xs text-gray-600 mt-0.5">{subtext}</p> : null}
         </div>
     </div>
 );
@@ -216,6 +240,7 @@ export default function OrderDetailPage() {
             print_sent_at: o.timeline?.print_sent_at || "",
             shipped_at: o.timeline?.shipped_at || "",
         },
+        tracking_code: o.tracking_code || ""
     });
 
     useEffect(() => {
@@ -550,8 +575,19 @@ export default function OrderDetailPage() {
                                             <TimelineItem label="Order Processed" date={formatIso(order.timeline?.processed_at)} />
                                             <TimelineItem label="Order Approved" date={formatIso(order.timeline?.approved_at)} />
                                             <TimelineItem label="Sent for Printing" date={prettyDate(order.timeline?.print_sent_at)} />
-                                            <TimelineItem label="Order Shipped" date={formatIso(order.timeline?.shipped_at)} isLast />
+                                            <TimelineItem
+                                                label="Order Shipped"
+                                                date={formatIso(order.timeline?.shipped_at)}
+                                                subtext={
+                                                    order.timeline?.shipped_at && order.order?.tracking_code
+                                                        ? <>Tracking ID: <span>{order.order.tracking_code}</span></>
+                                                        : undefined
+                                                }
+                                                isLast
+                                            />
                                         </div>
+
+
                                         {isEditing && (
                                             <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-3 gap-y-1.5 mt-3">
                                                 <InfoField label="created_at" value={form.timeline.created_at} editable onChange={(v) => updateForm("timeline.created_at", v)} />
@@ -606,36 +642,61 @@ export default function OrderDetailPage() {
                                 <h3 className="text-base font-semibold text-gray-900 mb-3 pb-1 border-b border-gray-100">Child Detail</h3>
                                 <div className="space-y-2">
                                     <InfoField label="Name" value={form.name} editable={isEditing} onChange={(v) => updateForm("name", v)} />
-                                    <InfoField label="Age" value={form.age || ""} editable={isEditing} onChange={(v) => updateForm("age", v)} />
+
+                                    {/* Show either single age (editable) OR per-child ages (read-only) */}
+                                    {order.child?.is_twin ||
+                                        order.child?.child1_age !== undefined ||
+                                        order.child?.child2_age !== undefined ? (
+                                        <>
+                                            <InfoField label="Child 1 Age" value={(order.child?.child1_age as any) ?? "-"} />
+                                            <InfoField label="Child 2 Age" value={(order.child?.child2_age as any) ?? "-"} />
+                                        </>
+                                    ) : (
+                                        <InfoField label="Age" value={form.age || ""} editable={isEditing} onChange={(v) => updateForm("age", v)} />
+                                    )}
+
                                     <InfoField label="Gender" value={form.gender} editable={isEditing} onChange={(v) => updateForm("gender", v)} type="select" />
+
+                                    {/* Legacy thumbnails (kept for backward compatibility) */}
                                     {(order.child?.saved_file_urls?.length || 0) > 0 ? (
                                         <div className="mt-1">
-                                            <div className="grid grid-cols-3 gap-1">
-                                                {order.child!.saved_file_urls!.slice(0, 3).map((url, i) => (
-                                                    <a key={`saved-url-${i}`} href={url} target="_blank" rel="noreferrer" className="block" title={url}>
-                                                        <img
-                                                            src={url}
-                                                            alt={`child_saved_${i + 1}`}
-                                                            className="w-20 h-20 object-cover rounded border border-gray-200 hover:border-[#5784ba]"
-                                                        />
-                                                    </a>
-                                                ))}
-                                            </div>
+                                            <ThumbGrid urls={order.child!.saved_file_urls!.slice(0, 3)} />
                                         </div>
                                     ) : (
                                         (order.child?.saved_files?.length || 0) > 0 && (
                                             <div className="mt-1">
                                                 <ul className="list-disc ml-4 text-xs text-gray-700">
                                                     {order.child!.saved_files!.slice(0, 3).map((name, i) => (
-                                                        <li key={`saved-name-${i}`} className="break-all">
-                                                            {name}
-                                                        </li>
+                                                        <li key={`saved-name-${i}`} className="break-all">{name}</li>
                                                     ))}
                                                 </ul>
                                                 <p className="text-xs text-gray-500 mt-1">No image URLs yet.</p>
                                             </div>
                                         )
                                     )}
+
+                                    {(order.child?.child1_input_images?.length || order.child?.child2_input_images?.length) ? (
+                                        <div className="mt-2 flex flex-col gap-4">
+                                            <div>
+                                                <div className="text-xs font-semibold text-gray-800 mb-1">Child 1 Inputs</div>
+                                                {order.child?.child1_input_images?.length ? (
+                                                    <ThumbGrid urls={order.child.child1_input_images} />
+                                                ) : (
+                                                    <div className="text-xs text-gray-400">No files</div>
+                                                )}
+                                            </div>
+                                            {(order.child?.is_twin || order.child?.child2_input_images?.length) ? (
+                                                <div>
+                                                    <div className="text-xs font-semibold text-gray-800 mb-1">Child 2 Inputs</div>
+                                                    {order.child?.child2_input_images?.length ? (
+                                                        <ThumbGrid urls={order.child.child2_input_images} />
+                                                    ) : (
+                                                        <div className="text-xs text-gray-400">No files</div>
+                                                    )}
+                                                </div>
+                                            ) : null}
+                                        </div>
+                                    ) : null}
                                 </div>
                             </div>
 

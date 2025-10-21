@@ -42,7 +42,7 @@ from botocore.config import Config
 from botocore.exceptions import ClientError, NoCredentialsError, PartialCredentialsError
 
 IST_TZ = pytz.timezone("Asia/Kolkata")
-API_BASE = os.getenv("NEXT_PUBLIC_API_BASE_URL", "http://127.0.0.1:8000")
+API_BASE = os.getenv("NEXT_PUBLIC_API_BASE_URL", "http://127.0.0.1:5000")
 # Setup logger
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -2965,24 +2965,41 @@ def _build_order_response(order: Dict[str, Any]) -> Dict[str, Any]:
     if job_id:
         user_doc = orders_collection.find_one({"job_id": job_id}) or {}
 
-    # child details
-    child_name = _first_non_empty(order, ["name"], default=_first_non_empty(user_doc, ["name"]))
-    child_age = _first_non_empty(order, ["age"], default=_first_non_empty(user_doc, ["age"]))
+    child_name   = _first_non_empty(order, ["name"],   default=_first_non_empty(user_doc, ["name"]))
+    child_age    = _first_non_empty(order, ["age"],    default=_first_non_empty(user_doc, ["age"]))
     child_gender = _first_non_empty(order, ["gender"], default=_first_non_empty(user_doc, ["gender"]))
 
     saved_files = _pick_image_list(order) or _pick_image_list(user_doc)
 
-    # Try to produce S3 pre-signed URLs for the saved files; skip if none
     saved_file_urls: list[str] = []
     if saved_files:
-        saved_file_urls = _presigned_urls_for_saved_files(saved_files, expires_in=3600)  # 1 hour expiry
+        saved_file_urls = _presigned_urls_for_saved_files(saved_files, expires_in=3600)
+
+    book_id = _first_non_empty(order, ["book_id"], default=_first_non_empty(user_doc, ["book_id"])) or ""
+    is_twin = _is_twin_book(book_id)
+
+    child1_age = _first_non_empty(order, ["child1_age"], default=_first_non_empty(user_doc, ["child1_age"]))
+    child2_age = _first_non_empty(order, ["child2_age"], default=_first_non_empty(user_doc, ["child2_age"]))
+
+    child1_files = _coerce_list(order.get("child1_image_filenames") or user_doc.get("child1_image_filenames"))[:3]
+    child2_files = _coerce_list(order.get("child2_image_filenames") or user_doc.get("child2_image_filenames"))[:3]
+
+    child1_input_urls: list[str] = _presigned_urls_for_saved_files(child1_files, expires_in=3600) if child1_files else []
+    child2_input_urls: list[str] = _presigned_urls_for_saved_files(child2_files, expires_in=3600) if child2_files else []
 
     child_details = {
-        "name": child_name or "",
-        "age": child_age or "",
+        "name": (child_name or ""),
+        "age":  (child_age  or ""),                
         "gender": (child_gender or "").lower(),
         "saved_files": saved_files[:3],
-        "saved_file_urls": saved_file_urls,   # <-- UI can render these directly
+        "saved_file_urls": saved_file_urls,
+        "is_twin": bool(is_twin),
+        "child1_age": child1_age if child1_age not in (None, "") else None,
+        "child2_age": child2_age if is_twin and child2_age not in (None, "") else None,
+        "child1_image_filenames": child1_files,     # as stored in DB (for traceability)
+        "child2_image_filenames": child2_files,
+        "child1_input_images": child1_input_urls,   # presigned URLs from replicacomfy/input/<filename>
+        "child2_input_images": child2_input_urls,
     }
 
     # customer details
@@ -3008,6 +3025,7 @@ def _build_order_response(order: Dict[str, Any]) -> Dict[str, Any]:
         "paypal_capture_id": order.get("paypal_capture_id", ""),
         "paypal_order_id": order.get("paypal_order_id", ""),
         "cover_image": cover_url_from_gen or "",
+        "tracking_code": order.get("tracking_code")
     }
 
     # timeline
@@ -3104,14 +3122,20 @@ class OrderUpdate(BaseModel):
     shipping_address: Optional[ShippingAddressUpdate] = None
     timeline:         Optional[TimelineUpdate] = None
     order_id: Optional[str] = None
+    tracking_code: Optional[str] = None
 
 IMMUTABLE_PATHS = {
     "saved_files",
     "child.saved_files",
     "child.saved_file_urls",
+    "child.child1_input_images", 
+    "child.child2_input_images",    
+    "child.child1_image_filenames", 
+    "child.child2_image_filenames", 
     "cover_image",
     "order.cover_image",
 }
+
 def _is_forbidden(path: str) -> bool:
     return any(path == p or path.startswith(p + ".") for p in IMMUTABLE_PATHS)
 
@@ -3156,7 +3180,8 @@ def patch_order(order_id: str, update: OrderUpdate):
         "email": "email",
         "phone": "phone_number",
         "cust_status": "cust_status",
-        "order_id": "order_id"
+        "order_id": "order_id",
+        "tracking_code": "tracking_code"
     }
 
     for incoming, doc_path in field_map.items():
@@ -3315,46 +3340,117 @@ def _find_cover_image_url_from_generations(job_id: str, expires_in: int = 3600) 
         )
     except ClientError:
         return None
+
+def _is_twin_book(book_id: str) -> bool:
+    b = (book_id or "").strip().lower()
+    # Adjust the identifiers below to your catalog if needed
+    return any(k in b for k in ("twin", "bb", "bg", "gg", "twin_boy_girl", "twin_girl_girl", "twin_boy_boy"))
+
+def _get_child_age(order: Dict[str, Any], idx: int) -> Optional[Union[int, str]]:
+
+    if idx == 1:
+        for key in ("child1_age", "age", "child_age", "kid_age"):
+            v = order.get(key)
+            if v not in (None, ""):
+                return v
+    if idx == 2:
+        v = order.get("child2_age")
+        if v not in (None, ""):
+            return v
+
+    # nested dicts commonly used
+    child_key = f"child{idx}"
+    v = (order.get(child_key) or {}).get("age")
+    if v not in (None, ""):
+        return v
+
+    # array style: children[0], children[1]
+    children = order.get("children") or order.get("kids") or []
+    if isinstance(children, list) and len(children) >= idx:
+        v = (children[idx - 1] or {}).get("age")
+        if v not in (None, ""):
+            return v
+
+    return None
+
+def _coerce_list(v: Any) -> List[str]:
+    if not v:
+        return []
+    if isinstance(v, list):
+        return [str(x) for x in v if x is not None and str(x).strip()]
+    return [str(v)]
+
+def _basename_list(files: List[str]) -> List[str]:
+    return [os.path.basename(x).strip() for x in files if x]
+
+def _pick_saved_files_for_child(order: Dict[str, Any], idx: int) -> List[str]:
+  
+    child_key = f"child{idx}"
+    child = order.get(child_key) or {}
+    if isinstance(child, dict):
+        files = _coerce_list(child.get("saved_files") or child.get("images") or child.get("files"))
+        if files:
+            return files
+
+    # children array
+    children = order.get("children") or order.get("kids") or []
+    if isinstance(children, list) and len(children) >= idx and isinstance(children[idx - 1], dict):
+        files = _coerce_list(children[idx - 1].get("saved_files") or children[idx - 1].get("images"))
+        if files:
+            return files
+
+    # named fields sometimes used
+    keys = [f"child{idx}_saved_files", f"child{idx}_images"]
+    for k in keys:
+        files = _coerce_list(order.get(k))
+        if files:
+            return files
+
+    # fallback for single-child legacy (only return to child #1)
+    if idx == 1:
+        files = _coerce_list(
+            order.get("saved_files")
+            or order.get("images")
+            or (order.get("child") or {}).get("saved_files")
+        )
+        if files:
+            return files
+
+    return []
     
 # JOB_ID Detail API
 
 @app.get("/jobs/{job_id}/mini")
 def get_job_mini(job_id: str) -> Dict[str, Any]:
-    """
-    Return minimal details for a job:
-    name, gender, created_at, book_id, preview_url, input images (pre-signed from S3),
-    email, age, paid, approved, partial_preview, and final_preview.
-    """
-
-    # Look up the order by job_id
     order = orders_collection.find_one({"job_id": job_id})
     if not order:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    # Email may be stored under multiple keys in your data model
-    email = _first_non_empty(
-        order,
-        ["email", "customer_email", "paypal_email"],
-        default=""
-    )
+    email = _first_non_empty(order, ["email", "customer_email", "paypal_email"], default="")
+    book_id = order.get("book_id", "") or ""
+    is_twin = _is_twin_book(book_id)
 
-    # Select the best preview URL
     preview_url = (
         order.get("preview_url")
-        or order.get("final_preview")
-        or order.get("partial_preview")
         or ""
     )
 
-    # Gather up to 3 input images and generate S3 pre-signed URLs
-    saved_files = _pick_image_list(order)  # pulls from root or child.saved_files
-    input_image_urls = (
-        _presigned_urls_for_saved_files(saved_files, expires_in=3600)
-        if saved_files
-        else []
-    )
+    saved_files = _pick_image_list(order)
+    input_image_urls = _presigned_urls_for_saved_files(saved_files, expires_in=3600) if saved_files else []
 
-    # Return structured minimal job info
+    child1_filenames = order.get("child1_image_filenames") or []
+    child2_filenames = order.get("child2_image_filenames") or []
+
+    if not isinstance(child1_filenames, list):
+        child1_filenames = [child1_filenames]
+    if not isinstance(child2_filenames, list):
+        child2_filenames = [child2_filenames]
+    child1_filenames = [str(x).strip() for x in child1_filenames if str(x).strip()][:3]
+    child2_filenames = [str(x).strip() for x in child2_filenames if str(x).strip()][:3]
+
+    child1_input_images = _presigned_urls_for_saved_files(child1_filenames, expires_in=3600) if child1_filenames else []
+    child2_input_images = _presigned_urls_for_saved_files(child2_filenames, expires_in=3600) if child2_filenames else []
+
     return {
         "job_id": job_id,
         "name": order.get("name", ""),
@@ -3362,11 +3458,18 @@ def get_job_mini(job_id: str) -> Dict[str, Any]:
         "age": order.get("age", ""),
         "email": email,
         "created_at": _iso(order.get("created_at")),
-        "book_id": order.get("book_id", ""),
+        "book_id": book_id,
         "preview_url": preview_url,
         "partial_preview": order.get("partial_preview", ""),
         "final_preview": order.get("final_preview", ""),
         "input_images": input_image_urls,
         "paid": bool(order.get("paid", False)),
         "approved": bool(order.get("approved", False)),
+        "child1_age": _get_child_age(order, 1),
+        "child2_age": _get_child_age(order, 2) if is_twin else None,
+        "child1_image_filenames": child1_filenames, 
+        "child2_image_filenames": child2_filenames,
+        "child1_input_images": child1_input_images,  
+        "child2_input_images": child2_input_images,
+        "is_twin": is_twin,
     }
