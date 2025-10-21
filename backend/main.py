@@ -66,6 +66,11 @@ client_df = MongoClient(MONGO_URI_df)
 df_db = client_df["df-db"]
 collection_df = df_db["user-data"]
 
+MONGO_URI_YIPPEE=os.getenv("MONGO_URI_YIPPEE")
+client_yippee = MongoClient(MONGO_URI_YIPPEE)
+yippee_db = client_yippee["yippee-db"]
+collection_yippee = yippee_db["user-data"]
+
 scheduler = BackgroundScheduler(timezone=IST_TZ)
 
 
@@ -2237,27 +2242,31 @@ def download_xlsx(from_date: str = Query(...), to_date: str = Query(...)):
         # Return the message so you see the real cause in the browser too
         return Response(f"❌ Error building XLSX: {e}", media_type="text/plain", status_code=500)
 
+@app.get("/download-xlsx-yippee")
+def download_xlsx_yippee(from_date: str = Query(...), to_date: str = Query(...)):
+    try:
+        # Validate range (dates are interpreted as UTC-naive, like your original)
+        from_dt = datetime.strptime(from_date, "%Y-%m-%d")
+        to_dt = datetime.strptime(to_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
+        if from_dt > to_dt:
+            return Response("from_date cannot be after to_date", media_type="text/plain", status_code=400)
 
-def _export_xlsx_bytes(from_dt_utc: datetime, to_dt_utc: datetime) -> Tuple[bytes, str]:
-    """
-    Build an XLSX with:
-      - 'orders'  : raw rows (with IST helper columns)
-      - 'pivot'   : counts per (ist-date x ist-hour)
-      - 'ec2_status' (or ec2_status_error)
-    Returns (xlsx_bytes, filename).
-    """
-    # Query Mongo (exclude _id)
-    mongo_filter = {TIMESTAMP_FIELD: {"$gte": from_dt_utc, "$lte": to_dt_utc}}
-    projection = {"_id": 0}
-    data = list(collection_df.find(mongo_filter, projection))
+        # Query Yippee collection (exclude _id)
+        data = list(
+            collection_yippee.find(
+                {TIMESTAMP_FIELD: {"$gte": from_dt, "$lte": to_dt}},
+                {"_id": 0},
+            )
+        )
+        if not data:
+            return Response("No data available", media_type="text/plain", status_code=404)
 
-    rows_out = []
-    if data:
+        # Build rows + IST helper columns (same logic as your DF endpoint)
+        rows_out = []
         for row in data:
             r = dict(row)
             base_ts = _parse_dt(r.get(TIMESTAMP_FIELD))
 
-            # Initialize helper columns
             r["date"] = ""
             r["hour"] = ""
             r["date-hour"] = ""
@@ -2265,11 +2274,9 @@ def _export_xlsx_bytes(from_dt_utc: datetime, to_dt_utc: datetime) -> Tuple[byte
             r["ist-hour"] = ""
 
             if base_ts is not None:
-                # keep your assumption (DB time -> IST)
-                ist_ts = base_ts + IST_OFFSET
-                r["date"] = base_ts.strftime(
-                    "%d/%m/%Y")        # UTC date (string)
-                r["hour"] = base_ts.strftime("%H")              # UTC hour
+                ist_ts = base_ts + IST_OFFSET  # keep same assumption as DF endpoint
+                r["date"] = base_ts.strftime("%d/%m/%Y")
+                r["hour"] = base_ts.strftime("%H")
                 r["date-hour"] = ist_ts.strftime("%Y-%m-%d %H:%M:%S")
                 r["ist-date"] = ist_ts.strftime("%d/%m/%Y")
                 r["ist-hour"] = ist_ts.strftime("%H")
@@ -2277,69 +2284,290 @@ def _export_xlsx_bytes(from_dt_utc: datetime, to_dt_utc: datetime) -> Tuple[byte
             rows_out.append(r)
 
         df = pd.DataFrame(rows_out)
-        filename = f"export_{from_dt_utc.strftime('%Y%m%d_%H%M%S')}_to_{to_dt_utc.strftime('%Y%m%d_%H%M%S')}.xlsx"
-    else:
-        # still generate a valid workbook
-        df = pd.DataFrame([{"note": "No data found in this window"}])
-        filename = f"export_empty_{from_dt_utc.date()}_{to_dt_utc.date()}.xlsx"
 
-    # Ensure required columns exist for pivot parity
-    for col in ["ist-date", "ist-hour", "room_id"]:
-        if col not in df.columns:
-            df[col] = ""
+        # Ensure required columns exist
+        for col in ["ist-date", "ist-hour", "room_id"]:
+            if col not in df.columns:
+                df[col] = ""
 
-    # Build pivot: count of room_id by (ist-date x ist-hour)
-    hours = [f"{h:02d}" for h in range(24)]
-    try:
+        # Pivot: count of room_id by (ist-date × ist-hour)
+        hours = [f"{h:02d}" for h in range(24)]
         df["ist-hour"] = df["ist-hour"].astype(str)
         pivot = pd.pivot_table(
-            df, index="ist-date", columns="ist-hour",
-            values="room_id", aggfunc="count", fill_value=0
+            df,
+            index="ist-date",
+            columns="ist-hour",
+            values="room_id",
+            aggfunc="count",
+            fill_value=0,
         )
         pivot = pivot.reindex(columns=hours, fill_value=0)
 
-        # sort ist-date as real dates when possible
+        # Sort ist-date as real dates when possible
         def _date_key(x):
             try:
                 return datetime.strptime(x, "%d/%m/%Y")
             except Exception:
                 return x
+
         pivot = pivot.sort_index(key=lambda idx: [_date_key(x) for x in idx])
 
-        # add totals
+        # Totals
         pivot["Total"] = pivot.sum(axis=1)
         pivot.loc["Total"] = pivot.sum(numeric_only=True)
-    except Exception as e:
-        # If something odd with columns, still continue with a minimal pivot
-        pivot = pd.DataFrame([{"error": f"pivot build failed: {e}"}])
 
-    # EC2 status
-    ec2_rows, ec2_err = _get_ec2_status_rows()
-    if ec2_err:
-        ec2_df = pd.DataFrame([{"error": ec2_err}])
-        ec2_sheet_name = "ec2_status_error"
-    else:
-        ec2_df = pd.DataFrame(ec2_rows)
-        if not ec2_df.empty:
-            ec2_df = ec2_df.sort_values(
-                ["OnOff", "Name", "InstanceId"], ascending=[False, True, True]
+        # Pick writer engine
+        engine = _pick_excel_engine()
+        if engine is None:
+            return Response(
+                "Missing Excel writer engine. Install one of: pip install xlsxwriter OR pip install openpyxl",
+                media_type="text/plain",
+                status_code=500,
             )
-        ec2_sheet_name = "ec2_status"
 
-    # Write workbook
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine=engine) as writer:
+            # pivot sheet
+            pivot.to_excel(writer, sheet_name="pivot")
+
+            # EC2 status sheet (same as DF)
+            ec2_rows, ec2_err = _get_ec2_status_rows()
+            if ec2_err:
+                pd.DataFrame([{"error": ec2_err}]).to_excel(
+                    writer, index=False, sheet_name="ec2_status_error"
+                )
+            else:
+                ec2_df = pd.DataFrame(ec2_rows)
+                if not ec2_df.empty:
+                    ec2_df = ec2_df.sort_values(
+                        ["OnOff", "Name", "InstanceId"], ascending=[False, True, True]
+                    )
+                ec2_df.to_excel(writer, index=False, sheet_name="ec2_status")
+
+            # Freeze panes
+            if engine == "xlsxwriter":
+                ws1 = writer.sheets["pivot"]
+                ws2 = writer.sheets.get("ec2_status")
+                if ws1:
+                    ws1.freeze_panes(1, 1)  # row 2, col B
+                if ws2:
+                    ws2.freeze_panes(1, 0)
+            else:  # openpyxl
+                ws1 = writer.sheets.get("pivot")
+                ws2 = writer.sheets.get("ec2_status")
+                if ws1 is not None:
+                    ws1.freeze_panes = "B2"
+                if ws2 is not None:
+                    ws2.freeze_panes = "A2"
+
+        output.seek(0)
+        filename = f"yippee_{from_date}_to_{to_date}.xlsx"
+        headers = {"Content-Disposition": f"attachment; filename={filename}"}
+        return StreamingResponse(
+            output,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers=headers,
+        )
+    except Exception as e:
+        return Response(f"❌ Error building XLSX: {e}", media_type="text/plain", status_code=500)
+
+
+def _export_xlsx_bytes(from_dt_utc: datetime, to_dt_utc: datetime) -> Tuple[bytes, str]:
+    # ---- helpers ----
+    def _load_df_for_collection(mongo_collection) -> pd.DataFrame:
+        mongo_filter = {TIMESTAMP_FIELD: {"$gte": from_dt_utc, "$lte": to_dt_utc}}
+        projection = {"_id": 0}
+        data = list(mongo_collection.find(mongo_filter, projection))
+        rows_out = []
+        if data:
+            for row in data:
+                r = dict(row)
+                base_ts = _parse_dt(r.get(TIMESTAMP_FIELD))
+                r["date"] = ""
+                r["hour"] = ""
+                r["date-hour"] = ""
+                r["ist-date"] = ""
+                r["ist-hour"] = ""
+                if base_ts is not None:
+                    ist_ts = base_ts + IST_OFFSET
+                    r["date"] = base_ts.strftime("%d/%m/%Y")
+                    r["hour"] = base_ts.strftime("%H")
+                    r["date-hour"] = ist_ts.strftime("%Y-%m-%d %H:%M:%S")
+                    r["ist-date"] = ist_ts.strftime("%d/%m/%Y")
+                    r["ist-hour"] = ist_ts.strftime("%H")
+                rows_out.append(r)
+            df = pd.DataFrame(rows_out)
+        else:
+            df = pd.DataFrame(columns=["ist-date", "ist-hour"])
+
+        for col in ["ist-date", "ist-hour", "room_id"]:
+            if col not in df.columns:
+                df[col] = ""
+        if "ist-hour" in df.columns:
+            df["ist-hour"] = df["ist-hour"].astype(str)
+        return df
+
+    def _build_pivot(df: pd.DataFrame) -> pd.DataFrame:
+        hours = [f"{h:02d}" for h in range(24)]
+        if df.empty:
+            return pd.DataFrame([{"error": "No data in range"}])
+        try:
+            piv = pd.pivot_table(
+                df, index="ist-date", columns="ist-hour",
+                values="room_id", aggfunc="count", fill_value=0
+            )
+            piv = piv.reindex(columns=hours, fill_value=0)
+
+            def _date_key(x):
+                try:
+                    return datetime.strptime(x, "%d/%m/%Y")
+                except Exception:
+                    return x
+            piv = piv.sort_index(key=lambda idx: [_date_key(x) for x in idx])
+            piv["Total"] = piv.sum(axis=1)
+            piv.loc["Total"] = piv.sum(numeric_only=True)
+            return piv
+        except Exception as e:
+            return pd.DataFrame([{"error": f"pivot build failed: {e}"}])
+
+    def _slice_last_n_days(piv: pd.DataFrame, n_days: int) -> pd.DataFrame:
+        if piv.empty or "error" in piv.columns:
+            return piv
+        base = piv.copy()
+        if "Total" in base.index:
+            base = base.drop(index="Total")
+        # sort by real date
+        def _parse_date_idx(idx: pd.Index) -> list:
+            out = []
+            for v in idx:
+                try:
+                    out.append(datetime.strptime(v, "%d/%m/%Y"))
+                except Exception:
+                    out.append(v)
+            return out
+        sort_pairs = sorted(zip(_parse_date_idx(base.index), base.index), key=lambda x: x[0])
+        keep_labels = [lbl for _, lbl in sort_pairs[-n_days:]]
+        section = base.loc[keep_labels].copy()
+        hours = [f"{h:02d}" for h in range(24)]
+        for h in hours:
+            if h not in section.columns:
+                section[h] = 0
+        section = section.reindex(columns=hours, fill_value=0)
+        section["Total"] = section.sum(axis=1)
+        section.loc[f"Total ({n_days}d)"] = section.sum(numeric_only=True)
+        return section
+
+    # ---- main & yippee pivots ----
+    df_main = _load_df_for_collection(collection_df)
+    pivot_main_full = _build_pivot(df_main)
+
+    # filename
+    filename = (
+        f"export_{from_dt_utc.strftime('%Y%m%d_%H%M%S')}_to_{to_dt_utc.strftime('%Y%m%d_%H%M%S')}.xlsx"
+        if not df_main.empty
+        else f"export_empty_{from_dt_utc.date()}_{to_dt_utc.date()}.xlsx"
+    )
+
+    df_yip = _load_df_for_collection(collection_yippee)
+    pivot_yip_full = _build_pivot(df_yip)
+
+    # keep full main block as-is; yippee = last 4 IST days
+    pivot_main = pivot_main_full.copy()
+    pivot_yippee = _slice_last_n_days(pivot_yip_full, 4)
+
+    # ---- combined (DF + Yippee) hour-wise sums per day ----
+    def _strip_totals(piv: pd.DataFrame) -> pd.DataFrame:
+        if piv.empty or "error" in piv.columns:
+            return pd.DataFrame()
+        if "Total" in piv.index:
+            piv = piv.drop(index="Total")
+        hours = [f"{h:02d}" for h in range(24)]
+        cols = [c for c in piv.columns if c in hours]
+        return piv[cols].copy()
+
+    hours = [f"{h:02d}" for h in range(24)]
+    m_hours = _strip_totals(pivot_main_full)
+    y_hours = _strip_totals(pivot_yip_full)
+
+    # union of dates
+    all_days = sorted(set(m_hours.index) | set(y_hours.index),
+                      key=lambda x: datetime.strptime(x, "%d/%m/%Y") if isinstance(x, str) else x)
+    combined = pd.DataFrame(0, index=all_days, columns=hours)
+    if not m_hours.empty:
+        m_aligned = m_hours.reindex(index=all_days, columns=hours, fill_value=0)
+        combined = combined.add(m_aligned, fill_value=0)
+    if not y_hours.empty:
+        y_aligned = y_hours.reindex(index=all_days, columns=hours, fill_value=0)
+        combined = combined.add(y_aligned, fill_value=0)
+    # totals
+    if not combined.empty:
+        combined["Total"] = combined.sum(axis=1)
+        combined.loc["Total (COMBINED)"] = combined.sum(numeric_only=True)
+    else:
+        combined = pd.DataFrame([{"info": "No data to combine"}])
+
+    # ---- Write workbook with headings and blocks ----
     buf = BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        # df.to_excel(writer, index=False, sheet_name="orders")
-        pivot.to_excel(writer, sheet_name="pivot")
+        ws_name = "pivot"
+        start_row = 0
+
+        # Heading 1
+        pd.DataFrame({"Dark fantasy": []}).to_excel(
+            writer, sheet_name=ws_name, index=False, header=True, startrow=start_row
+        )
+        start_row += 1
+
+        # DF block
+        pivot_main.to_excel(writer, sheet_name=ws_name, startrow=start_row)
+        start_row += (pivot_main.shape[0] + 4)  # leave some space
+
+        # Heading 2
+        pd.DataFrame({"Yippee": []}).to_excel(
+            writer, sheet_name=ws_name, index=False, header=True, startrow=start_row
+        )
+        start_row += 1
+
+        # Yippee block
+        pivot_yippee.to_excel(writer, sheet_name=ws_name, startrow=start_row)
+        start_row += (pivot_yippee.shape[0] + 4)
+
+        # Heading 3
+        pd.DataFrame({"Combined (DF + Yippee)": []}).to_excel(
+            writer, sheet_name=ws_name, index=False, header=True, startrow=start_row
+        )
+        start_row += 1
+
+        # Combined block
+        combined.to_excel(writer, sheet_name=ws_name, startrow=start_row)
+
+        # EC2 status sheet
+        ec2_rows, ec2_err = _get_ec2_status_rows()
+        if ec2_err:
+            ec2_df = pd.DataFrame([{"error": ec2_err}])
+            ec2_sheet_name = "ec2_status_error"
+        else:
+            ec2_df = pd.DataFrame(ec2_rows)
+            if not ec2_df.empty:
+                ec2_df = ec2_df.sort_values(["OnOff", "Name", "InstanceId"], ascending=[False, True, True])
+            ec2_sheet_name = "ec2_status"
         ec2_df.to_excel(writer, index=False, sheet_name=ec2_sheet_name)
 
-        # Freeze panes (openpyxl)
-        #ws1 = writer.sheets.get("orders")
-        ws1 = writer.sheets.get("pivot")
+        # Freeze panes (optional: top headings won’t freeze across all blocks cleanly)
         ws2 = writer.sheets.get(ec2_sheet_name)
-        # if ws1 is not None: ws1.freeze_panes = "A2"
-        if ws1 is not None: ws1.freeze_panes = "B2"
-        if ws2 is not None: ws2.freeze_panes = "A2"
+        if ws2 is not None:
+            ws2.freeze_panes = "A2"
+
+        # Basic formatting for headings (bold) via openpyxl
+        ws = writer.sheets.get(ws_name)
+        if ws is not None:
+            for r in [1,                     # "Dark fantasy"
+                      1 + pivot_main.shape[0] + 4 + 1,  # "Yippee"
+                      1 + pivot_main.shape[0] + 4 + 1 + pivot_yippee.shape[0] + 4 + 1]:  # "Combined"
+                try:
+                    ws.cell(row=r, column=1).font = ws.cell(row=r, column=1).font.copy(bold=True)
+                except Exception:
+                    pass
 
     buf.seek(0)
     return buf.read(), filename
