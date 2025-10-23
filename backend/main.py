@@ -67,6 +67,11 @@ client_df = MongoClient(MONGO_URI_df)
 df_db = client_df["df-db"]
 collection_df = df_db["user-data"]
 
+MONGO_URI_YIPPEE=os.getenv("MONGO_URI_YIPPEE")
+client_yippee = MongoClient(MONGO_URI_YIPPEE)
+yippee_db = client_yippee["yippee-db"]
+collection_yippee = yippee_db["user-data"]
+
 scheduler = BackgroundScheduler(timezone=IST_TZ)
 
 
@@ -143,6 +148,11 @@ COUNTRY_CODES = {
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
+def _to_naive_utc(x):
+    if isinstance(x, datetime):
+        # convert tz-aware -> naive UTC; leave others unchanged
+        return x.astimezone(timezone.utc).replace(tzinfo=None) if x.tzinfo else x
+    return x
 
 @app.get("/health")
 def health_check():
@@ -2194,6 +2204,89 @@ def _get_ec2_status_rows():
         return [], f"AWS error: {e}"
     except Exception as e:
         return [], f"Unexpected error: {e}"
+def _get_ec2_status_rows() -> Tuple[List[dict], Optional[str]]:
+    """
+    Return (rows, err).  Skips any missing instance IDs instead of failing.
+    rows schema includes keys used later: OnOff, Name, InstanceId (plus extras).
+    """
+    ec2 = boto3.client("ec2", region_name=os.getenv("AWS_REGION", None))
+
+    # Source of instance IDs: keep whatever you already use
+    # Example: a global/list env. Do NOT change your current source; just read it.
+    # If you already have EC2_INSTANCE_IDS somewhere, keep that.
+    instance_ids: List[str] = INSTANCE_IDS  # type: ignore[name-defined]
+
+    rows: List[dict] = []
+    if not instance_ids:
+        # Nothing to do; do not error
+        return rows, None
+
+    def chunks(lst, n):
+        for i in range(0, len(lst), n):
+            yield lst[i:i + n]
+
+    skipped: List[str] = []
+
+    for chunk in chunks(instance_ids, 100):
+        to_query = list(chunk)
+        if not to_query:
+            continue
+
+        while to_query:
+            try:
+                resp = ec2.describe_instances(InstanceIds=to_query)
+            except ClientError as e:
+                code = e.response.get("Error", {}).get("Code")
+                if code == "InvalidInstanceID.NotFound":
+                    # Extract bad IDs from the message and drop them
+                    msg = e.response.get("Error", {}).get("Message", "")
+                    bad = re.findall(r"i-[0-9a-f]+", msg)
+                    if not bad:
+                        # If we can't parse, skip this whole chunk and move on
+                        logging.warning("EC2: could not parse missing IDs from: %s", msg)
+                        break
+                    skipped.extend(bad)
+                    to_query = [i for i in to_query if i not in bad]
+                    if not to_query:
+                        break
+                    # retry with the remaining IDs
+                    continue
+                else:
+                    # Any other AWS error: surface a single error string (optional)
+                    logging.exception("EC2 describe_instances failed")
+                    return rows, f"AWS error: {e}"
+
+            # Process reservations -> instances
+            for r in resp.get("Reservations", []):
+                for inst in r.get("Instances", []):
+                    iid = inst.get("InstanceId", "")
+                    state = (inst.get("State", {}) or {}).get("Name", "")
+                    # OnOff field as int (1 running, 0 otherwise), matches your sort later
+                    onoff = 1 if state == "running" else 0
+                    # Name tag
+                    name = ""
+                    for t in inst.get("Tags", []) or []:
+                        if t.get("Key") == "Name":
+                            name = t.get("Value", "")
+                            break
+                    rows.append({
+                        "OnOff": onoff,
+                        "Name": name,
+                        "InstanceId": iid,
+                        "State": state,
+                        "Type": inst.get("InstanceType", ""),
+                        "AZ": (inst.get("Placement", {}) or {}).get("AvailabilityZone", ""),
+                        "PrivateIP": inst.get("PrivateIpAddress", ""),
+                        "PublicIP": inst.get("PublicIpAddress", ""),
+                        "LaunchTime": inst.get("LaunchTime", ""),
+                    })
+            break  # exit the inner while after successful call
+
+    if skipped:
+        logging.warning("EC2: skipped missing instance IDs: %s", ", ".join(skipped))
+
+    # IMPORTANT: we return no error so the caller writes 'ec2_status' (not *_error)
+    return rows, None
 
 
 @app.get("/download-csv")
@@ -2356,9 +2449,12 @@ def download_xlsx(from_date: str = Query(...), to_date: str = Query(...)):
             else:
                 ec2_df = pd.DataFrame(ec2_rows)
                 if not ec2_df.empty:
-                    ec2_df = ec2_df.sort_values(
-                        ["OnOff", "Name", "InstanceId"], ascending=[False, True, True]
-                    )
+                    for col in ec2_df.columns:
+                        if pd.api.types.is_datetime64tz_dtype(ec2_df[col]):
+                            ec2_df[col] = ec2_df[col].dt.tz_convert('UTC').dt.tz_localize(None)
+                        elif ec2_df[col].dtype == "object":
+                            if ec2_df[col].apply(lambda v: isinstance(v, datetime) and getattr(v, "tzinfo", None) is not None).any():
+                                ec2_df[col] = ec2_df[col].apply(_to_naive_utc)
                 ec2_df.to_excel(writer, index=False, sheet_name="ec2_status")
 
             # Freeze panes (engine-specific)
@@ -2392,27 +2488,31 @@ def download_xlsx(from_date: str = Query(...), to_date: str = Query(...)):
         # Return the message so you see the real cause in the browser too
         return Response(f"❌ Error building XLSX: {e}", media_type="text/plain", status_code=500)
 
+@app.get("/download-xlsx-yippee")
+def download_xlsx_yippee(from_date: str = Query(...), to_date: str = Query(...)):
+    try:
+        # Validate range (dates are interpreted as UTC-naive, like your original)
+        from_dt = datetime.strptime(from_date, "%Y-%m-%d")
+        to_dt = datetime.strptime(to_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
+        if from_dt > to_dt:
+            return Response("from_date cannot be after to_date", media_type="text/plain", status_code=400)
 
-def _export_xlsx_bytes(from_dt_utc: datetime, to_dt_utc: datetime) -> Tuple[bytes, str]:
-    """
-    Build an XLSX with:
-      - 'orders'  : raw rows (with IST helper columns)
-      - 'pivot'   : counts per (ist-date x ist-hour)
-      - 'ec2_status' (or ec2_status_error)
-    Returns (xlsx_bytes, filename).
-    """
-    # Query Mongo (exclude _id)
-    mongo_filter = {TIMESTAMP_FIELD: {"$gte": from_dt_utc, "$lte": to_dt_utc}}
-    projection = {"_id": 0}
-    data = list(collection_df.find(mongo_filter, projection))
+        # Query Yippee collection (exclude _id)
+        data = list(
+            collection_yippee.find(
+                {TIMESTAMP_FIELD: {"$gte": from_dt, "$lte": to_dt}},
+                {"_id": 0},
+            )
+        )
+        if not data:
+            return Response("No data available", media_type="text/plain", status_code=404)
 
-    rows_out = []
-    if data:
+        # Build rows + IST helper columns (same logic as your DF endpoint)
+        rows_out = []
         for row in data:
             r = dict(row)
             base_ts = _parse_dt(r.get(TIMESTAMP_FIELD))
 
-            # Initialize helper columns
             r["date"] = ""
             r["hour"] = ""
             r["date-hour"] = ""
@@ -2420,11 +2520,9 @@ def _export_xlsx_bytes(from_dt_utc: datetime, to_dt_utc: datetime) -> Tuple[byte
             r["ist-hour"] = ""
 
             if base_ts is not None:
-                # keep your assumption (DB time -> IST)
-                ist_ts = base_ts + IST_OFFSET
-                r["date"] = base_ts.strftime(
-                    "%d/%m/%Y")        # UTC date (string)
-                r["hour"] = base_ts.strftime("%H")              # UTC hour
+                ist_ts = base_ts + IST_OFFSET  # keep same assumption as DF endpoint
+                r["date"] = base_ts.strftime("%d/%m/%Y")
+                r["hour"] = base_ts.strftime("%H")
                 r["date-hour"] = ist_ts.strftime("%Y-%m-%d %H:%M:%S")
                 r["ist-date"] = ist_ts.strftime("%d/%m/%Y")
                 r["ist-hour"] = ist_ts.strftime("%H")
@@ -2432,69 +2530,351 @@ def _export_xlsx_bytes(from_dt_utc: datetime, to_dt_utc: datetime) -> Tuple[byte
             rows_out.append(r)
 
         df = pd.DataFrame(rows_out)
-        filename = f"export_{from_dt_utc.strftime('%Y%m%d_%H%M%S')}_to_{to_dt_utc.strftime('%Y%m%d_%H%M%S')}.xlsx"
-    else:
-        # still generate a valid workbook
-        df = pd.DataFrame([{"note": "No data found in this window"}])
-        filename = f"export_empty_{from_dt_utc.date()}_{to_dt_utc.date()}.xlsx"
 
-    # Ensure required columns exist for pivot parity
-    for col in ["ist-date", "ist-hour", "room_id"]:
-        if col not in df.columns:
-            df[col] = ""
+        # Ensure required columns exist
+        for col in ["ist-date", "ist-hour", "room_id"]:
+            if col not in df.columns:
+                df[col] = ""
 
-    # Build pivot: count of room_id by (ist-date x ist-hour)
-    hours = [f"{h:02d}" for h in range(24)]
-    try:
+        # Pivot: count of room_id by (ist-date × ist-hour)
+        hours = [f"{h:02d}" for h in range(24)]
         df["ist-hour"] = df["ist-hour"].astype(str)
         pivot = pd.pivot_table(
-            df, index="ist-date", columns="ist-hour",
-            values="room_id", aggfunc="count", fill_value=0
+            df,
+            index="ist-date",
+            columns="ist-hour",
+            values="room_id",
+            aggfunc="count",
+            fill_value=0,
         )
         pivot = pivot.reindex(columns=hours, fill_value=0)
 
-        # sort ist-date as real dates when possible
+        # Sort ist-date as real dates when possible
         def _date_key(x):
             try:
                 return datetime.strptime(x, "%d/%m/%Y")
             except Exception:
                 return x
+
         pivot = pivot.sort_index(key=lambda idx: [_date_key(x) for x in idx])
 
-        # add totals
+        # Totals
         pivot["Total"] = pivot.sum(axis=1)
         pivot.loc["Total"] = pivot.sum(numeric_only=True)
-    except Exception as e:
-        # If something odd with columns, still continue with a minimal pivot
-        pivot = pd.DataFrame([{"error": f"pivot build failed: {e}"}])
 
-    # EC2 status
-    ec2_rows, ec2_err = _get_ec2_status_rows()
-    if ec2_err:
-        ec2_df = pd.DataFrame([{"error": ec2_err}])
-        ec2_sheet_name = "ec2_status_error"
-    else:
-        ec2_df = pd.DataFrame(ec2_rows)
-        if not ec2_df.empty:
-            ec2_df = ec2_df.sort_values(
-                ["OnOff", "Name", "InstanceId"], ascending=[False, True, True]
+        # Pick writer engine
+        engine = _pick_excel_engine()
+        if engine is None:
+            return Response(
+                "Missing Excel writer engine. Install one of: pip install xlsxwriter OR pip install openpyxl",
+                media_type="text/plain",
+                status_code=500,
             )
-        ec2_sheet_name = "ec2_status"
 
-    # Write workbook
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine=engine) as writer:
+            # pivot sheet
+            pivot.to_excel(writer, sheet_name="pivot")
+
+            # EC2 status sheet (same as DF)
+            ec2_rows, ec2_err = _get_ec2_status_rows()
+            if ec2_err:
+                pd.DataFrame([{"error": ec2_err}]).to_excel(
+                    writer, index=False, sheet_name="ec2_status_error"
+                )
+            else:
+                ec2_df = pd.DataFrame(ec2_rows)
+                if not ec2_df.empty:
+                    for col in ec2_df.columns:
+                        if pd.api.types.is_datetime64tz_dtype(ec2_df[col]):
+                            ec2_df[col] = ec2_df[col].dt.tz_convert('UTC').dt.tz_localize(None)
+                        elif ec2_df[col].dtype == "object":
+                            if ec2_df[col].apply(lambda v: isinstance(v, datetime) and getattr(v, "tzinfo", None) is not None).any():
+                                ec2_df[col] = ec2_df[col].apply(_to_naive_utc)
+                ec2_df.to_excel(writer, index=False, sheet_name="ec2_status")
+
+            # Freeze panes
+            if engine == "xlsxwriter":
+                ws1 = writer.sheets["pivot"]
+                ws2 = writer.sheets.get("ec2_status")
+                if ws1:
+                    ws1.freeze_panes(1, 1)  # row 2, col B
+                if ws2:
+                    ws2.freeze_panes(1, 0)
+            else:  # openpyxl
+                ws1 = writer.sheets.get("pivot")
+                ws2 = writer.sheets.get("ec2_status")
+                if ws1 is not None:
+                    ws1.freeze_panes = "B2"
+                if ws2 is not None:
+                    ws2.freeze_panes = "A2"
+
+        output.seek(0)
+        filename = f"yippee_{from_date}_to_{to_date}.xlsx"
+        headers = {"Content-Disposition": f"attachment; filename={filename}"}
+        return StreamingResponse(
+            output,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers=headers,
+        )
+    except Exception as e:
+        return Response(f"❌ Error building XLSX: {e}", media_type="text/plain", status_code=500)
+
+def _format_ec2_status_table(rows: List[dict]) -> pd.DataFrame:
+    """
+    Shape EC2 rows into the exact table:
+    Name, InstanceId, State, OnOff('on'/'off'), InstanceStatus, SystemStatus,
+    PublicIP, PrivateIP, LaunchTime_ISO (YYYY-MM-DD), CheckedAt_IST (YYYY-MM-DD)
+    """
+    df = pd.DataFrame(rows or [])
+    if df.empty:
+        # return empty frame with expected columns so Excel writer doesn't choke
+        return pd.DataFrame(columns=[
+            "Name","InstanceId","State","OnOff","InstanceStatus","SystemStatus",
+            "PublicIP","PrivateIP","LaunchTime_ISO","CheckedAt_IST"
+        ])
+
+    # Map OnOff 1/0 -> "on"/"off"
+    df["OnOff"] = df.get("OnOff", 0).map({1: "on", 0: "off"}).fillna("off")
+
+    # Resolve statuses from DescribeInstanceStatus (include stopped)
+    status_map = {}
+    ec2 = boto3.client("ec2", region_name=os.getenv("AWS_REGION", None))
+    ids = [i for i in df.get("InstanceId", []).tolist() if isinstance(i, str) and i.startswith("i-")]
+    for i in range(0, len(ids), 100):
+        chunk = ids[i:i+100]
+        try:
+            resp = ec2.describe_instance_status(InstanceIds=chunk, IncludeAllInstances=True)
+            for st in resp.get("InstanceStatuses", []):
+                iid = st.get("InstanceId", "")
+                inst_status = (st.get("InstanceStatus", {}) or {}).get("Status", "not-applicable")
+                sys_status  = (st.get("SystemStatus", {}) or {}).get("Status", "not-applicable")
+                status_map[iid] = (inst_status or "not-applicable", sys_status or "not-applicable")
+        except ClientError as e:
+            logging.warning("describe_instance_status failed for %s: %s", chunk, e)
+
+    df["InstanceStatus"] = df["InstanceId"].map(lambda x: status_map.get(x, ("not-applicable","not-applicable"))[0])
+    df["SystemStatus"]  = df["InstanceId"].map(lambda x: status_map.get(x, ("not-applicable","not-applicable"))[1])
+
+    # LaunchTime -> UTC date string (YYYY-MM-DD), safe for Excel
+    def _to_naive_utc(x):
+        if isinstance(x, datetime):
+            return x.astimezone(timezone.utc).replace(tzinfo=None) if x.tzinfo else x
+        return x
+    launch_col = "LaunchTime" if "LaunchTime" in df.columns else "LaunchTime_ISO"
+    df["LaunchTime_ISO"] = df.get(launch_col, "").apply(_to_naive_utc).apply(
+        lambda d: d.strftime("%Y-%m-%d") if isinstance(d, datetime) else (str(d) if d else "")
+    )
+
+    # CheckedAt_IST = today's IST date
+    df["CheckedAt_IST"] = datetime.now(IST_TZ).date().isoformat()
+
+    # Select & order columns
+    out = df.reindex(columns=[
+        "Name","InstanceId","State","OnOff","InstanceStatus","SystemStatus",
+        "PublicIP","PrivateIP","LaunchTime_ISO","CheckedAt_IST"
+    ])
+    # Fill NAs with empty string
+    return out.fillna("")
+
+
+def _export_xlsx_bytes(from_dt_utc: datetime, to_dt_utc: datetime) -> Tuple[bytes, str]:
+    # ---- helpers ----
+    def _load_df_for_collection(mongo_collection) -> pd.DataFrame:
+        mongo_filter = {TIMESTAMP_FIELD: {"$gte": from_dt_utc, "$lte": to_dt_utc}}
+        projection = {"_id": 0}
+        data = list(mongo_collection.find(mongo_filter, projection))
+        rows_out = []
+        if data:
+            for row in data:
+                r = dict(row)
+                base_ts = _parse_dt(r.get(TIMESTAMP_FIELD))
+                r["date"] = ""
+                r["hour"] = ""
+                r["date-hour"] = ""
+                r["ist-date"] = ""
+                r["ist-hour"] = ""
+                if base_ts is not None:
+                    ist_ts = base_ts + IST_OFFSET
+                    r["date"] = base_ts.strftime("%d/%m/%Y")
+                    r["hour"] = base_ts.strftime("%H")
+                    r["date-hour"] = ist_ts.strftime("%Y-%m-%d %H:%M:%S")
+                    r["ist-date"] = ist_ts.strftime("%d/%m/%Y")
+                    r["ist-hour"] = ist_ts.strftime("%H")
+                rows_out.append(r)
+            df = pd.DataFrame(rows_out)
+        else:
+            df = pd.DataFrame(columns=["ist-date", "ist-hour"])
+
+        for col in ["ist-date", "ist-hour", "room_id"]:
+            if col not in df.columns:
+                df[col] = ""
+        if "ist-hour" in df.columns:
+            df["ist-hour"] = df["ist-hour"].astype(str)
+        return df
+
+    def _build_pivot(df: pd.DataFrame) -> pd.DataFrame:
+        hours = [f"{h:02d}" for h in range(24)]
+        if df.empty:
+            return pd.DataFrame([{"error": "No data in range"}])
+        try:
+            piv = pd.pivot_table(
+                df, index="ist-date", columns="ist-hour",
+                values="room_id", aggfunc="count", fill_value=0
+            )
+            piv = piv.reindex(columns=hours, fill_value=0)
+
+            def _date_key(x):
+                try:
+                    return datetime.strptime(x, "%d/%m/%Y")
+                except Exception:
+                    return x
+            piv = piv.sort_index(key=lambda idx: [_date_key(x) for x in idx])
+            piv["Total"] = piv.sum(axis=1)
+            piv.loc["Total"] = piv.sum(numeric_only=True)
+            return piv
+        except Exception as e:
+            return pd.DataFrame([{"error": f"pivot build failed: {e}"}])
+
+    def _slice_last_n_days(piv: pd.DataFrame, n_days: int) -> pd.DataFrame:
+        if piv.empty or "error" in piv.columns:
+            return piv
+        base = piv.copy()
+        if "Total" in base.index:
+            base = base.drop(index="Total")
+        # sort by real date
+        def _parse_date_idx(idx: pd.Index) -> list:
+            out = []
+            for v in idx:
+                try:
+                    out.append(datetime.strptime(v, "%d/%m/%Y"))
+                except Exception:
+                    out.append(v)
+            return out
+        sort_pairs = sorted(zip(_parse_date_idx(base.index), base.index), key=lambda x: x[0])
+        keep_labels = [lbl for _, lbl in sort_pairs[-n_days:]]
+        section = base.loc[keep_labels].copy()
+        hours = [f"{h:02d}" for h in range(24)]
+        for h in hours:
+            if h not in section.columns:
+                section[h] = 0
+        section = section.reindex(columns=hours, fill_value=0)
+        section["Total"] = section.sum(axis=1)
+        section.loc[f"Total ({n_days}d)"] = section.sum(numeric_only=True)
+        return section
+
+    # ---- main & yippee pivots ----
+    df_main = _load_df_for_collection(collection_df)
+    pivot_main_full = _build_pivot(df_main)
+
+    # filename
+    filename = (
+        f"export_{from_dt_utc.strftime('%Y%m%d_%H%M%S')}_to_{to_dt_utc.strftime('%Y%m%d_%H%M%S')}.xlsx"
+        if not df_main.empty
+        else f"export_empty_{from_dt_utc.date()}_{to_dt_utc.date()}.xlsx"
+    )
+
+    df_yip = _load_df_for_collection(collection_yippee)
+    pivot_yip_full = _build_pivot(df_yip)
+
+    # keep full main block as-is; yippee = last 4 IST days
+    pivot_main = pivot_main_full.copy()
+    pivot_yippee = _slice_last_n_days(pivot_yip_full, 4)
+
+    # ---- combined (DF + Yippee) hour-wise sums per day ----
+    def _strip_totals(piv: pd.DataFrame) -> pd.DataFrame:
+        if piv.empty or "error" in piv.columns:
+            return pd.DataFrame()
+        if "Total" in piv.index:
+            piv = piv.drop(index="Total")
+        hours = [f"{h:02d}" for h in range(24)]
+        cols = [c for c in piv.columns if c in hours]
+        return piv[cols].copy()
+
+    hours = [f"{h:02d}" for h in range(24)]
+    m_hours = _strip_totals(pivot_main_full)
+    y_hours = _strip_totals(pivot_yip_full)
+
+    # union of dates
+    all_days = sorted(set(m_hours.index) | set(y_hours.index),
+                      key=lambda x: datetime.strptime(x, "%d/%m/%Y") if isinstance(x, str) else x)
+    combined = pd.DataFrame(0, index=all_days, columns=hours)
+    if not m_hours.empty:
+        m_aligned = m_hours.reindex(index=all_days, columns=hours, fill_value=0)
+        combined = combined.add(m_aligned, fill_value=0)
+    if not y_hours.empty:
+        y_aligned = y_hours.reindex(index=all_days, columns=hours, fill_value=0)
+        combined = combined.add(y_aligned, fill_value=0)
+    # totals
+    if not combined.empty:
+        combined["Total"] = combined.sum(axis=1)
+        combined.loc["Total (COMBINED)"] = combined.sum(numeric_only=True)
+    else:
+        combined = pd.DataFrame([{"info": "No data to combine"}])
+
+    # ---- Write workbook with headings and blocks ----
     buf = BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        # df.to_excel(writer, index=False, sheet_name="orders")
-        pivot.to_excel(writer, sheet_name="pivot")
+        ws_name = "pivot"
+        start_row = 0
+
+        # Heading 1
+        pd.DataFrame({"Dark fantasy": []}).to_excel(
+            writer, sheet_name=ws_name, index=False, header=True, startrow=start_row
+        )
+        start_row += 1
+
+        # DF block
+        pivot_main.to_excel(writer, sheet_name=ws_name, startrow=start_row)
+        start_row += (pivot_main.shape[0] + 4)  # leave some space
+
+        # Heading 2
+        pd.DataFrame({"Yippee": []}).to_excel(
+            writer, sheet_name=ws_name, index=False, header=True, startrow=start_row
+        )
+        start_row += 1
+
+        # Yippee block
+        pivot_yippee.to_excel(writer, sheet_name=ws_name, startrow=start_row)
+        start_row += (pivot_yippee.shape[0] + 4)
+
+        # Heading 3
+        pd.DataFrame({"Combined (DF + Yippee)": []}).to_excel(
+            writer, sheet_name=ws_name, index=False, header=True, startrow=start_row
+        )
+        start_row += 1
+
+        # Combined block
+        combined.to_excel(writer, sheet_name=ws_name, startrow=start_row)
+
+        # EC2 status sheet
+        ec2_rows, ec2_err = _get_ec2_status_rows()
+        if ec2_err:
+            ec2_df = pd.DataFrame([{"error": ec2_err}])
+            ec2_sheet_name = "ec2_status_error"
+        else:
+            ec2_df = _format_ec2_status_table(ec2_rows)
+            if not ec2_df.empty:
+                ec2_df["__on__"] = (ec2_df["OnOff"] == "on").astype(int)
+                ec2_df = ec2_df.sort_values(["__on__", "Name", "InstanceId"], ascending=[False, True, True]).drop(columns="__on__")
+            ec2_sheet_name = "ec2_status"
         ec2_df.to_excel(writer, index=False, sheet_name=ec2_sheet_name)
 
-        # Freeze panes (openpyxl)
-        #ws1 = writer.sheets.get("orders")
-        ws1 = writer.sheets.get("pivot")
+        # Freeze panes (optional: top headings won’t freeze across all blocks cleanly)
         ws2 = writer.sheets.get(ec2_sheet_name)
-        # if ws1 is not None: ws1.freeze_panes = "A2"
-        if ws1 is not None: ws1.freeze_panes = "B2"
-        if ws2 is not None: ws2.freeze_panes = "A2"
+        if ws2 is not None:
+            ws2.freeze_panes = "A2"
+
+        # Basic formatting for headings (bold) via openpyxl
+        ws = writer.sheets.get(ws_name)
+        if ws is not None:
+            for r in [1,                     # "Dark fantasy"
+                      1 + pivot_main.shape[0] + 4 + 1,  # "Yippee"
+                      1 + pivot_main.shape[0] + 4 + 1 + pivot_yippee.shape[0] + 4 + 1]:  # "Combined"
+                try:
+                    ws.cell(row=r, column=1).font = ws.cell(row=r, column=1).font.copy(bold=True)
+                except Exception:
+                    pass
 
     buf.seek(0)
     return buf.read(), filename
