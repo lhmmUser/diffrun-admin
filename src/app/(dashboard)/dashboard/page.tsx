@@ -15,12 +15,17 @@ type StatsResponse = {
 
 type JobsStatsResponse = {
   labels: string[];
-  unpaid_with_preview: number[];
-  paid_with_preview: number[];
+  current_jobs: number[];
+  previous_jobs: number[];
+  current_orders: number[];
+  previous_orders: number[];
+  conversion_current: number[];
+  conversion_previous: number[];
   granularity: "hour" | "day";
 };
 
 type RangeKey = "1d" | "1w" | "1m" | "6m";
+type Metric = "orders" | "jobs" | "conversion";
 
 export default function Home() {
   const baseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
@@ -32,10 +37,11 @@ export default function Home() {
   const [jobsError, setJobsError] = useState<string>("");
 
   const [range, setRange] = useState<RangeKey>("1w");
+  const [metric, setMetric] = useState<Metric>("orders");
 
   const exclusions = ["TEST", "LHMM", "COLLAB", "REJECTED"];
 
-  const buildUrl = (r: RangeKey) => {
+  const buildOrdersUrl = (r: RangeKey) => {
     const params = new URLSearchParams();
     exclusions.forEach((c) => params.append("exclude_codes", c));
     params.append("range", r);
@@ -48,28 +54,52 @@ export default function Home() {
     return `${baseUrl}/stats/preview-vs-orders?${params.toString()}`;
   };
 
+  // Orders fetch
   useEffect(() => {
     setError("");
     setStats(null);
-
-    const url = buildUrl(range);
+    const url = buildOrdersUrl(range);
     fetch(url, { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : Promise.reject(r.statusText)))
       .then(setStats)
       .catch((e) => setError(String(e)));
   }, [baseUrl, range]);
 
+  // Jobs/Conversion fetch
   useEffect(() => {
     setJobsError("");
     setJobsStats(null);
-
     const url = buildJobsUrl(range);
     fetch(url, { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : Promise.reject(r.statusText)))
-      .then(setJobsStats)
+      .then((data) => {
+        // Normalize to new shape if backend still returns old keys
+        if (!("current_jobs" in data)) {
+          const jobs = data.unpaid_with_preview ?? [];
+          const orders = data.paid_with_preview ?? [];
+
+          const zeros = (n: number) => Array(n).fill(0);
+
+          data = {
+            labels: data.labels ?? [],
+            current_jobs: jobs,
+            previous_jobs: zeros(jobs.length),        // until backend updated
+            current_orders: orders,
+            previous_orders: zeros(orders.length),    // until backend updated
+            conversion_current: orders.map((o: number, i: number) =>
+              (jobs[i] ?? 0) > 0 ? +(o * 100 / jobs[i]).toFixed(2) : 0
+            ),
+            conversion_previous: zeros(orders.length),
+            granularity: data.granularity ?? "day",
+          };
+        }
+
+        setJobsStats(data);
+      })
       .catch((e) => setJobsError(String(e)));
   }, [baseUrl, range]);
 
+  // ---------- date helpers ----------
   const parseYMD = (input: unknown) => {
     const s = String(input ?? "");
     const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
@@ -83,42 +113,123 @@ export default function Home() {
   const prettyIST = (ymd: string) => {
     const base = parseYMD(ymd);
     if (!base) return ymd || "";
-    const ist = new Date(base.getTime() + 19800000);
+    const ist = new Date(base.getTime() + 19800000); // +05:30
     if (range === "1m" || range === "6m") {
       return ist.toLocaleDateString("en-GB", { day: "2-digit", month: "short", timeZone: "UTC" });
     }
     return ist.toLocaleDateString("en-GB", { weekday: "short", day: "2-digit", month: "short", timeZone: "UTC" });
   };
 
-  const isHourly = stats?.granularity === "hour";
-  const rawLabels = stats?.labels ?? [];
+  // ===== NEW: helpers for tooltip header =====
+  const PREV_OFFSET_DAYS: Record<RangeKey, number> = {
+    "1d": 7,     // previous week, same hour/day
+    "1w": 7,     // previous week
+    "1m": 30,    // previous 30 days
+    "6m": 182,   // previous ~6 months
+  };
 
-  const formattedLabels = useMemo(() => {
-    if (isHourly) {
-      return rawLabels.map((s) => s.slice(11));
+  // parse "YYYY-MM-DD" or "YYYY-MM-DDTHH:mm:ssZ"
+  const parseAnyUTC = (s: string): Date | null => {
+    if (!s) return null;
+    if (s.length > 10) {
+      const d = new Date(s);
+      return isNaN(d.getTime()) ? null : d;
     }
-    return rawLabels.map(prettyIST);
+    return parseYMD(s);
+  };
+
+  const formatDayIST = (d: Date) => {
+    const ist = new Date(d.getTime() + 19800000); // +05:30
+    return ist.toLocaleDateString("en-GB", {
+      weekday: "short",
+      day: "2-digit",
+      month: "short",
+      timeZone: "UTC",
+    });
+  };
+
+  const buildPrevHeader = (raw: string, r: RangeKey) => {
+    const base = parseAnyUTC(raw);
+    if (!base) return raw || "";
+    const prev = new Date(base.getTime() - PREV_OFFSET_DAYS[r] * 86400000);
+    return `${formatDayIST(base)} • prev ${formatDayIST(prev)}`;
+  };
+  // ===== END NEW =====
+
+  // ---------- labels ----------
+  const isHourlyOrders = stats?.granularity === "hour";
+  const ordersRawLabels = stats?.labels ?? [];
+  const ordersLabels = useMemo(() => {
+    if (!stats) return [];
+    return isHourlyOrders ? ordersRawLabels.map((s) => s.slice(11)) : ordersRawLabels.map(prettyIST);
   }, [stats, range]);
 
-  const chartSeries = useMemo(() => {
-    if (!stats) return [];
-    return [
-      { name: "Current", data: stats.current },
-      { name: "Previous", data: stats.previous },
-    ];
-  }, [stats]);
+  const isHourlyJobs = jobsStats?.granularity === "hour";
+  const jobsRawLabels = jobsStats?.labels ?? [];
+  const jobsLabels = useMemo(() => {
+    if (!jobsStats) return [];
+    return isHourlyJobs ? jobsRawLabels.map((s) => s.slice(11)) : jobsRawLabels.map(prettyIST);
+  }, [jobsStats, range]);
 
+  // ---------- choose labels for active metric ----------
+  const activeLabels = useMemo(() => {
+    if (metric === "orders") return ordersLabels;
+    return jobsLabels;
+  }, [metric, ordersLabels, jobsLabels]);
+
+  type Series = { name: string; data: number[] }[];
+
+  // ---------- series ----------
+  const activeSeries: Series = useMemo(() => {
+    if (metric === "orders") {
+      if (!stats) return [];
+      return [
+        { name: "Current Orders", data: stats.current },
+        { name: "Previous Orders", data: stats.previous },
+      ];
+    }
+
+    if (metric === "jobs") {
+      if (!jobsStats) return [];
+      return [
+        { name: "Current Jobs", data: jobsStats.current_jobs },
+        { name: "Previous Jobs", data: jobsStats.previous_jobs },
+      ];
+    }
+
+    if (!jobsStats) return [];
+    return [
+      { name: "Current Conversion %", data: jobsStats.conversion_current },
+      { name: "Previous Conversion %", data: jobsStats.conversion_previous },
+    ];
+  }, [metric, stats, jobsStats]);
+
+  const isPercent = metric === "conversion";
+  const showDataLabels = ["1d", "1w", "1m", "6m"].includes(range);
+
+  // ---------- chart options ----------
   const chartOptions = useMemo(() => {
+    const colors =
+      activeSeries.length === 2
+        ? ["#2563eb", "#22c55e"] // current, previous
+        : ["#2563eb"];
+
+    const hourGran =
+      metric === "orders"
+        ? stats?.granularity === "hour"
+        : jobsStats?.granularity === "hour";
+
     return {
       chart: {
-        id: "orders-range",
+        id: "unified-metric",
         toolbar: { show: false },
-        fontFamily: "Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto",
+        fontFamily:
+          "Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto",
         animations: { enabled: true, easing: "easeinout", speed: 250 },
       },
-      colors: ["#2563eb", "#22c55e"],
+      colors,
       xaxis: {
-        categories: formattedLabels,
+        categories: activeLabels,
         labels: {
           style: { colors: "#0f172a", fontWeight: 600 },
           rotate: range === "1m" || range === "6m" ? -30 : 0,
@@ -130,16 +241,33 @@ export default function Home() {
         axisTicks: { color: "#e2e8f0" },
       },
       yaxis: {
-        title: { text: "Orders", style: { fontWeight: 600, color: "#334155" } },
+        title: {
+          text:
+            metric === "orders"
+              ? "Orders"
+              : metric === "jobs"
+              ? "Jobs (Preview Created)"
+              : "Conversion %",
+          style: { fontWeight: 600, color: "#334155" },
+        },
         forceNiceScale: true,
-        labels: { style: { colors: "#0f172a", fontWeight: 600 } },
+        labels: {
+          style: { colors: "#0f172a", fontWeight: 600 },
+          formatter: (v: number) =>
+            isPercent ? `${Math.round(v)}%` : `${Math.round(v)}`,
+        },
+        min: 0,
       },
       grid: {
         borderColor: "#e2e8f0",
         strokeDashArray: 3,
         padding: { left: 12, right: 12 },
       },
-      stroke: { width: [3, 3], curve: "smooth", dashArray: [0, 6] },
+      stroke: {
+        width: activeSeries.length === 2 ? [3, 3] : 3,
+        curve: "smooth",
+        dashArray: activeSeries.length === 2 ? [0, 6] : 0,
+      },
       legend: {
         position: "top",
         horizontalAlign: "center",
@@ -147,227 +275,98 @@ export default function Home() {
         labels: { colors: "#334155" },
         markers: { width: 10, height: 10, radius: 12 },
       },
-      markers: { size: isHourly ? 0 : 3, hover: { size: 4 } },
+      markers: {
+        size: hourGran ? 0 : 3,
+        hover: { size: 4 },
+      },
       dataLabels: {
-        enabled: range === "1d" || range === "1w",
+        enabled: showDataLabels,
         offsetY: -6,
-        style: { fontWeight: 700, colors: ["#1e293b"] },
+        formatter: (val: number) =>
+          isPercent ? `${Math.round(val)}%` : `${Math.round(val)}`,
+        // do NOT set 'style.colors' -> lets badge background use series color
+        style: { fontWeight: 700 },                // <— keep weight only
         background: {
           enabled: true,
+          foreColor: "#fff",                       // <— readable text on colored pills
           borderRadius: 8,
           borderWidth: 0,
-          opacity: 0.9,
-          foreColor: "#fff",
+          opacity: 0.95,
         },
       },
+      // ===== REPLACED: custom tooltip with header showing both dates =====
       tooltip: {
         shared: true,
-        x: {
-          formatter: (_val: any, opts: any) => {
-            const idx = opts?.dataPointIndex ?? 0;
-            const curr = rawLabels[idx];
-            if (isHourly) {
-              const hh = curr?.slice(11) ?? "";
-              const ymd = curr?.slice(0, 10) ?? "";
-              const prevYmd = ymd
-                ? ((): string => {
-                    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd);
-                    if (!m) return "";
-                    const y = Number(m[1]),
-                      mo = Number(m[2]) - 1,
-                      d = Number(m[3]);
-                    const prev = new Date(Date.UTC(y, mo, d) - 7 * 86400000);
-                    const prevY = prev.getUTCFullYear();
-                    const prevM = String(prev.getUTCMonth() + 1).padStart(2, "0");
-                    const prevD = String(prev.getUTCDate()).padStart(2, "0");
-                    return `${prevY}-${prevM}-${prevD}`;
-                  })()
-                : "";
-              const prevDayPretty = prevYmd
-                ? (() => {
-                    const base = parseYMD(prevYmd);
-                    if (!base) return "";
-                    const ist = new Date(base.getTime() + 19800000);
-                    return ist.toLocaleDateString("en-GB", {
-                      weekday: "short",
-                      day: "2-digit",
-                      month: "short",
-                      timeZone: "UTC",
-                    });
-                  })()
-                : "";
-              return prevDayPretty ? `${hh} • prev ${prevDayPretty} ${hh}` : `${hh}`;
-            }
-            const prevOffsetDays = (r: RangeKey) => {
-              switch (r) {
-                case "1d":
-                  return -1;
-                case "1w":
-                  return -7;
-                case "1m":
-                  return -30;
-                case "6m":
-                  return -182;
-              }
-            };
-            const offset = prevOffsetDays(range);
-            const currBase = curr || "";
-            const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(currBase);
-            if (m) {
-              const a = prettyIST(currBase);
-              const y = Number(m[1]),
-                mo = Number(m[2]) - 1,
-                d = Number(m[3]);
-              const prev = new Date(Date.UTC(y, mo, d) + (offset ?? -7) * 86400000);
-              const prevY = prev.getUTCFullYear();
-              const prevM = String(prev.getUTCMonth() + 1).padStart(2, "0");
-              const prevD = String(prev.getUTCDate()).padStart(2, "0");
-              const b = prettyIST(`${prevY}-${prevM}-${prevD}`);
-              return `${a} • prev ${b}`;
-            }
-            return curr ?? "";
-          },
-        },
-
-        y: {
-          formatter: (val: number, opts: any) => {
-            const seriesName = opts?.w?.globals?.seriesNames?.[opts?.seriesIndex] || "";
-            return `${seriesName}: ${val}`;
-          },
-        },
-        style: { fontSize: "14px" },
         theme: "light",
+        custom: (opts: any) => {
+          const idx = opts?.dataPointIndex ?? 0;
+          const rawLabels =
+            metric === "orders" ? (stats?.labels ?? []) : (jobsStats?.labels ?? []);
+          const raw = rawLabels[idx] ?? "";
+          const header = buildPrevHeader(raw, range);
+
+          // assume series[0] = current, series[1] = previous (your series order)
+          const curVal = opts?.series?.[0]?.[idx];
+          const prevVal = opts?.series?.[1]?.[idx];
+
+          const fmt = (v: any) =>
+            isPercent ? `${Number(v ?? 0).toFixed(2)}%` : `${Math.round(v ?? 0)}`;
+
+          return `
+            <div style="padding:8px 10px;min-width:220px">
+              <div style="font-weight:600;margin-bottom:6px">${header}</div>
+
+              <div style="display:flex;gap:8px;align-items:center;margin:4px 0">
+                <span style="width:8px;height:8px;border-radius:50%;background:#2563eb;display:inline-block"></span>
+                <span style="font-weight:600;margin-right:6px">Current:</span>
+                <span>${fmt(curVal)}</span>
+              </div>
+
+              <div style="display:flex;gap:8px;align-items:center;margin:2px 0">
+                <span style="width:8px;height:8px;border-radius:50%;background:#22c55e;display:inline-block"></span>
+                <span style="font-weight:600;margin-right:6px">Previous:</span>
+                <span>${fmt(prevVal)}</span>
+              </div>
+            </div>
+          `;
+        },
       },
+      // ===== END REPLACED =====
     } as const;
-  }, [formattedLabels, rawLabels, range, isHourly]);
+  }, [
+    metric,
+    isPercent,
+    activeLabels,
+    activeSeries.length,
+    range,
+    stats?.granularity,
+    jobsStats?.granularity,
+    showDataLabels,
+  ]);
 
-  const jobsIsHourly = jobsStats?.granularity === "hour";
-  const jobsFormattedLabels = useMemo(() => {
-    if (!jobsStats) return [];
-    return jobsIsHourly ? jobsStats.labels.map((s) => s.slice(11)) : jobsStats.labels.map(prettyIST);
-  }, [jobsStats, range]);
-
-  const jobsCounts = jobsStats?.unpaid_with_preview ?? [];
-  const ordersCounts = jobsStats?.paid_with_preview ?? [];
-
-  const conversionPct = useMemo(() => {
-    const len = Math.max(jobsCounts.length, ordersCounts.length);
-    const out: number[] = new Array(len).fill(0);
-    for (let i = 0; i < len; i++) {
-      const jobs = Number(jobsCounts[i] ?? 0);
-      const orders = Number(ordersCounts[i] ?? 0);
-      out[i] = jobs > 0 ? +(orders * 100 / jobs).toFixed(2) : 0;
-    }
-    return out;
-  }, [jobsCounts, ordersCounts]);
-
-  const jobsSeries = useMemo(() => {
-    if (!jobsStats) return [];
-    return [
-      { name: "Jobs", data: jobsCounts },
-      { name: "Conversion", data: conversionPct },
-    ];
-  }, [jobsStats, jobsCounts, conversionPct]);
-
-  const showJobsDataLabels = range === "1d" || range === "1w";
-
-  const jobsOptions = useMemo(() => {
-  return {
-    chart: {
-      id: "preview-vs-orders",
-      toolbar: { show: false },
-      fontFamily: "Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto",
-      animations: { enabled: true, easing: "easeinout", speed: 250 },
-    },
-    colors: ["#2563eb", "#22c55e"], // blue = Jobs, green = Conversion
-    xaxis: {
-      categories: jobsFormattedLabels,
-      labels: {
-        style: { colors: "#0f172a", fontWeight: 600 },
-        rotate: range === "1m" || range === "6m" ? -30 : 0,
-        hideOverlappingLabels: true,
-        trim: true,
-        maxHeight: 80,
-      },
-      axisBorder: { color: "#e2e8f0" },
-      axisTicks: { color: "#e2e8f0" },
-    },
-    yaxis: [
-      {
-        title: { text: "Jobs (Preview Created)", style: { fontWeight: 600, color: "#2563eb" } },
-        labels: { style: { colors: "#2563eb", fontWeight: 600 } },
-        forceNiceScale: true,
-      },
-      {
-        opposite: true,
-        title: { text: "Conversion %", style: { fontWeight: 600, color: "#22c55e" } },
-        labels: {
-          style: { colors: "#22c55e", fontWeight: 600 },
-          formatter: (v: number) => `${v.toFixed(0)}%`,
-        },
-        min: 0,
-        max: 40,
-        tickAmount: 5,
-      },
-    ],
-    grid: {
-      borderColor: "#e2e8f0",
-      strokeDashArray: 3,
-      padding: { left: 12, right: 12 },
-    },
-    stroke: { width: [3, 3], curve: "smooth", dashArray: [0, 0] }, // dotted conversion
-    legend: {
-      position: "top",
-      horizontalAlign: "center",
-      fontWeight: 600,
-      labels: { colors: "#334155" },
-      markers: { width: 10, height: 10, radius: 12 },
-    },
-    markers: { size: jobsIsHourly ? 0 : 3, hover: { size: 4 } },
-
-    // >>> NEW: show labels like the first chart
-    dataLabels: {
-      enabled: showJobsDataLabels,
-      enabledOnSeries: [0, 1],
-      offsetY: -6,
-      formatter: (val: number, opts: any) => {
-        const idx = opts?.seriesIndex ?? 0;
-        if (idx === 1) return `${Math.round(val)}%`; // Conversion
-        return `${Math.round(val)}`;                 // Jobs
-      },
-      style: { fontWeight: 700, colors: ["#1e293b"] },
-      background: {
-        enabled: true,
-        borderRadius: 8,
-        borderWidth: 0,
-        opacity: 0.9,
-        foreColor: "#fff",
-      },
-    },
-
-    tooltip: {
-      shared: true,
-      theme: "light",
-      y: {
-        formatter: (val: number, opts: any) => {
-          const name = opts?.w?.globals?.seriesNames?.[opts?.seriesIndex] || "";
-          if (name === "Conversion") return `${name}: ${val.toFixed(2)}%`;
-          return `${name}: ${val}`;
-        },
-      },
-    },
-  } as const;
-}, [jobsFormattedLabels, range, jobsIsHourly, showJobsDataLabels]);
-
-
+  // ---------- UI ----------
   return (
     <main className="min-h-screen p-6 sm:p-8 bg-slate-50">
-      <div className="mb-4 flex items-center justify-between gap-4">
+      <div className="mb-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
         <h1 className="text-2xl sm:text-3xl font-semibold text-slate-800">
           Welcome to Diffrun Admin Dashboard
         </h1>
-        <div className="flex items-center gap-2">
-          <label htmlFor="range" className="text-sm text-slate-600">Range</label>
+
+        <div className="flex items-center gap-3">
+          <label className="text-sm text-slate-600">Metric</label>
+          <select
+            value={metric}
+            onChange={(e) => setMetric(e.target.value as Metric)}
+            className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 shadow-sm focus:outline-none focus:ring-2 focus:ring-slate-400"
+          >
+            <option value="orders">Orders</option>
+            <option value="jobs">Jobs</option>
+            <option value="conversion">Conversion</option>
+          </select>
+
+          <label htmlFor="range" className="text-sm text-slate-600 ml-2">
+            Range
+          </label>
           <select
             id="range"
             value={range}
@@ -382,40 +381,24 @@ export default function Home() {
         </div>
       </div>
 
-      {error && <p className="mt-2 text-red-600">Error: {error}</p>}
+      {(error || jobsError) && (
+        <p className="mt-2 text-red-600">
+          {error ? `Orders error: ${error}` : `Jobs/Conversion error: ${jobsError}`}
+        </p>
+      )}
 
       <section className="bg-gray-200 rounded-2xl border border-slate-200 shadow-sm p-4 sm:p-6">
-        {stats ? (
+        {(metric === "orders" && !stats) ||
+        ((metric === "jobs" || metric === "conversion") && !jobsStats) ? (
+          <div className="h-48 rounded-xl bg-slate-100 animate-pulse" />
+        ) : (
           <ReactApexChart
-            key={`${range}-${stats.labels.length}`}
+            key={`${metric}-${range}-${activeLabels.length}`}
             options={chartOptions as any}
-            series={chartSeries as any}
+            series={activeSeries as any}
             type="line"
             height={360}
           />
-        ) : (
-          <div className="h-48 rounded-xl bg-slate-100 animate-pulse" />
-        )}
-      </section>
-
-      <div className="h-6" />
-
-      {jobsError && <p className="mt-2 text-red-600">Error: {jobsError}</p>}
-
-      <section className="bg-gray-200 rounded-2xl border border-slate-200 shadow-sm p-4 sm:p-6">
-        <h2 className="text-lg sm:text-xl font-semibold text-slate-800 mb-3">
-          Preview vs Orders (Jobs)
-        </h2>
-        {jobsStats ? (
-          <ReactApexChart
-            key={`jobs-${range}-${jobsStats.labels.length}`}
-            options={jobsOptions as any}
-            series={jobsSeries as any}
-            type="line"
-            height={360}
-          />
-        ) : (
-          <div className="h-48 rounded-xl bg-slate-100 animate-pulse" />
         )}
       </section>
     </main>

@@ -645,23 +645,48 @@ def _fetch_paid_orders_per_bucket(
 @app.get("/stats/preview-vs-orders", tags=["stats"])
 def stats_preview_vs_orders(range: RangeKey = Query("1w")):
     now_utc = datetime.now(tz=UTC)
-    curr_start_utc, curr_end_utc, _ps, _pe, gran = _periods(range, now_utc)
-    labels = _labels_for(range, curr_start_utc, curr_end_utc)
+    cs, ce, ps, pe, gran = _periods(range, now_utc)
 
-    # Same collection for both series (you confirmed this)
-    jobs_map = _fetch_jobs_created_with_preview_per_bucket(
-        orders_collection, curr_start_utc, curr_end_utc, granularity=gran
+    labels = _labels_for(range, cs, ce)
+    prev_labels = _labels_for(range, ps, pe)
+
+    jobs_map_curr = _fetch_jobs_created_with_preview_per_bucket(
+        orders_collection, cs, ce, granularity=gran
     )
-    paid_map = _fetch_paid_orders_per_bucket(
-        orders_collection, curr_start_utc, curr_end_utc, granularity=gran
+    paid_map_curr = _fetch_paid_orders_per_bucket(
+        orders_collection, cs, ce, granularity=gran
     )
+    jobs_map_prev = _fetch_jobs_created_with_preview_per_bucket(
+        orders_collection, ps, pe, granularity=gran
+    )
+    paid_map_prev = _fetch_paid_orders_per_bucket(
+        orders_collection, ps, pe, granularity=gran
+    )
+
+    current_jobs = [int(jobs_map_curr.get(k, 0)) for k in labels]
+    previous_jobs = [int(jobs_map_prev.get(k, 0)) for k in prev_labels]
+
+    current_orders = [int(paid_map_curr.get(k, 0)) for k in labels]
+    previous_orders = [int(paid_map_prev.get(k, 0)) for k in prev_labels]
+
+    conversion_current = [
+        (o * 100 / j) if j > 0 else 0 for o, j in zip(current_orders, current_jobs)
+    ]
+    conversion_previous = [
+        (o * 100 / j) if j > 0 else 0 for o, j in zip(previous_orders, previous_jobs)
+    ]
 
     return {
         "labels": labels,
-        "unpaid_with_preview": [jobs_map.get(k, 0) for k in labels],  # “jobs created (with preview)”
-        "paid_with_preview":   [paid_map.get(k, 0) for k in labels],  # “orders (paid)”
+        "current_jobs": current_jobs,
+        "previous_jobs": previous_jobs,
+        "current_orders": current_orders,
+        "previous_orders": previous_orders,
+        "conversion_current": conversion_current,
+        "conversion_previous": conversion_previous,
         "granularity": gran,
     }
+
 
 
 @app.get("/orders/hash-ids")
