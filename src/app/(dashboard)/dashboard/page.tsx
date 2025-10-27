@@ -5,6 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 
 const ReactApexChart = dynamic(() => import("react-apexcharts"), { ssr: false });
 
+// ---------- Types ----------
 type StatsResponse = {
   labels: string[];
   current: number[];
@@ -24,8 +25,28 @@ type JobsStatsResponse = {
   granularity: "hour" | "day";
 };
 
-type RangeKey = "1d" | "1w" | "1m" | "6m";
-type Metric = "orders" | "jobs" | "conversion";
+// NEW: Revenue stats mirror Orders (current vs previous)
+type RevenueStatsResponse = {
+  labels: string[];
+  current: number[];
+  previous: number[];
+  granularity: "hour" | "day";
+};
+
+type RangeKey = "1d" | "1w" | "1m" | "6m" | "this_month" | "custom";
+
+// CHANGED: add 'revenue'
+type Metric = "orders" | "jobs" | "conversion" | "revenue";
+
+// NEW: Country codes and options (you asked for IN default, AE, CA, US, GB)
+type CountryCode = "IN" | "AE" | "CA" | "US" | "GB";
+const COUNTRY_OPTIONS: { label: string; value: CountryCode }[] = [
+  { label: "India", value: "IN" },
+  { label: "United Arab Emirates", value: "AE" },
+  { label: "Canada", value: "CA" },
+  { label: "United States", value: "US" },
+  { label: "United Kingdom", value: "GB" },
+];
 
 export default function Home() {
   const baseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
@@ -36,56 +57,123 @@ export default function Home() {
   const [jobsStats, setJobsStats] = useState<JobsStatsResponse | null>(null);
   const [jobsError, setJobsError] = useState<string>("");
 
+  // NEW: revenue state
+  const [revenueStats, setRevenueStats] = useState<RevenueStatsResponse | null>(null);
+  const [revenueError, setRevenueError] = useState<string>("");
+
   const [range, setRange] = useState<RangeKey>("1w");
   const [metric, setMetric] = useState<Metric>("orders");
 
+  // NEW: country state (India default)
+  const [country, setCountry] = useState<CountryCode>("IN");
+
+  const todayISO = new Date().toISOString().slice(0, 10);
+  const weekAgoISO = new Date(Date.now() - 6 * 86400000).toISOString().slice(0, 10);
+  const [startDate, setStartDate] = useState<string>(weekAgoISO);
+  const [endDate, setEndDate] = useState<string>(todayISO);
+
+  // NEW: require explicit Apply for custom
+  const [customApplied, setCustomApplied] = useState(false);
+
+  const addDays = (ymd: string, days: number) => {
+    const d = new Date(ymd + "T00:00:00Z");
+    d.setUTCDate(d.getUTCDate() + days);
+    return d.toISOString().slice(0, 10);
+  };
+
   const exclusions = ["TEST", "LHMM", "COLLAB", "REJECTED"];
 
+  // NEW: helper to build URLs and always include `loc`
+  const withParams = (path: string, params: Record<string, string | number | undefined>) => {
+    const url = new URL(path, baseUrl);
+    const qs = new URLSearchParams();
+    Object.entries(params).forEach(([k, v]) => {
+      if (v !== undefined && v !== null) qs.set(k, String(v));
+    });
+    qs.set("loc", country); // critical: pass selected country
+    url.search = qs.toString();
+    return url.toString();
+  };
+
   const buildOrdersUrl = (r: RangeKey) => {
-    const params = new URLSearchParams();
-    exclusions.forEach((c) => params.append("exclude_codes", c));
-    params.append("range", r);
-    return `${baseUrl}/stats/orders?${params.toString()}`;
+    const params: Record<string, string> = {};
+    exclusions.forEach((c, i) => (params[`exclude_codes`] = c)); // not used here; you append below
+    const usp = new URLSearchParams();
+    exclusions.forEach((c) => usp.append("exclude_codes", c));
+    if (r === "custom") {
+      usp.append("start_date", startDate);
+      usp.append("end_date", endDate);
+    } else {
+      usp.append("range", r);
+    }
+    // CHANGED: wrap with withParams to inject loc
+    return withParams("/stats/orders", Object.fromEntries(usp.entries()));
   };
 
   const buildJobsUrl = (r: RangeKey) => {
-    const params = new URLSearchParams();
-    params.append("range", r);
-    return `${baseUrl}/stats/preview-vs-orders?${params.toString()}`;
+    const usp = new URLSearchParams();
+    if (r === "custom") {
+      usp.append("start_date", startDate);
+      usp.append("end_date", endDate);
+    } else {
+      usp.append("range", r);
+    }
+    // CHANGED: wrap with withParams to inject loc
+    return withParams("/stats/preview-vs-orders", Object.fromEntries(usp.entries()));
   };
 
-  // Orders fetch
+  // NEW: revenue URL builder (mirrors others)
+  const buildRevenueUrl = (r: RangeKey) => {
+    const usp = new URLSearchParams();
+    if (r === "custom") {
+      usp.append("start_date", startDate);
+      usp.append("end_date", endDate);
+    } else {
+      usp.append("range", r);
+    }
+    return withParams("/stats/revenue", Object.fromEntries(usp.entries()));
+  };
+
+  const isCustomInvalid =
+    range === "custom" && (!!startDate && !!endDate) && startDate > endDate;
+
+  // NEW: helper—only fetch when ready
+  const canFetch = useMemo(() => {
+    if (range !== "custom") return true;
+    if (isCustomInvalid) return false;
+    return customApplied; // only after Apply
+  }, [range, isCustomInvalid, customApplied]);
+
+  // Fetch: Orders
   useEffect(() => {
+    if (!canFetch) return;
     setError("");
     setStats(null);
-    const url = buildOrdersUrl(range);
-    fetch(url, { cache: "no-store" })
+    fetch(buildOrdersUrl(range), { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : Promise.reject(r.statusText)))
       .then(setStats)
       .catch((e) => setError(String(e)));
-  }, [baseUrl, range]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [baseUrl, range, startDate, endDate, canFetch, country]); // CHANGED: include `country`
 
-  // Jobs/Conversion fetch
+  // Fetch: Jobs & Conversion
   useEffect(() => {
+    if (!canFetch) return;
     setJobsError("");
     setJobsStats(null);
-    const url = buildJobsUrl(range);
-    fetch(url, { cache: "no-store" })
+    fetch(buildJobsUrl(range), { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : Promise.reject(r.statusText)))
       .then((data) => {
-        // Normalize to new shape if backend still returns old keys
         if (!("current_jobs" in data)) {
           const jobs = data.unpaid_with_preview ?? [];
           const orders = data.paid_with_preview ?? [];
-
           const zeros = (n: number) => Array(n).fill(0);
-
           data = {
             labels: data.labels ?? [],
             current_jobs: jobs,
-            previous_jobs: zeros(jobs.length),        // until backend updated
+            previous_jobs: zeros(jobs.length),
             current_orders: orders,
-            previous_orders: zeros(orders.length),    // until backend updated
+            previous_orders: zeros(orders.length),
             conversion_current: orders.map((o: number, i: number) =>
               (jobs[i] ?? 0) > 0 ? +(o * 100 / jobs[i]).toFixed(2) : 0
             ),
@@ -93,70 +181,77 @@ export default function Home() {
             granularity: data.granularity ?? "day",
           };
         }
-
         setJobsStats(data);
       })
       .catch((e) => setJobsError(String(e)));
-  }, [baseUrl, range]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [baseUrl, range, startDate, endDate, canFetch, country]); // CHANGED: include `country`
 
-  // ---------- date helpers ----------
+  // NEW: Fetch Revenue (only when needed, to avoid extra traffic)
+  useEffect(() => {
+  if (!canFetch) return;
+  setRevenueError("");
+  setRevenueStats(null);
+  fetch(buildRevenueUrl(range), { cache: "no-store" })
+    .then((r) => (r.ok ? r.json() : Promise.reject(r.statusText)))
+    .then((data) => setRevenueStats(data))
+    .catch((e) => setRevenueError(String(e)));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, [baseUrl, range, startDate, endDate, canFetch, country]); // ← no 'metric' and no guard
+
+  // Helpers
   const parseYMD = (input: unknown) => {
     const s = String(input ?? "");
     const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
     if (!m) return null;
-    const y = Number(m[1]);
-    const mo = Number(m[2]) - 1;
-    const d = Number(m[3]);
+    const y = Number(m[1]); const mo = Number(m[2]) - 1; const d = Number(m[3]);
     return new Date(Date.UTC(y, mo, d));
+  };
+
+  const toDate = (raw: string): Date | null => {
+    if (!raw) return null;
+    if (raw.length === 10 && /^\d{4}-\d{2}-\d{2}$/.test(raw)) return parseYMD(raw);
+    const d = new Date(raw);
+    return isNaN(d.getTime()) ? null : d;
   };
 
   const prettyIST = (ymd: string) => {
     const base = parseYMD(ymd);
     if (!base) return ymd || "";
-    const ist = new Date(base.getTime() + 19800000); // +05:30
-    if (range === "1m" || range === "6m") {
+    const ist = new Date(base.getTime() + 19800000);
+    if (range === "1m" || range === "6m" || range === "custom" || range === "this_month")
       return ist.toLocaleDateString("en-GB", { day: "2-digit", month: "short", timeZone: "UTC" });
-    }
     return ist.toLocaleDateString("en-GB", { weekday: "short", day: "2-digit", month: "short", timeZone: "UTC" });
   };
 
-  // ===== NEW: helpers for tooltip header =====
-  const PREV_OFFSET_DAYS: Record<RangeKey, number> = {
-    "1d": 7,     // previous week, same hour/day
-    "1w": 7,     // previous week
-    "1m": 30,    // previous 30 days
-    "6m": 182,   // previous ~6 months
+  const fmtDay = (d: Date) =>
+    d.toLocaleDateString("en-GB", { weekday: "short", day: "2-digit", month: "short" });
+
+  const subMonthsKeepDOM = (d: Date, n: number) => {
+    const y = d.getUTCFullYear();
+    const m = d.getUTCMonth();
+    const targetIndex = m - n;
+    const ty = y + Math.floor(targetIndex / 12);
+    const tm = ((targetIndex % 12) + 12) % 12;
+    const lastDay = new Date(Date.UTC(ty, tm + 1, 0)).getUTCDate();
+    const dom = Math.min(d.getUTCDate(), lastDay);
+    return new Date(Date.UTC(ty, tm, dom, d.getUTCHours(), d.getUTCMinutes(), d.getUTCSeconds(), d.getUTCMilliseconds()));
   };
 
-  // parse "YYYY-MM-DD" or "YYYY-MM-DDTHH:mm:ssZ"
-  const parseAnyUTC = (s: string): Date | null => {
-    if (!s) return null;
-    if (s.length > 10) {
-      const d = new Date(s);
-      return isNaN(d.getTime()) ? null : d;
-    }
-    return parseYMD(s);
+  // shift for ranges; custom uses window length in days
+  const prevShiftDays = (r: RangeKey): number | null => {
+    if (r === "1d") return 7;
+    if (r === "1w") return 7;
+    if (r === "1m") return 30;
+    if (r === "6m") return 182;
+    if (r === "this_month") return null;
+    if (r === "custom") return Math.max(1,
+      Math.ceil((new Date(endDate + "T00:00:00Z").getTime() - new Date(startDate + "T00:00:00Z").getTime()) / 86400000)
+    );
+    return 7;
   };
 
-  const formatDayIST = (d: Date) => {
-    const ist = new Date(d.getTime() + 19800000); // +05:30
-    return ist.toLocaleDateString("en-GB", {
-      weekday: "short",
-      day: "2-digit",
-      month: "short",
-      timeZone: "UTC",
-    });
-  };
-
-  const buildPrevHeader = (raw: string, r: RangeKey) => {
-    const base = parseAnyUTC(raw);
-    if (!base) return raw || "";
-    const prev = new Date(base.getTime() - PREV_OFFSET_DAYS[r] * 86400000);
-    return `${formatDayIST(base)} • prev ${formatDayIST(prev)}`;
-  };
-  // ===== END NEW =====
-
-  // ---------- labels ----------
+  // Labels
   const isHourlyOrders = stats?.granularity === "hour";
   const ordersRawLabels = stats?.labels ?? [];
   const ordersLabels = useMemo(() => {
@@ -171,72 +266,144 @@ export default function Home() {
     return isHourlyJobs ? jobsRawLabels.map((s) => s.slice(11)) : jobsRawLabels.map(prettyIST);
   }, [jobsStats, range]);
 
-  // ---------- choose labels for active metric ----------
+  // NEW: revenue labels
+  const isHourlyRevenue = revenueStats?.granularity === "hour";
+  const revenueRawLabels = revenueStats?.labels ?? [];
+  const revenueLabels = useMemo(() => {
+    if (!revenueStats) return [];
+    return isHourlyRevenue ? revenueRawLabels.map((s) => s.slice(11)) : revenueRawLabels.map(prettyIST);
+  }, [revenueStats, range]);
+
+  // CHANGED: choose active labels by metric, including revenue
   const activeLabels = useMemo(() => {
     if (metric === "orders") return ordersLabels;
-    return jobsLabels;
-  }, [metric, ordersLabels, jobsLabels]);
+    if (metric === "jobs" || metric === "conversion") return jobsLabels;
+    return revenueLabels; // revenue
+  }, [metric, ordersLabels, jobsLabels, revenueLabels]);
 
   type Series = { name: string; data: number[] }[];
 
-  // ---------- series ----------
+  // CHANGED: include revenue series
   const activeSeries: Series = useMemo(() => {
     if (metric === "orders") {
       if (!stats) return [];
       return [
-        { name: "Current Orders", data: stats.current },
-        { name: "Previous Orders", data: stats.previous },
+        { name: "Current Orders", data: stats.current ?? [] },
+        { name: "Previous Orders", data: stats.previous ?? [] },
       ];
     }
-
     if (metric === "jobs") {
       if (!jobsStats) return [];
       return [
-        { name: "Current Jobs", data: jobsStats.current_jobs },
-        { name: "Previous Jobs", data: jobsStats.previous_jobs },
+        { name: "Current Jobs", data: jobsStats.current_jobs ?? [] },
+        { name: "Previous Jobs", data: jobsStats.previous_jobs ?? [] },
       ];
     }
-
-    if (!jobsStats) return [];
+    if (metric === "conversion") {
+      if (!jobsStats) return [];
+      return [
+        { name: "Current Conversion %", data: jobsStats.conversion_current ?? [] },
+        { name: "Previous Conversion %", data: jobsStats.conversion_previous ?? [] },
+      ];
+    }
+    // revenue
+    if (!revenueStats) return [];
     return [
-      { name: "Current Conversion %", data: jobsStats.conversion_current },
-      { name: "Previous Conversion %", data: jobsStats.conversion_previous },
+      { name: "Current Revenue", data: revenueStats.current ?? [] },
+      { name: "Previous Revenue", data: revenueStats.previous ?? [] },
     ];
-  }, [metric, stats, jobsStats]);
+  }, [metric, stats, jobsStats, revenueStats]);
+
+  // CHANGED: totals include revenue
+  const totals = useMemo(() => {
+    const sum = (arr?: number[]) => (arr ?? []).reduce((a, b) => a + (Number.isFinite(b) ? b : 0), 0);
+    const ordersCurrent = sum(stats?.current);
+    const ordersPrev = sum(stats?.previous);
+    const jobsCurrent = sum(jobsStats?.current_jobs);
+    const jobsPrev = sum(jobsStats?.previous_jobs);
+    const convCurrent = jobsCurrent > 0 ? +(ordersCurrent * 100 / jobsCurrent).toFixed(2) : 0;
+    const convPrev = jobsPrev > 0 ? +(ordersPrev * 100 / jobsPrev).toFixed(2) : 0;
+    const revenueCurrent = sum(revenueStats?.current);
+    const revenuePrev = sum(revenueStats?.previous);
+    return {
+      orders: { current: ordersCurrent, prev: ordersPrev },
+      jobs: { current: jobsCurrent, prev: jobsPrev },
+      conversion: { current: convCurrent, prev: convPrev },
+      revenue: { current: revenueCurrent, prev: revenuePrev },
+    };
+  }, [stats, jobsStats, revenueStats]);
 
   const isPercent = metric === "conversion";
-  const showDataLabels = ["1d", "1w", "1m", "6m"].includes(range);
+  const showDataLabels = true;
 
-  // ---------- chart options ----------
   const chartOptions = useMemo(() => {
-    const colors =
-      activeSeries.length === 2
-        ? ["#2563eb", "#22c55e"] // current, previous
-        : ["#2563eb"];
-
+    const colors = activeSeries.length === 2 ? ["#2563eb", "#16a34a"] : ["#2563eb"];
     const hourGran =
       metric === "orders"
         ? stats?.granularity === "hour"
-        : jobsStats?.granularity === "hour";
+        : metric === "jobs" || metric === "conversion"
+        ? jobsStats?.granularity === "hour"
+        : revenueStats?.granularity === "hour";
+
+    const rawLabels =
+      metric === "orders"
+        ? ordersRawLabels
+        : metric === "jobs" || metric === "conversion"
+        ? jobsRawLabels
+        : revenueRawLabels;
+
+    const shift = prevShiftDays(range);
+
+    const customTooltip = (opts: any): string => {
+      const i: number = opts.dataPointIndex;
+      const r = rawLabels[i] as string | undefined;
+      const currDate = r ? toDate(r) : null;
+
+      let prevDate: Date | null = null;
+      if (currDate) {
+        if (range === "this_month") {
+          prevDate = subMonthsKeepDOM(currDate, 1);
+        } else if (typeof shift === "number") {
+          prevDate = new Date(currDate.getTime());
+          prevDate.setDate(prevDate.getDate() - shift);
+        }
+      }
+
+      const title =
+        currDate
+          ? `${fmtDay(currDate)}${prevDate ? ` • prev ${fmtDay(prevDate)}` : ""}`
+          : (activeLabels[i] ?? "");
+
+      const s0 = opts.series[0]?.[i];
+      const s1 = opts.series[1]?.[i];
+
+      const dot = (c: string) =>
+        `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${c};margin-right:6px;"></span>`;
+
+      const fmtVal = (v: any) => {
+        const n = Number.isFinite(v) ? Number(v) : 0;
+        if (isPercent) return `${Math.round(n)}%`;
+        if (metric === "revenue") return `${n.toFixed(2)}`; // keep decimals for money-like values
+        return `${Math.round(n)}`;
+      };
+
+      return `
+        <div class="apexcharts-tooltip-custom" style="padding:10px 12px;">
+          <div style="font-weight:600;margin-bottom:6px;">${title}</div>
+          <div style="display:flex;flex-direction:column;gap:4px;">
+            ${typeof s0 !== "undefined" ? `<div style="display:flex;align-items:center;">${dot(colors[0])}<span style="margin-right:6px;">${activeSeries[0]?.name ?? "Current"}</span><strong>${fmtVal(s0)}</strong></div>` : ""}
+            ${typeof s1 !== "undefined" ? `<div style="display:flex;align-items:center;">${dot(colors[1])}<span style="margin-right:6px;">${activeSeries[1]?.name ?? "Previous"}</span><strong>${fmtVal(s1)}</strong></div>` : ""}
+          </div>
+        </div>
+      `;
+    };
 
     return {
-      chart: {
-        id: "unified-metric",
-        toolbar: { show: false },
-        fontFamily:
-          "Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto",
-        animations: { enabled: true, easing: "easeinout", speed: 250 },
-      },
+      chart: { id: "unified-metric", type: "line", toolbar: { show: false }, animations: { enabled: true, easing: "easeinout", speed: 250 } },
       colors,
       xaxis: {
         categories: activeLabels,
-        labels: {
-          style: { colors: "#0f172a", fontWeight: 600 },
-          rotate: range === "1m" || range === "6m" ? -30 : 0,
-          hideOverlappingLabels: true,
-          trim: true,
-          maxHeight: 80,
-        },
+        labels: { rotate: (range === "1m" || range === "6m" || range === "custom" || range === "this_month") ? -30 : 0 },
         axisBorder: { color: "#e2e8f0" },
         axisTicks: { color: "#e2e8f0" },
       },
@@ -246,154 +413,189 @@ export default function Home() {
             metric === "orders"
               ? "Orders"
               : metric === "jobs"
-              ? "Jobs (Preview Created)"
-              : "Conversion %",
-          style: { fontWeight: 600, color: "#334155" },
+              ? "Jobs"
+              : metric === "conversion"
+              ? "Conversion %"
+              : "Revenue",
         },
-        forceNiceScale: true,
         labels: {
-          style: { colors: "#0f172a", fontWeight: 600 },
-          formatter: (v: number) =>
-            isPercent ? `${Math.round(v)}%` : `${Math.round(v)}`,
+          formatter: (v: number) => {
+            if (isPercent) return `${Math.round(v)}%`;
+            if (metric === "revenue") return `${v.toFixed(0)}`; // compact; adjust if you need ₹/$ formatting
+            return `${Math.round(v)}`;
+          },
         },
         min: 0,
+        forceNiceScale: true,
       },
-      grid: {
-        borderColor: "#e2e8f0",
-        strokeDashArray: 3,
-        padding: { left: 12, right: 12 },
-      },
-      stroke: {
-        width: activeSeries.length === 2 ? [3, 3] : 3,
-        curve: "smooth",
-        dashArray: activeSeries.length === 2 ? [0, 6] : 0,
-      },
-      legend: {
-        position: "top",
-        horizontalAlign: "center",
-        fontWeight: 600,
-        labels: { colors: "#334155" },
-        markers: { width: 10, height: 10, radius: 12 },
-      },
-      markers: {
-        size: hourGran ? 0 : 3,
-        hover: { size: 4 },
-      },
+      grid: { borderColor: "#e2e8f0", strokeDashArray: 3 },
+      stroke: { width: activeSeries.length === 2 ? [3, 3] : 3, curve: "smooth", dashArray: [0, 6] },
+      legend: { position: "top", horizontalAlign: "center" },
+      markers: { size: hourGran ? 0 : 3, hover: { size: 4 } },
       dataLabels: {
         enabled: showDataLabels,
         offsetY: -6,
-        formatter: (val: number) =>
-          isPercent ? `${Math.round(val)}%` : `${Math.round(val)}`,
-        // do NOT set 'style.colors' -> lets badge background use series color
-        style: { fontWeight: 700 },                // <— keep weight only
-        background: {
-          enabled: true,
-          foreColor: "#fff",                       // <— readable text on colored pills
-          borderRadius: 8,
-          borderWidth: 0,
-          opacity: 0.95,
+        formatter: (val: number) => {
+          if (isPercent) return `${Math.round(val)}%`;
+          if (metric === "revenue") return `${val.toFixed(0)}`;
+          return `${Math.round(val)}`;
         },
+        style: { fontWeight: 700 },
+        background: { enabled: true, foreColor: "#fff", borderRadius: 8, borderWidth: 0, opacity: 0.95 },
       },
-      // ===== REPLACED: custom tooltip with header showing both dates =====
-      tooltip: {
-        shared: true,
-        theme: "light",
-        custom: (opts: any) => {
-          const idx = opts?.dataPointIndex ?? 0;
-          const rawLabels =
-            metric === "orders" ? (stats?.labels ?? []) : (jobsStats?.labels ?? []);
-          const raw = rawLabels[idx] ?? "";
-          const header = buildPrevHeader(raw, range);
-
-          // assume series[0] = current, series[1] = previous (your series order)
-          const curVal = opts?.series?.[0]?.[idx];
-          const prevVal = opts?.series?.[1]?.[idx];
-
-          const fmt = (v: any) =>
-            isPercent ? `${Number(v ?? 0).toFixed(2)}%` : `${Math.round(v ?? 0)}`;
-
-          return `
-            <div style="padding:8px 10px;min-width:220px">
-              <div style="font-weight:600;margin-bottom:6px">${header}</div>
-
-              <div style="display:flex;gap:8px;align-items:center;margin:4px 0">
-                <span style="width:8px;height:8px;border-radius:50%;background:#2563eb;display:inline-block"></span>
-                <span style="font-weight:600;margin-right:6px">Current:</span>
-                <span>${fmt(curVal)}</span>
-              </div>
-
-              <div style="display:flex;gap:8px;align-items:center;margin:2px 0">
-                <span style="width:8px;height:8px;border-radius:50%;background:#22c55e;display:inline-block"></span>
-                <span style="font-weight:600;margin-right:6px">Previous:</span>
-                <span>${fmt(prevVal)}</span>
-              </div>
-            </div>
-          `;
-        },
-      },
-      // ===== END REPLACED =====
+      tooltip: { shared: true, intersect: false, custom: customTooltip },
     } as const;
   }, [
     metric,
-    isPercent,
-    activeLabels,
-    activeSeries.length,
-    range,
     stats?.granularity,
     jobsStats?.granularity,
+    revenueStats?.granularity,
+    activeLabels,
+    activeSeries,
+    ordersRawLabels,
+    jobsRawLabels,
+    revenueRawLabels,
+    range,
+    isPercent,
     showDataLabels,
   ]);
 
   // ---------- UI ----------
   return (
     <main className="min-h-screen p-6 sm:p-8 bg-slate-50">
-      <div className="mb-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-        <h1 className="text-2xl sm:text-3xl font-semibold text-slate-800">
-          Welcome to Diffrun Admin Dashboard
-        </h1>
+      <h1 className="text-2xl sm:text-3xl font-semibold text-slate-800 mb-4">Welcome to Diffrun Admin Dashboard</h1>
 
-        <div className="flex items-center gap-3">
-          <label className="text-sm text-slate-600">Metric</label>
+      <div className="flex flex-col md:flex-row items-start md:items-end gap-3 mb-4">
+        {/* Range dropdown */}
+        <div className="ml-0 md:ml-2">
+          <label className="block text-sm text-slate-600 mb-1">Range</label>
           <select
-            value={metric}
-            onChange={(e) => setMetric(e.target.value as Metric)}
-            className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 shadow-sm focus:outline-none focus:ring-2 focus:ring-slate-400"
-          >
-            <option value="orders">Orders</option>
-            <option value="jobs">Jobs</option>
-            <option value="conversion">Conversion</option>
-          </select>
-
-          <label htmlFor="range" className="text-sm text-slate-600 ml-2">
-            Range
-          </label>
-          <select
-            id="range"
             value={range}
-            onChange={(e) => setRange(e.target.value as RangeKey)}
+            onChange={(e) => {
+              const val = e.target.value as RangeKey;
+              setRange(val);
+              if (val === "custom") setCustomApplied(false);
+              else setCustomApplied(true);
+            }}
             className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 shadow-sm focus:outline-none focus:ring-2 focus:ring-slate-400"
           >
-            <option value="1d">1 day (24h)</option>
-            <option value="1w">1 week (7d)</option>
-            <option value="1m">1 month (30d)</option>
+            <option value="1d">1 day</option>
+            <option value="1w">Last 7 days</option>
+            <option value="1m">Last 30 days</option>
+            <option value="this_month">This month</option>
             <option value="6m">6 months (~182d)</option>
+            <option value="custom">Custom</option>
+          </select>
+        </div>
+
+        {/* Calendar controls for custom */}
+        {range === "custom" && (
+          <div className="flex items-end gap-2">
+            <div>
+              <label className="block text-sm text-slate-600 mb-1">Start date</label>
+              <input
+                type="date"
+                value={startDate}
+                onChange={(e) => { setStartDate(e.target.value); setCustomApplied(false); }}
+                className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm"
+              />
+            </div>
+            <div>
+              <label className="block text-sm text-slate-600 mb-1">End date</label>
+              <input
+                type="date"
+                value={endDate}
+                onChange={(e) => { setEndDate(e.target.value); setCustomApplied(false); }}
+                className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm"
+              />
+            </div>
+            <button
+              onClick={() => setCustomApplied(true)}
+              disabled={isCustomInvalid}
+              className={`h-10 px-4 rounded-lg text-white ${isCustomInvalid ? "bg-slate-400 cursor-not-allowed" : "bg-slate-800 hover:bg-slate-700"}`}
+              title={isCustomInvalid ? "Start date must be before or equal to End date" : "Apply range"}
+            >
+              Apply
+            </button>
+          </div>
+        )}
+
+        {/* NEW: Country dropdown */}
+        <div className="ml-0 md:ml-2">
+          <label className="block text-sm text-slate-600 mb-1">Country</label>
+          <select
+            value={country}
+            onChange={(e) => setCountry(e.target.value as CountryCode)}
+            className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 shadow-sm focus:outline-none focus:ring-2 focus:ring-slate-400"
+            aria-label="Select Country"
+          >
+            {COUNTRY_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
           </select>
         </div>
       </div>
 
-      {(error || jobsError) && (
-        <p className="mt-2 text-red-600">
-          {error ? `Orders error: ${error}` : `Jobs/Conversion error: ${jobsError}`}
+      {range === "custom" && isCustomInvalid && (
+        <p className="mb-2 text-red-600 text-sm">Start date must be before or equal to End date.</p>
+      )}
+
+      {/* CHANGED: four metric tiles (Orders, Jobs, Conversion, Revenue) */}
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mb-2">
+        <button onClick={() => setMetric("orders")} className={`rounded-lg overflow-hidden shadow-sm border ${metric === "orders" ? "border-blue-500" : "border-slate-200"}`}>
+          <div className="bg-blue-600 text-white px-4 py-3">
+            <div className="text-sm opacity-90">Orders</div>
+            <div className="text-3xl font-semibold leading-tight">{(totals.orders.current)}</div>
+          </div>
+          <div className="px-4 py-2 text-sm text-slate-700">Prev: {totals.orders.prev}</div>
+        </button>
+
+        <button onClick={() => setMetric("jobs")} className={`rounded-lg overflow-hidden shadow-sm border ${metric === "jobs" ? "border-red-500" : "border-slate-200"}`}>
+          <div className="bg-red-600 text-white px-4 py-3">
+            <div className="text-sm opacity-90">Jobs</div>
+            <div className="text-3xl font-semibold leading-tight">{(totals.jobs.current)}</div>
+          </div>
+          <div className="px-4 py-2 text-sm text-slate-700">Prev: {totals.jobs.prev}</div>
+        </button>
+
+        <button onClick={() => setMetric("conversion")} className={`rounded-lg overflow-hidden shadow-sm border ${metric === "conversion" ? "border-amber-500" : "border-slate-200"}`}>
+          <div className="bg-amber-500 text-white px-4 py-3">
+            <div className="text-sm opacity-90">Conversion</div>
+            <div className="text-3xl font-semibold leading-tight">
+              {totals.conversion.current.toFixed(2)}%
+            </div>
+          </div>
+          <div className="px-4 py-2 text-sm text-slate-700">Prev: {totals.conversion.prev.toFixed(2)}%</div>
+        </button>
+
+        {/* NEW: Revenue tile */}
+        <button onClick={() => setMetric("revenue")} className={`rounded-lg overflow-hidden shadow-sm border ${metric === "revenue" ? "border-emerald-500" : "border-slate-200"}`}>
+          <div className="bg-emerald-600 text-white px-4 py-3">
+            <div className="text-sm opacity-90">Revenue</div>
+            <div className="text-3xl font-semibold leading-tight">{(totals.revenue.current.toFixed(0))}</div>
+          </div>
+          <div className="px-4 py-2 text-sm text-slate-700">Prev: {totals.revenue.prev.toFixed(0)}</div>
+        </button>
+      </div>
+
+      {(error || jobsError || revenueError) && (
+        <p className="mb-3 text-red-600">
+          {error ? `Orders error: ${error}` : jobsError ? `Jobs/Conversion error: ${jobsError}` : `Revenue error: ${revenueError}`}
         </p>
       )}
 
-      <section className="bg-gray-200 rounded-2xl border border-slate-200 shadow-sm p-4 sm:p-6">
-        {(metric === "orders" && !stats) ||
-        ((metric === "jobs" || metric === "conversion") && !jobsStats) ? (
+      <section className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4 sm:p-6">
+        {(
+          (metric === "orders" && !stats) ||
+          ((metric === "jobs" || metric === "conversion") && !jobsStats) ||
+          (metric === "revenue" && !revenueStats)
+        ) ? (
           <div className="h-48 rounded-xl bg-slate-100 animate-pulse" />
         ) : (
           <ReactApexChart
-            key={`${metric}-${range}-${activeLabels.length}`}
+            key={`${metric}-${range}-${country}-${activeLabels.length}-${customApplied ? "applied" : "pending"}`}
             options={chartOptions as any}
             series={activeSeries as any}
             type="line"

@@ -41,6 +41,7 @@ import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError, NoCredentialsError, PartialCredentialsError
 from pymongo.collection import Collection
+from calendar import monthrange
 
 IST_TZ = pytz.timezone("Asia/Kolkata")
 API_BASE = os.getenv("NEXT_PUBLIC_API_BASE_URL", "http://127.0.0.1:5000")
@@ -431,7 +432,7 @@ def _render_na_table(title: str, wnd_from: str, wnd_to: str, rows: list[dict]) -
 JOBS_CREATED_AT_FIELD = "created_at"
 TZ_IST = ZoneInfo("Asia/Kolkata")
 UTC = timezone.utc
-RangeKey = Literal["1d", "1w", "1m", "6m"]
+RangeKey = Literal["1d", "1w", "1m", "6m", "this_month"]  # NEW value
 PREVIEW_URL_FIELD = "preview_url"
 PAID_FIELD = "paid"
 
@@ -441,16 +442,67 @@ def _now_ist() -> datetime:
 def _ist_midnight(dt_ist: datetime) -> datetime:
     return dt_ist.replace(hour=0, minute=0, second=0, microsecond=0)
 
+# NEW: parse YYYY-MM-DD to IST-midnight
+def _parse_ymd_ist(d: str) -> datetime:
+    try:
+        y, m, dd = map(int, d.split("-"))
+        return datetime(y, m, dd, tzinfo=TZ_IST)
+    except Exception:
+        raise HTTPException(status_code=400, detail=f"Invalid date: {d}. Use YYYY-MM-DD")
+
+# NEW: build periods for a custom day-window [start_ymd, end_ymd_inclusive]
+def _periods_custom(start_date: str, end_date: str) -> Tuple[datetime, datetime, datetime, datetime, str]:
+    start_ist = _ist_midnight(_parse_ymd_ist(start_date))
+    # inclusive end_date → exclusive next midnight
+    end_ist = _ist_midnight(_parse_ymd_ist(end_date)) + timedelta(days=1)
+    if end_ist <= start_ist:
+        raise HTTPException(status_code=400, detail="start_date must be before or equal to end_date")
+
+    # previous window: immediately preceding the current window, same length
+    span_days = (end_ist - start_ist).days
+    prev_end_ist = start_ist
+    prev_start_ist = prev_end_ist - timedelta(days=span_days)
+
+    return (
+        start_ist.astimezone(UTC),
+        end_ist.astimezone(UTC),
+        prev_start_ist.astimezone(UTC),
+        prev_end_ist.astimezone(UTC),
+        "day",
+    )
+
 def _periods(range_key: RangeKey, _now_utc_ignored: datetime) -> Tuple[datetime, datetime, datetime, datetime, str]:
+    now_ist = _now_ist()
+
     if range_key == "1d":
-        now_ist = _now_ist()
         end_curr_ist = now_ist.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
         start_curr_ist = end_curr_ist - timedelta(hours=24)
         end_prev_ist   = end_curr_ist - timedelta(days=7)
         start_prev_ist = start_curr_ist - timedelta(days=7)
         gran = "hour"
+
+    elif range_key == "this_month":
+        # current: [1st of this month 00:00 IST, 1st of next month 00:00 IST)
+        first_curr = _ist_midnight(now_ist).replace(day=1)
+        # compute 1st of next month
+        if first_curr.month == 12:
+            first_next = first_curr.replace(year=first_curr.year + 1, month=1)
+        else:
+            first_next = first_curr.replace(month=first_curr.month + 1)
+        start_curr_ist = first_curr
+        end_curr_ist = first_next
+
+        # previous: [1st of prev month 00:00 IST, 1st of this month 00:00 IST)
+        if first_curr.month == 1:
+            first_prev = first_curr.replace(year=first_curr.year - 1, month=12)
+        else:
+            first_prev = first_curr.replace(month=first_curr.month - 1)
+        start_prev_ist = first_prev
+        end_prev_ist = first_curr
+
+        gran = "day"
+
     else:
-        now_ist = _now_ist()
         end_curr_ist = _ist_midnight(now_ist) + timedelta(days=1)  # next IST midnight
         span = {"1w": 7, "1m": 30, "6m": 182}.get(range_key)
         if not span:
@@ -460,7 +512,6 @@ def _periods(range_key: RangeKey, _now_utc_ignored: datetime) -> Tuple[datetime,
         start_prev_ist = end_prev_ist - timedelta(days=span)
         gran = "day"
 
-    # Convert IST window edges to UTC exactly once
     return (
         start_curr_ist.astimezone(UTC),
         end_curr_ist.astimezone(UTC),
@@ -468,6 +519,7 @@ def _periods(range_key: RangeKey, _now_utc_ignored: datetime) -> Tuple[datetime,
         end_prev_ist.astimezone(UTC),
         gran,
     )
+
 
 def _labels_for(range_key: RangeKey, start_utc: datetime, end_utc: datetime) -> List[str]:
     if range_key == "1d":
@@ -485,77 +537,114 @@ def _labels_for(range_key: RangeKey, start_utc: datetime, end_utc: datetime) -> 
         cur += timedelta(days=1)
     return out
 
-def _fetch_counts(col: Collection, start_utc: datetime, end_utc: datetime, exclude_codes: List[str], granularity: str) -> Dict[str, int]:
-    """
-    Returns a dict keyed by:
-      - "YYYY-MM-DD HH:00" when granularity == "hour"
-      - "YYYY-MM-DD"       when granularity == "day"
-    """
+def _fetch_counts(
+    col: Collection,
+    start_utc: datetime,
+    end_utc: datetime,
+    exclude_codes: List[str],
+    granularity: str,
+    loc_match: dict,                      # <-- NEW
+) -> Dict[str, int]:
     discount_ne = [{"discount_code": {"$ne": code}} for code in exclude_codes]
     base_match = {
         "paid": True,
         "order_id": {"$regex": r"^#\d+$"},
         "processed_at": {"$exists": True, "$ne": None},
-        "$and": discount_ne if discount_ne else []
     }
 
-    if granularity == "hour":
-        pipeline = [
-            {"$match": base_match},
-            {"$addFields": {"processed_dt": {"$toDate": "$processed_at"}}},
-            {"$match": {"processed_dt": {"$gte": start_utc, "$lt": end_utc}}},
-            {
-                "$group": {
-                    "_id": {
-                        "$dateToString": {
-                            "format": "%Y-%m-%d %H:00",
-                            "date": "$processed_dt",
-                            "timezone": "Asia/Kolkata",
-                        }
-                    },
-                    "count": {"$sum": 1},
-                }
-            },
-            {"$sort": {"_id": 1}},
-        ]
-    else:  # "day"
-        pipeline = [
-            {"$match": base_match},
-            {"$addFields": {"processed_dt": {"$toDate": "$processed_at"}}},
-            {"$match": {"processed_dt": {"$gte": start_utc, "$lt": end_utc}}},
-            {
-                "$group": {
-                    "_id": {
-                        "$dateToString": {
-                            "format": "%Y-%m-%d",
-                            "date": "$processed_dt",
-                            "timezone": "Asia/Kolkata",
-                        }
-                    },
-                    "count": {"$sum": 1},
-                }
-            },
-            {"$sort": {"_id": 1}},
-        ]
+    # merge AND conditions safely
+    ands = []
+    if discount_ne:
+        ands.extend(discount_ne)
+    if loc_match:
+        ands.append(loc_match)
+    if ands:
+        base_match["$and"] = ands
 
+    pipeline = [
+        {"$match": base_match},
+        {"$addFields": {"processed_dt": {"$toDate": "$processed_at"}}},
+        {"$match": {"processed_dt": {"$gte": start_utc, "$lt": end_utc}}},
+        {
+            "$group": {
+                "_id": {
+                    "$dateToString": {
+                        "format": "%Y-%m-%d %H:00" if granularity == "hour" else "%Y-%m-%d",
+                        "date": "$processed_dt",
+                        "timezone": "Asia/Kolkata",
+                    }
+                },
+                "count": {"$sum": 1},
+            }
+        },
+        {"$sort": {"_id": 1}},
+    ]
     rows = list(col.aggregate(pipeline))
     return {r["_id"]: int(r["count"]) for r in rows}
 
 
+def _align_prev_to_curr_by_index(curr_len: int, prev_series: List[int]) -> List[int]:
+    """
+    Make prev series the same length as current labels:
+    - if prev shorter (e.g., 30 vs 31), pad with 0 at the end
+    - if prev longer, truncate
+    """
+    if len(prev_series) == curr_len:
+        return prev_series
+    if len(prev_series) > curr_len:
+        return prev_series[:curr_len]
+    return prev_series + [0] * (curr_len - len(prev_series))
+
+# --- Country / LOC filter helper --------------------------------------------
+def _build_loc_match(loc: str) -> dict:
+    """
+    Business rule:
+      - If loc == 'IN': include docs where locale/LOC is exactly 'IN' OR empty/missing/None.
+      - Else: include only exact matches for the provided loc (case-insensitive safe).
+    We support either field name: 'locale' or 'LOC'.
+    """
+    loc = (loc or "IN").upper()
+
+    # Match either field name
+    loc_eq = {"$or": [{"locale": loc}, {"LOC": loc}]}
+
+    if loc == "IN":
+        empty_or_missing = {
+            "$or": [
+                {"locale": {"$exists": False}},
+                {"locale": None},
+                {"locale": ""},
+                {"LOC": {"$exists": False}},
+                {"LOC": None},
+                {"LOC": ""},
+            ]
+        }
+        return {"$or": [loc_eq, empty_or_missing]}
+    else:
+        return loc_eq
+
+
 @app.get("/stats/orders")
 def stats_orders(
-    range: RangeKey = Query("1w", description="1d | 1w | 1m | 6m"),
+    range: RangeKey = Query("1w", description="1d | 1w | 1m | 6m | this_month"),
+    start_date: Optional[str] = Query(None, description="YYYY-MM-DD (only when using custom)"),
+    end_date: Optional[str] = Query(None, description="YYYY-MM-DD (only when using custom)"),
     exclude_codes: List[str] = Query(["TEST", "LHMM", "COLLAB", "REJECTED"]),
+    loc: str = Query("IN", description="Country code; IN includes empty/missing"),
 ):
     now_utc = datetime.now(tz=UTC)
+    if start_date and end_date:
+        curr_start_utc, curr_end_utc, prev_start_utc, prev_end_utc, gran = _periods_custom(start_date, end_date)
+    else:
+        curr_start_utc, curr_end_utc, prev_start_utc, prev_end_utc, gran = _periods(range, now_utc)
 
-    curr_start_utc, curr_end_utc, prev_start_utc, prev_end_utc, gran = _periods(range, now_utc)
+    labels = _labels_for("1d" if gran=="hour" else range, curr_start_utc, curr_end_utc)
+    prev_labels = _labels_for("1d" if gran=="hour" else range, prev_start_utc, prev_end_utc)
 
-    labels = _labels_for(range, curr_start_utc, curr_end_utc)
-    prev_labels = _labels_for(range, prev_start_utc, prev_end_utc)
+    loc_match = _build_loc_match(loc)
 
-    curr_map = _fetch_counts(orders_collection, curr_start_utc, curr_end_utc, exclude_codes, gran)
-    prev_map = _fetch_counts(orders_collection, prev_start_utc, prev_end_utc, exclude_codes, gran)
+    curr_map = _fetch_counts(orders_collection, curr_start_utc, curr_end_utc, exclude_codes, gran, loc_match)
+    prev_map = _fetch_counts(orders_collection, prev_start_utc, prev_end_utc, exclude_codes, gran, loc_match)
 
     current = [int(curr_map.get(k, 0)) for k in labels]
     previous = [int(prev_map.get(k, 0)) for k in prev_labels]
@@ -569,17 +658,23 @@ def stats_orders(
     }
 
 
+
 def _fetch_jobs_created_with_preview_per_bucket(
     col: Collection,
     start_utc: datetime,
     end_utc: datetime,
     granularity: str,
+    loc_match: dict,                      # <-- NEW
 ) -> Dict[str, int]:
+    base_match = {
+        PREVIEW_URL_FIELD: {"$exists": True, "$nin": [None, ""]},
+        JOBS_CREATED_AT_FIELD: {"$exists": True, "$ne": None},
+    }
+    if loc_match:
+        base_match = {"$and": [base_match, loc_match]}
+
     pipeline = [
-        {"$match": {
-            PREVIEW_URL_FIELD: {"$exists": True, "$nin": [None, ""]},
-            JOBS_CREATED_AT_FIELD: {"$exists": True, "$ne": None},
-        }},
+        {"$match": base_match},
         {"$addFields": {
             "_dt": {
                 "$cond": [
@@ -604,28 +699,27 @@ def _fetch_jobs_created_with_preview_per_bucket(
     ]
     return {r["_id"]: int(r["count"]) for r in col.aggregate(pipeline)}
 
+
 def _fetch_paid_orders_per_bucket(
     col: Collection,
     start_utc: datetime,
     end_utc: datetime,
     granularity: str,
+    loc_match: dict,                      # <-- NEW
 ) -> Dict[str, int]:
+    base_match = {
+        PAID_FIELD: True,
+        "$or": [
+            {"processed_at": {"$exists": True, "$ne": None}},
+            {"created_at": {"$exists": True, "$ne": None}},
+        ],
+    }
+    if loc_match:
+        base_match = {"$and": [base_match, loc_match]}
+
     pipeline = [
-        {"$match": {
-            PAID_FIELD: True,
-            "$or": [
-                {"processed_at": {"$exists": True, "$ne": None}},
-                {"created_at": {"$exists": True, "$ne": None}},
-            ],
-        }},
-        # choose processed_at if present, else created_at
-        {"$addFields": {
-            "_dt": {
-                "$toDate": {
-                    "$ifNull": ["$processed_at", "$created_at"]
-                }
-            }
-        }},
+        {"$match": base_match},
+        {"$addFields": {"_dt": {"$toDate": {"$ifNull": ["$processed_at", "$created_at"]}}}},
         {"$match": {"_dt": {"$gte": start_utc, "$lt": end_utc}}},
         {"$group": {
             "_id": {
@@ -642,39 +736,37 @@ def _fetch_paid_orders_per_bucket(
     return {r["_id"]: int(r["count"]) for r in col.aggregate(pipeline)}
 
 
+
 @app.get("/stats/preview-vs-orders", tags=["stats"])
-def stats_preview_vs_orders(range: RangeKey = Query("1w")):
+def stats_preview_vs_orders(
+    range: RangeKey = Query("1w"),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    loc: str = Query("IN", description="Country code; IN includes empty/missing"),
+):
     now_utc = datetime.now(tz=UTC)
-    cs, ce, ps, pe, gran = _periods(range, now_utc)
+    if start_date and end_date:
+        cs, ce, ps, pe, gran = _periods_custom(start_date, end_date)
+    else:
+        cs, ce, ps, pe, gran = _periods(range, now_utc)
 
-    labels = _labels_for(range, cs, ce)
-    prev_labels = _labels_for(range, ps, pe)
+    labels = _labels_for("1d" if gran=="hour" else range, cs, ce)
+    prev_labels = _labels_for("1d" if gran=="hour" else range, ps, pe)
 
-    jobs_map_curr = _fetch_jobs_created_with_preview_per_bucket(
-        orders_collection, cs, ce, granularity=gran
-    )
-    paid_map_curr = _fetch_paid_orders_per_bucket(
-        orders_collection, cs, ce, granularity=gran
-    )
-    jobs_map_prev = _fetch_jobs_created_with_preview_per_bucket(
-        orders_collection, ps, pe, granularity=gran
-    )
-    paid_map_prev = _fetch_paid_orders_per_bucket(
-        orders_collection, ps, pe, granularity=gran
-    )
+    loc_match = _build_loc_match(loc)
+
+    jobs_map_curr = _fetch_jobs_created_with_preview_per_bucket(orders_collection, cs, ce, granularity=gran, loc_match=loc_match)
+    paid_map_curr = _fetch_paid_orders_per_bucket(orders_collection, cs, ce, granularity=gran, loc_match=loc_match)
+    jobs_map_prev = _fetch_jobs_created_with_preview_per_bucket(orders_collection, ps, pe, granularity=gran, loc_match=loc_match)
+    paid_map_prev = _fetch_paid_orders_per_bucket(orders_collection, ps, pe, granularity=gran, loc_match=loc_match)
 
     current_jobs = [int(jobs_map_curr.get(k, 0)) for k in labels]
-    previous_jobs = [int(jobs_map_prev.get(k, 0)) for k in prev_labels]
-
     current_orders = [int(paid_map_curr.get(k, 0)) for k in labels]
+    previous_jobs = [int(jobs_map_prev.get(k, 0)) for k in prev_labels]
     previous_orders = [int(paid_map_prev.get(k, 0)) for k in prev_labels]
 
-    conversion_current = [
-        (o * 100 / j) if j > 0 else 0 for o, j in zip(current_orders, current_jobs)
-    ]
-    conversion_previous = [
-        (o * 100 / j) if j > 0 else 0 for o, j in zip(previous_orders, previous_jobs)
-    ]
+    conversion_current = [(o * 100 / j) if j > 0 else 0 for o, j in zip(current_orders, current_jobs)]
+    conversion_previous = [(o * 100 / j) if j > 0 else 0 for o, j in zip(previous_orders, previous_jobs)]
 
     return {
         "labels": labels,
@@ -686,6 +778,85 @@ def stats_preview_vs_orders(range: RangeKey = Query("1w")):
         "conversion_previous": conversion_previous,
         "granularity": gran,
     }
+
+def _fetch_revenue_per_bucket(
+    col: Collection,
+    start_utc: datetime,
+    end_utc: datetime,
+    granularity: str,
+    loc_match: dict,
+) -> Dict[str, float]:
+    base_match = {PAID_FIELD: True}
+    if loc_match:
+        base_match = {"$and": [base_match, loc_match]}
+
+    value_expr = {
+        "$toDouble": {
+            "$ifNull": [
+                "$total_amount",
+                {"$ifNull": [
+                    "$total_price",
+                    {"$ifNull": [
+                        "$amount",
+                        {"$ifNull": ["$price", 0]}
+                    ]}
+                ]}
+            ]
+        }
+    }
+
+    pipeline = [
+        {"$match": base_match},
+        {"$addFields": {"_dt": {"$toDate": {"$ifNull": ["$processed_at", "$created_at"]}}}},
+        {"$match": {"_dt": {"$gte": start_utc, "$lt": end_utc}}},
+        {"$group": {
+            "_id": {
+                "$dateToString": {
+                    "format": "%Y-%m-%d %H:00" if granularity == "hour" else "%Y-%m-%d",
+                    "date": "$_dt",
+                    "timezone": "Asia/Kolkata",
+                }
+            },
+            "revenue": {"$sum": value_expr},
+        }},
+        {"$sort": {"_id": 1}},
+    ]
+    rows = list(col.aggregate(pipeline))
+    return {r["_id"]: float(r["revenue"]) for r in rows}
+
+@app.get("/stats/revenue", tags=["stats"])
+def stats_revenue(
+    range: RangeKey = Query("1w"),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    loc: str = Query("IN", description="Country code; IN includes empty/missing"),
+):
+    now_utc = datetime.now(tz=UTC)
+    if start_date and end_date:
+        cs, ce, ps, pe, gran = _periods_custom(start_date, end_date)
+    else:
+        cs, ce, ps, pe, gran = _periods(range, now_utc)
+
+    labels = _labels_for("1d" if gran=="hour" else range, cs, ce)
+    prev_labels = _labels_for("1d" if gran=="hour" else range, ps, pe)
+
+    loc_match = _build_loc_match(loc)
+
+    rev_curr = _fetch_revenue_per_bucket(orders_collection, cs, ce, gran, loc_match)
+    rev_prev = _fetch_revenue_per_bucket(orders_collection, ps, pe, gran, loc_match)
+
+    current = [float(rev_curr.get(k, 0.0)) for k in labels]
+    previous = [float(rev_prev.get(k, 0.0)) for k in prev_labels]
+
+    return {
+        "labels": labels,
+        "current": current,
+        "previous": previous,
+        "granularity": gran,
+        "currency_hint": "mixed",  # you can switch to currency-specific buckets later if needed
+    }
+
+
 
 
 
