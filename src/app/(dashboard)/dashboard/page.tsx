@@ -96,42 +96,51 @@ export default function Home() {
   };
 
   const buildOrdersUrl = (r: RangeKey) => {
-    const params: Record<string, string> = {};
-    exclusions.forEach((c, i) => (params[`exclude_codes`] = c)); // not used here; you append below
-    const usp = new URLSearchParams();
-    exclusions.forEach((c) => usp.append("exclude_codes", c));
+    const params = new URLSearchParams();
+
+    // Add exclusions if any
+    exclusions.forEach((c) => params.append("exclude_codes", c));
+
+    // Add date range or preset range key
     if (r === "custom") {
-      usp.append("start_date", startDate);
-      usp.append("end_date", endDate);
+      params.append("start_date", startDate);
+      params.append("end_date", endDate);
     } else {
-      usp.append("range", r);
+      params.append("range", r);
     }
-    // CHANGED: wrap with withParams to inject loc
-    return withParams("/stats/orders", Object.fromEntries(usp.entries()));
+
+    // Build final URL with base
+    return `${baseUrl}/stats/orders?${params.toString()}`;
   };
 
   const buildJobsUrl = (r: RangeKey) => {
-    const usp = new URLSearchParams();
+    const params = new URLSearchParams();
+
+    // Add date range or preset range key
     if (r === "custom") {
-      usp.append("start_date", startDate);
-      usp.append("end_date", endDate);
+      params.append("start_date", startDate);
+      params.append("end_date", endDate);
     } else {
-      usp.append("range", r);
+      params.append("range", r);
     }
-    // CHANGED: wrap with withParams to inject loc
-    return withParams("/stats/preview-vs-orders", Object.fromEntries(usp.entries()));
+
+    // Build final URL with base
+    return `${baseUrl}/stats/preview-vs-orders?${params.toString()}`;
   };
 
-  // NEW: revenue URL builder (mirrors others)
   const buildRevenueUrl = (r: RangeKey) => {
-    const usp = new URLSearchParams();
+    const params = new URLSearchParams();
+
+    // Add date range or preset range key
     if (r === "custom") {
-      usp.append("start_date", startDate);
-      usp.append("end_date", endDate);
+      params.append("start_date", startDate);
+      params.append("end_date", endDate);
     } else {
-      usp.append("range", r);
+      params.append("range", r);
     }
-    return withParams("/stats/revenue", Object.fromEntries(usp.entries()));
+
+    // Build final URL with base
+    return `${baseUrl}/stats/revenue?${params.toString()}`;
   };
 
   const isCustomInvalid =
@@ -189,15 +198,15 @@ export default function Home() {
 
   // NEW: Fetch Revenue (only when needed, to avoid extra traffic)
   useEffect(() => {
-  if (!canFetch) return;
-  setRevenueError("");
-  setRevenueStats(null);
-  fetch(buildRevenueUrl(range), { cache: "no-store" })
-    .then((r) => (r.ok ? r.json() : Promise.reject(r.statusText)))
-    .then((data) => setRevenueStats(data))
-    .catch((e) => setRevenueError(String(e)));
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-}, [baseUrl, range, startDate, endDate, canFetch, country]); // ← no 'metric' and no guard
+    if (!canFetch) return;
+    setRevenueError("");
+    setRevenueStats(null);
+    fetch(buildRevenueUrl(range), { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : Promise.reject(r.statusText)))
+      .then((data) => setRevenueStats(data))
+      .catch((e) => setRevenueError(String(e)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [baseUrl, range, startDate, endDate, canFetch, country]); // ← no 'metric' and no guard
 
   // Helpers
   const parseYMD = (input: unknown) => {
@@ -342,15 +351,15 @@ export default function Home() {
       metric === "orders"
         ? stats?.granularity === "hour"
         : metric === "jobs" || metric === "conversion"
-        ? jobsStats?.granularity === "hour"
-        : revenueStats?.granularity === "hour";
+          ? jobsStats?.granularity === "hour"
+          : revenueStats?.granularity === "hour";
 
     const rawLabels =
       metric === "orders"
         ? ordersRawLabels
         : metric === "jobs" || metric === "conversion"
-        ? jobsRawLabels
-        : revenueRawLabels;
+          ? jobsRawLabels
+          : revenueRawLabels;
 
     const shift = prevShiftDays(range);
 
@@ -413,10 +422,10 @@ export default function Home() {
             metric === "orders"
               ? "Orders"
               : metric === "jobs"
-              ? "Jobs"
-              : metric === "conversion"
-              ? "Conversion %"
-              : "Revenue",
+                ? "Jobs"
+                : metric === "conversion"
+                  ? "Conversion %"
+                  : "Revenue",
         },
         labels: {
           formatter: (v: number) => {
