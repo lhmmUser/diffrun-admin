@@ -38,7 +38,7 @@ type RangeKey = "1d" | "1w" | "1m" | "6m" | "this_month" | "custom";
 // CHANGED: add 'revenue'
 type Metric = "orders" | "jobs" | "conversion" | "revenue";
 
-// NEW: Country codes and options (you asked for IN default, AE, CA, US, GB)
+// NEW: Country codes and options
 type CountryCode = "IN" | "AE" | "CA" | "US" | "GB";
 const COUNTRY_OPTIONS: { label: string; value: CountryCode }[] = [
   { label: "India", value: "IN" },
@@ -88,7 +88,7 @@ export default function Home() {
     const url = new URL(path, baseUrl);
     const qs = new URLSearchParams();
     Object.entries(params).forEach(([k, v]) => {
-      if (v !== undefined && v !== null) qs.set(k, String(v));
+      if (v !== undefined && v !== null) qs.append(k, String(v));
     });
     qs.set("loc", country); // critical: pass selected country
     url.search = qs.toString();
@@ -98,10 +98,10 @@ export default function Home() {
   const buildOrdersUrl = (r: RangeKey) => {
     const params = new URLSearchParams();
 
-    // Add exclusions if any
+    // exclusions (if any)
     exclusions.forEach((c) => params.append("exclude_codes", c));
 
-    // Add date range or preset range key
+    // range or custom dates
     if (r === "custom") {
       params.append("start_date", startDate);
       params.append("end_date", endDate);
@@ -109,14 +109,16 @@ export default function Home() {
       params.append("range", r);
     }
 
-    // Build final URL with base
+    // country
+    params.append("loc", country);
+
     return `${baseUrl}/stats/orders?${params.toString()}`;
   };
 
   const buildJobsUrl = (r: RangeKey) => {
     const params = new URLSearchParams();
 
-    // Add date range or preset range key
+    // range or custom dates
     if (r === "custom") {
       params.append("start_date", startDate);
       params.append("end_date", endDate);
@@ -124,14 +126,16 @@ export default function Home() {
       params.append("range", r);
     }
 
-    // Build final URL with base
+    // country
+    params.append("loc", country);
+
     return `${baseUrl}/stats/preview-vs-orders?${params.toString()}`;
   };
 
   const buildRevenueUrl = (r: RangeKey) => {
     const params = new URLSearchParams();
 
-    // Add date range or preset range key
+    // range or custom dates
     if (r === "custom") {
       params.append("start_date", startDate);
       params.append("end_date", endDate);
@@ -139,9 +143,12 @@ export default function Home() {
       params.append("range", r);
     }
 
-    // Build final URL with base
+    // country
+    params.append("loc", country);
+
     return `${baseUrl}/stats/revenue?${params.toString()}`;
   };
+
 
   const isCustomInvalid =
     range === "custom" && (!!startDate && !!endDate) && startDate > endDate;
@@ -159,54 +166,77 @@ export default function Home() {
     setError("");
     setStats(null);
     fetch(buildOrdersUrl(range), { cache: "no-store" })
-      .then((r) => (r.ok ? r.json() : Promise.reject(r.statusText)))
+      .then((r) => (r.ok ? r.json() : Promise.reject(r.statusText || r.status)))
       .then(setStats)
       .catch((e) => setError(String(e)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [baseUrl, range, startDate, endDate, canFetch, country]); // CHANGED: include `country`
+  }, [baseUrl, range, startDate, endDate, canFetch, country]);
 
-  // Fetch: Jobs & Conversion
+  // Fetch: Jobs & Conversion (robust to either response shape)
   useEffect(() => {
     if (!canFetch) return;
     setJobsError("");
     setJobsStats(null);
     fetch(buildJobsUrl(range), { cache: "no-store" })
-      .then((r) => (r.ok ? r.json() : Promise.reject(r.statusText)))
-      .then((data) => {
-        if (!("current_jobs" in data)) {
-          const jobs = data.unpaid_with_preview ?? [];
-          const orders = data.paid_with_preview ?? [];
-          const zeros = (n: number) => Array(n).fill(0);
-          data = {
-            labels: data.labels ?? [],
-            current_jobs: jobs,
-            previous_jobs: zeros(jobs.length),
-            current_orders: orders,
-            previous_orders: zeros(orders.length),
-            conversion_current: orders.map((o: number, i: number) =>
-              (jobs[i] ?? 0) > 0 ? +(o * 100 / jobs[i]).toFixed(2) : 0
-            ),
-            conversion_previous: zeros(orders.length),
-            granularity: data.granularity ?? "day",
-          };
+      .then((r) => (r.ok ? r.json() : Promise.reject(r.statusText || r.status)))
+      .then((raw) => {
+        // If backend already returns JobsStatsResponse, use it.
+        if (
+          raw &&
+          Array.isArray(raw.current_jobs) &&
+          Array.isArray(raw.previous_jobs) &&
+          Array.isArray(raw.current_orders) &&
+          Array.isArray(raw.previous_orders)
+        ) {
+          setJobsStats(raw as JobsStatsResponse);
+          return;
         }
-        setJobsStats(data);
+
+        // Backward-compat: two-series shape (paid_with_preview / unpaid_with_preview)
+        const labels: string[] = Array.isArray(raw?.labels) ? raw.labels : [];
+        const jobs: number[] = Array.isArray(raw?.unpaid_with_preview) ? raw.unpaid_with_preview : [];
+        const orders: number[] = Array.isArray(raw?.paid_with_preview) ? raw.paid_with_preview : [];
+        const zeros = (n: number) => Array(n).fill(0);
+
+        const current_jobs = jobs;
+        const previous_jobs = zeros(jobs.length);
+        const current_orders = orders;
+        const previous_orders = zeros(orders.length);
+
+        const conversion_current = current_orders.map((o: number, i: number) =>
+          (current_jobs[i] ?? 0) > 0 ? +(o * 100 / current_jobs[i]).toFixed(2) : 0
+        );
+        const conversion_previous = zeros(current_orders.length);
+
+        const granularity: "hour" | "day" = (raw?.granularity === "hour" ? "hour" : "day");
+
+        const normalized: JobsStatsResponse = {
+          labels,
+          current_jobs,
+          previous_jobs,
+          current_orders,
+          previous_orders,
+          conversion_current,
+          conversion_previous,
+          granularity,
+        };
+        setJobsStats(normalized);
       })
       .catch((e) => setJobsError(String(e)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [baseUrl, range, startDate, endDate, canFetch, country]); // CHANGED: include `country`
+  }, [baseUrl, range, startDate, endDate, canFetch, country]);
 
-  // NEW: Fetch Revenue (only when needed, to avoid extra traffic)
+  // NEW: Fetch Revenue
   useEffect(() => {
     if (!canFetch) return;
     setRevenueError("");
     setRevenueStats(null);
     fetch(buildRevenueUrl(range), { cache: "no-store" })
-      .then((r) => (r.ok ? r.json() : Promise.reject(r.statusText)))
-      .then((data) => setRevenueStats(data))
+      .then((r) => (r.ok ? r.json() : Promise.reject(r.statusText || r.status)))
+      .then((data) => setRevenueStats(data as RevenueStatsResponse))
       .catch((e) => setRevenueError(String(e)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [baseUrl, range, startDate, endDate, canFetch, country]); // ← no 'metric' and no guard
+  }, [baseUrl, range, startDate, endDate, canFetch, country]);
 
   // Helpers
   const parseYMD = (input: unknown) => {
@@ -392,7 +422,7 @@ export default function Home() {
       const fmtVal = (v: any) => {
         const n = Number.isFinite(v) ? Number(v) : 0;
         if (isPercent) return `${Math.round(n)}%`;
-        if (metric === "revenue") return `${n.toFixed(2)}`; // keep decimals for money-like values
+        if (metric === "revenue") return `${n.toFixed(2)}`;
         return `${Math.round(n)}`;
       };
 
@@ -430,7 +460,7 @@ export default function Home() {
         labels: {
           formatter: (v: number) => {
             if (isPercent) return `${Math.round(v)}%`;
-            if (metric === "revenue") return `${v.toFixed(0)}`; // compact; adjust if you need ₹/$ formatting
+            if (metric === "revenue") return `${v.toFixed(0)}`;
             return `${Math.round(v)}`;
           },
         },
@@ -442,7 +472,7 @@ export default function Home() {
       legend: { position: "top", horizontalAlign: "center" },
       markers: { size: hourGran ? 0 : 3, hover: { size: 4 } },
       dataLabels: {
-        enabled: showDataLabels,
+        enabled: true,
         offsetY: -6,
         formatter: (val: number) => {
           if (isPercent) return `${Math.round(val)}%`;
@@ -466,7 +496,6 @@ export default function Home() {
     revenueRawLabels,
     range,
     isPercent,
-    showDataLabels,
   ]);
 
   // ---------- UI ----------
@@ -529,7 +558,7 @@ export default function Home() {
           </div>
         )}
 
-        {/* NEW: Country dropdown */}
+        {/* Country dropdown */}
         <div className="ml-0 md:ml-2">
           <label className="block text-sm text-slate-600 mb-1">Country</label>
           <select
@@ -551,7 +580,7 @@ export default function Home() {
         <p className="mb-2 text-red-600 text-sm">Start date must be before or equal to End date.</p>
       )}
 
-      {/* CHANGED: four metric tiles (Orders, Jobs, Conversion, Revenue) */}
+      {/* Metric tiles */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mb-2">
         <button onClick={() => setMetric("orders")} className={`rounded-lg overflow-hidden shadow-sm border ${metric === "orders" ? "border-blue-500" : "border-slate-200"}`}>
           <div className="bg-blue-600 text-white px-4 py-3">
@@ -579,7 +608,6 @@ export default function Home() {
           <div className="px-4 py-2 text-sm text-slate-700">Prev: {totals.conversion.prev.toFixed(2)}%</div>
         </button>
 
-        {/* NEW: Revenue tile */}
         <button onClick={() => setMetric("revenue")} className={`rounded-lg overflow-hidden shadow-sm border ${metric === "revenue" ? "border-emerald-500" : "border-slate-200"}`}>
           <div className="bg-emerald-600 text-white px-4 py-3">
             <div className="text-sm opacity-90">Revenue</div>

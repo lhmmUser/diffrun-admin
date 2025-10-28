@@ -856,10 +856,6 @@ def stats_revenue(
         "currency_hint": "mixed",  # you can switch to currency-specific buckets later if needed
     }
 
-
-
-
-
 @app.get("/orders/hash-ids")
 def list_hash_ids(
     exclude_codes: List[str] = Query(["TEST", "LHMM", "COLLAB"]),
