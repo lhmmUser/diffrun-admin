@@ -50,3 +50,5 @@ next-env.d.ts
 venv/
 __pycache__/
 *.py[cod]
+
+plucky-vision-473617-c3-840b2df8787d.json

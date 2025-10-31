@@ -42,6 +42,14 @@ from botocore.config import Config
 from botocore.exceptions import ClientError, NoCredentialsError, PartialCredentialsError
 from pymongo.collection import Collection
 from calendar import monthrange
+import gspread
+from google.oauth2.service_account import Credentials as _GoogleCredentials
+from decimal import Decimal
+from bson import ObjectId
+from datetime import datetime, date
+from zoneinfo import ZoneInfo
+from datetime import datetime
+
 
 IST_TZ = pytz.timezone("Asia/Kolkata")
 API_BASE = os.getenv("NEXT_PUBLIC_API_BASE_URL", "http://127.0.0.1:5000")
@@ -1588,6 +1596,165 @@ async def approve_printing(order_ids: List[str], background_tasks: BackgroundTas
 
     return results
 
+SPREADSHEET_ID = os.getenv("GOOGLE_SHEET_ID")
+WORKSHEET_NAME = os.getenv("GOOGLE_SHEET_WORKSHEET", "dummy_orders")
+VALUE_INPUT_OPTION = os.getenv("GOOGLE_VALUE_INPUT_OPTION", "USER_ENTERED")
+SERVICE_ACCOUNT_FILE = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE")
+SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")  # optional fallback
+_SCOPES = ["https://www.googleapis.com/auth/spreadsheets",
+           "https://www.googleapis.com/auth/drive.file"]
+
+def get_gspread_client():
+    """
+    Return authenticated gspread client. Preference:
+      1) SERVICE_ACCOUNT_FILE path
+      2) SERVICE_ACCOUNT_JSON content (full JSON string)
+    """
+
+    creds = None
+    if SERVICE_ACCOUNT_FILE and os.path.exists(SERVICE_ACCOUNT_FILE):
+        creds = _GoogleCredentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=_SCOPES)
+    elif SERVICE_ACCOUNT_JSON:
+        info = json.loads(SERVICE_ACCOUNT_JSON)
+        creds = _GoogleCredentials.from_service_account_info(info, scopes=_SCOPES)
+    else:
+        raise RuntimeError("Google service account credentials not configured. Set GOOGLE_SERVICE_ACCOUNT_FILE or GOOGLE_SERVICE_ACCOUNT_JSON")
+
+    return gspread.authorize(creds)
+
+def _to_safe_value(v):
+    """Convert values that are not JSON-serializable to safe string representations."""
+    if v is None:
+        return ""
+    if isinstance(v, (str, int, float, bool)):
+        return v
+    if isinstance(v, Decimal):
+        return float(v)
+    if isinstance(v, (datetime, date)):
+        # choose format you prefer; ISO is safe and sortable
+        return v.isoformat()
+    if isinstance(v, ObjectId):
+        return str(v)
+    # fallback: cast to string
+    return str(v)
+
+def order_to_sheet_row(order: dict) -> list:
+    """
+    Build a sheet row that leaves column A empty and safely converts datetimes.
+    Column mapping (B -> K) as requested in your screenshot.
+    """
+    diffrun_order_id = _to_safe_value(order.get("order_id", ""))
+
+    # choose the created/ordered time field from your schema
+    # current IST time for Google-Sheets entry (safe and independent)
+    IST_1 = ZoneInfo("Asia/Kolkata")
+    now_ist = datetime.now(IST_1)
+    order_date = now_ist.strftime("%d %b, %H:%M")
+
+
+    child_name = _to_safe_value(order.get("name") or "")
+    book_style = _to_safe_value(order.get("book_style") or "")
+    book_id = _to_safe_value(order.get("book_id") or "")
+
+    shipping = order.get("shipping_address") or {}
+    city = _to_safe_value(shipping.get("city") or "")
+
+    address_parts = [
+        shipping.get("name") or "",
+        shipping.get("address1") or "",
+        shipping.get("address2") or "",
+        shipping.get("city") or "",
+        shipping.get("province") or "",
+        shipping.get("country") or "",
+        shipping.get("zip") or ""
+    ]
+    # join non-empty parts with comma (or use "\n" for line breaks)
+    address = "\n".join([p for p in address_parts if p])
+    address = _to_safe_value(address)
+
+    phone = _to_safe_value(shipping.get("phone") or order.get("phone_number") or order.get("customer_phone") or "")
+
+    cover_url = order.get("cover_url") or order.get("coverpage_url") or ""
+    interior_url = order.get("book_url") or order.get("interior_pdf") or ""
+
+    cover_link_formula = f'=HYPERLINK("{_to_safe_value(cover_url)}","View")' if cover_url else ""
+    interior_link_formula = f'=HYPERLINK("{_to_safe_value(interior_url)}","View PDF")' if interior_url else ""
+
+    logged_at = _to_safe_value(datetime.utcnow())
+
+    row = [
+        "",                        # A: intentionally blank
+        diffrun_order_id,          # B
+        order_date,                # C
+        child_name,                # D
+        book_style,                # E
+        book_id,                   # F
+        city,                      # G
+        address,                   # H
+        phone,                     # I
+        cover_link_formula,        # J
+        interior_link_formula      # K
+    ]
+
+    # ensure every element is a primitive (str/int/float/bool)
+    row = [_to_safe_value(x) for x in row]
+    return row
+
+
+def append_row_to_google_sheet(row: list):
+    """
+    Append a single row to the configured Google Sheet.
+    Runs in background via BackgroundTasks when scheduled.
+    """
+    try:
+        client = get_gspread_client()
+        sh = client.open_by_key(SPREADSHEET_ID)
+        worksheet = sh.worksheet(WORKSHEET_NAME)
+        worksheet.insert_row(row, index=2, value_input_option="USER_ENTERED")
+        print(f"[SHEETS] appended row for order {row[0]}")
+        # Optionally: update DB to mark 'sheet_logged' = True (if you want)
+    except Exception as exc:
+        # Replace prints with structured logging in production.
+        print(f"[SHEETS][ERROR] failed to append row for order {row[0]}: {exc}")
+        # Optionally: write failure to a retry queue or DB field.
+
+
+@app.post("/orders/send-to-google-sheet")
+async def send_to_google_sheet(order_ids: List[str], background_tasks: BackgroundTasks):
+    """
+    POST /orders/send-to-google-sheet
+    Body: {"order_ids": ["#123","#124", ...]}
+    For each id:
+      - fetch order from orders_collection
+      - build row and schedule append as background task
+      - mark orders_collection.sheet_queued = True (best-effort)
+    """
+    if not SPREADSHEET_ID:
+        raise HTTPException(status_code=500, detail="GOOGLE_SHEET_ID is not configured")
+
+    results = []
+    for order_id in order_ids:
+        print(f"[SHEETS] Processing order ID: {order_id}")
+        order = orders_collection.find_one({"order_id": order_id})
+        if not order:
+            print(f"[SHEETS] Order not found: {order_id}")
+            results.append({"order_id": order_id, "status": "error", "message": "Order not found", "step": "database_lookup"})
+            continue
+
+        row = order_to_sheet_row(order)
+
+        # schedule background append (non-blocking)
+        background_tasks.add_task(append_row_to_google_sheet, row)
+
+        # best-effort: mark queued
+        try:
+            orders_collection.update_one({"order_id": order_id}, {"$set": {"sheet_queued": True}})
+        except Exception as e:
+            print(f"[SHEETS][WARN] failed to set sheet_queued for {order_id}: {e}")
+
+        results.append({"order_id": order_id, "status": "queued", "message": "Queued for sheet append", "step": "queued"})
+
+    return results
 
 @app.get("/jobs")
 def get_jobs(
