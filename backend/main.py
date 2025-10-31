@@ -1,3 +1,6 @@
+from fastapi import Query
+from typing import Optional, List
+from app.routers.cloudprinter_produce_webhook import router as cp_produce_router
 from dateutil import parser
 from fastapi import FastAPI, BackgroundTasks, Response, Query, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
@@ -36,7 +39,8 @@ from typing import Tuple
 from zoneinfo import ZoneInfo
 import re
 import json
-import httpx, html
+import httpx
+import html
 import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError, NoCredentialsError, PartialCredentialsError
@@ -76,7 +80,7 @@ client_df = MongoClient(MONGO_URI_df)
 df_db = client_df["df-db"]
 collection_df = df_db["user-data"]
 
-MONGO_URI_YIPPEE=os.getenv("MONGO_URI_YIPPEE")
+MONGO_URI_YIPPEE = os.getenv("MONGO_URI_YIPPEE")
 client_yippee = MongoClient(MONGO_URI_YIPPEE)
 yippee_db = client_yippee["yippee-db"]
 collection_yippee = yippee_db["user-data"]
@@ -92,7 +96,8 @@ async def lifespan(app: FastAPI):
 
         scheduler.add_job(
             _run_export_and_email,
-            trigger=CronTrigger(hour="0,3,6,9,12,15,18,21", minute="0", timezone=IST_TZ),
+            trigger=CronTrigger(hour="0,3,6,9,12,15,18,21",
+                                minute="0", timezone=IST_TZ),
             id="xlsx_export_fixed_ist_times",
             replace_existing=True,
             coalesce=True,
@@ -134,7 +139,6 @@ app.include_router(vlookup_router)
 app.include_router(razorpay_router)
 app.include_router(cloudprinter_router)
 
-from app.routers.cloudprinter_produce_webhook import router as cp_produce_router
 app.include_router(cp_produce_router)
 
 app.add_middleware(
@@ -157,15 +161,18 @@ COUNTRY_CODES = {
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
+
 def _to_naive_utc(x):
     if isinstance(x, datetime):
         # convert tz-aware -> naive UTC; leave others unchanged
         return x.astimezone(timezone.utc).replace(tzinfo=None) if x.tzinfo else x
     return x
 
+
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
+
 
 def split_full_name(full_name: str) -> tuple[str, str]:
     """Split a full name into first name and last name."""
@@ -253,6 +260,7 @@ def format_processed_date(value):
         logger.error(f"🔥 Failed to format processed_at: {value} | Error: {e}")
         return ""
 
+
 def _send_html_email(
     to_email: Union[str, List[str], None],
     subject: str,
@@ -272,7 +280,8 @@ def _send_html_email(
         recipients = [e.strip() for e in to_email.split(",") if e.strip()]
 
     if not recipients:
-        raise RuntimeError("No recipients found. Configure EMAIL_TO in .env or pass a recipient.")
+        raise RuntimeError(
+            "No recipients found. Configure EMAIL_TO in .env or pass a recipient.")
 
     msg = EmailMessage()
     msg["Subject"] = subject
@@ -286,15 +295,19 @@ def _send_html_email(
         smtp.login(email_user, email_pass)
         # send_message uses the headers for recipients; passing explicitly is extra safe:
         smtp.sendmail(email_user, recipients, msg.as_string())
-        
+
+
 def _now_ist():
     return datetime.now(IST_TZ)
+
 
 def _ist_midnight(dt_ist: datetime) -> datetime:
     return dt_ist.replace(hour=0, minute=0, second=0, microsecond=0)
 
+
 VLOOKUP_PATH = "/reconcile/vlookup-payment-to-orders/auto"
-DETAILS_PATH  = "/reconcile/na-payment-details"
+DETAILS_PATH = "/reconcile/na-payment-details"
+
 
 def _hourly_reconcile_and_email():
     IST = ZoneInfo(os.getenv("RECONCILE_TZ", "Asia/Kolkata"))
@@ -304,9 +317,10 @@ def _hourly_reconcile_and_email():
     y_date = now_ist.date() - timedelta(days=1)
     t_date = now_ist.date()
     from_date = y_date.strftime("%Y-%m-%d")
-    to_date   = t_date.strftime("%Y-%m-%d")
+    to_date = t_date.strftime("%Y-%m-%d")
 
-    logger.info("[RECONCILE-HOURLY] Calling vlookup for IST window %s → %s", from_date, to_date)
+    logger.info(
+        "[RECONCILE-HOURLY] Calling vlookup for IST window %s → %s", from_date, to_date)
 
     # 1) Pull summary + NA payment IDs via the same UI endpoint
     try:
@@ -320,7 +334,8 @@ def _hourly_reconcile_and_email():
                     "max_fetch": 200000,
                 },
             )
-            logger.info("[RECONCILE-HOURLY] vlookup GET %s -> %s", resp.request.url, resp.status_code)
+            logger.info("[RECONCILE-HOURLY] vlookup GET %s -> %s",
+                        resp.request.url, resp.status_code)
             resp.raise_for_status()
             lookup_json = resp.json()
     except Exception as e:
@@ -328,15 +343,16 @@ def _hourly_reconcile_and_email():
         return
 
     summary = lookup_json.get("summary", {}) or {}
-    na_ids  = lookup_json.get("na_payment_ids", []) or []
+    na_ids = lookup_json.get("na_payment_ids", []) or []
     na_count = int(summary.get("na_count", len(na_ids)))
-    window   = summary.get("date_window", {}) or {}
+    window = summary.get("date_window", {}) or {}
     wnd_from = window.get("from_date", from_date)
-    wnd_to   = window.get("to_date", to_date)
+    wnd_to = window.get("to_date", to_date)
 
     # ✅ Only email if there are NA IDs
     if not na_ids:
-        logger.info("[RECONCILE-HOURLY] No NA payment IDs in window (%s → %s) — skipping email.", wnd_from, wnd_to)
+        logger.info(
+            "[RECONCILE-HOURLY] No NA payment IDs in window (%s → %s) — skipping email.", wnd_from, wnd_to)
         return
 
     logger.info("[RECONCILE-HOURLY] NA count: %d — preparing email.", na_count)
@@ -350,7 +366,8 @@ def _hourly_reconcile_and_email():
                 json={"ids": na_ids},
                 headers={"Content-Type": "application/json"},
             )
-            logger.info("[RECONCILE-HOURLY] details POST %s -> %s", dresp.request.url, dresp.status_code)
+            logger.info("[RECONCILE-HOURLY] details POST %s -> %s",
+                        dresp.request.url, dresp.status_code)
             dresp.raise_for_status()
             djson = dresp.json() or {}
             details_items = djson.get("items", []) or []
@@ -374,6 +391,7 @@ def _hourly_reconcile_and_email():
     except Exception as e:
         logger.exception("[RECONCILE-HOURLY] Email send failed: %s", e)
 
+
 def _render_na_table(title: str, wnd_from: str, wnd_to: str, rows: list[dict]) -> str:
     """Render an HTML table with: Payment ID, Email, Payment Date, Amount, Paid, Preview, Job ID."""
     def safe(v):  # basic escape
@@ -392,14 +410,15 @@ def _render_na_table(title: str, wnd_from: str, wnd_to: str, rows: list[dict]) -
     # Build table rows
     tr_html = []
     for r in rows:
-        pid   = r.get("id") or r.get("payment_id") or "—"
+        pid = r.get("id") or r.get("payment_id") or "—"
         email = r.get("email") or "—"
-        dt    = r.get("created_at") or "—"
-        amt   = r.get("amount_display") or "—"
-        paid  = r.get("paid")
-        paid_str = "true" if paid is True else ("false" if paid is False else "—")
-        prev  = r.get("preview_url") or ""
-        job   = r.get("job_id") or "—"
+        dt = r.get("created_at") or "—"
+        amt = r.get("amount_display") or "—"
+        paid = r.get("paid")
+        paid_str = "true" if paid is True else (
+            "false" if paid is False else "—")
+        prev = r.get("preview_url") or ""
+        job = r.get("job_id") or "—"
 
         prev_link = f'<a href="{html.escape(prev)}" target="_blank">preview</a>' if prev else "—"
 
@@ -444,27 +463,35 @@ RangeKey = Literal["1d", "1w", "1m", "6m", "this_month"]  # NEW value
 PREVIEW_URL_FIELD = "preview_url"
 PAID_FIELD = "paid"
 
+
 def _now_ist() -> datetime:
     return datetime.now(tz=TZ_IST)
+
 
 def _ist_midnight(dt_ist: datetime) -> datetime:
     return dt_ist.replace(hour=0, minute=0, second=0, microsecond=0)
 
 # NEW: parse YYYY-MM-DD to IST-midnight
+
+
 def _parse_ymd_ist(d: str) -> datetime:
     try:
         y, m, dd = map(int, d.split("-"))
         return datetime(y, m, dd, tzinfo=TZ_IST)
     except Exception:
-        raise HTTPException(status_code=400, detail=f"Invalid date: {d}. Use YYYY-MM-DD")
+        raise HTTPException(
+            status_code=400, detail=f"Invalid date: {d}. Use YYYY-MM-DD")
 
 # NEW: build periods for a custom day-window [start_ymd, end_ymd_inclusive]
+
+
 def _periods_custom(start_date: str, end_date: str) -> Tuple[datetime, datetime, datetime, datetime, str]:
     start_ist = _ist_midnight(_parse_ymd_ist(start_date))
     # inclusive end_date → exclusive next midnight
     end_ist = _ist_midnight(_parse_ymd_ist(end_date)) + timedelta(days=1)
     if end_ist <= start_ist:
-        raise HTTPException(status_code=400, detail="start_date must be before or equal to end_date")
+        raise HTTPException(
+            status_code=400, detail="start_date must be before or equal to end_date")
 
     # previous window: immediately preceding the current window, same length
     span_days = (end_ist - start_ist).days
@@ -479,13 +506,15 @@ def _periods_custom(start_date: str, end_date: str) -> Tuple[datetime, datetime,
         "day",
     )
 
+
 def _periods(range_key: RangeKey, _now_utc_ignored: datetime) -> Tuple[datetime, datetime, datetime, datetime, str]:
     now_ist = _now_ist()
 
     if range_key == "1d":
-        end_curr_ist = now_ist.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+        end_curr_ist = now_ist.replace(
+            minute=0, second=0, microsecond=0) + timedelta(hours=1)
         start_curr_ist = end_curr_ist - timedelta(hours=24)
-        end_prev_ist   = end_curr_ist - timedelta(days=7)
+        end_prev_ist = end_curr_ist - timedelta(days=7)
         start_prev_ist = start_curr_ist - timedelta(days=7)
         gran = "hour"
 
@@ -511,12 +540,13 @@ def _periods(range_key: RangeKey, _now_utc_ignored: datetime) -> Tuple[datetime,
         gran = "day"
 
     else:
-        end_curr_ist = _ist_midnight(now_ist) + timedelta(days=1)  # next IST midnight
+        end_curr_ist = _ist_midnight(
+            now_ist) + timedelta(days=1)  # next IST midnight
         span = {"1w": 7, "1m": 30, "6m": 182}.get(range_key)
         if not span:
             raise HTTPException(status_code=400, detail="invalid range")
         start_curr_ist = end_curr_ist - timedelta(days=span)
-        end_prev_ist   = start_curr_ist
+        end_prev_ist = start_curr_ist
         start_prev_ist = end_prev_ist - timedelta(days=span)
         gran = "day"
 
@@ -544,6 +574,7 @@ def _labels_for(range_key: RangeKey, start_utc: datetime, end_utc: datetime) -> 
         out.append(cur.strftime("%Y-%m-%d"))
         cur += timedelta(days=1)
     return out
+
 
 def _fetch_counts(
     col: Collection,
@@ -604,6 +635,8 @@ def _align_prev_to_curr_by_index(curr_len: int, prev_series: List[int]) -> List[
     return prev_series + [0] * (curr_len - len(prev_series))
 
 # --- Country / LOC filter helper --------------------------------------------
+
+
 def _build_loc_match(loc: str) -> dict:
     """
     Business rule:
@@ -634,25 +667,35 @@ def _build_loc_match(loc: str) -> dict:
 
 @app.get("/stats/orders")
 def stats_orders(
-    range: RangeKey = Query("1w", description="1d | 1w | 1m | 6m | this_month"),
-    start_date: Optional[str] = Query(None, description="YYYY-MM-DD (only when using custom)"),
-    end_date: Optional[str] = Query(None, description="YYYY-MM-DD (only when using custom)"),
+    range: RangeKey = Query(
+        "1w", description="1d | 1w | 1m | 6m | this_month"),
+    start_date: Optional[str] = Query(
+        None, description="YYYY-MM-DD (only when using custom)"),
+    end_date: Optional[str] = Query(
+        None, description="YYYY-MM-DD (only when using custom)"),
     exclude_codes: List[str] = Query(["TEST", "LHMM", "COLLAB", "REJECTED"]),
-    loc: str = Query("IN", description="Country code; IN includes empty/missing"),
+    loc: str = Query(
+        "IN", description="Country code; IN includes empty/missing"),
 ):
     now_utc = datetime.now(tz=UTC)
     if start_date and end_date:
-        curr_start_utc, curr_end_utc, prev_start_utc, prev_end_utc, gran = _periods_custom(start_date, end_date)
+        curr_start_utc, curr_end_utc, prev_start_utc, prev_end_utc, gran = _periods_custom(
+            start_date, end_date)
     else:
-        curr_start_utc, curr_end_utc, prev_start_utc, prev_end_utc, gran = _periods(range, now_utc)
+        curr_start_utc, curr_end_utc, prev_start_utc, prev_end_utc, gran = _periods(
+            range, now_utc)
 
-    labels = _labels_for("1d" if gran=="hour" else range, curr_start_utc, curr_end_utc)
-    prev_labels = _labels_for("1d" if gran=="hour" else range, prev_start_utc, prev_end_utc)
+    labels = _labels_for("1d" if gran == "hour" else range,
+                         curr_start_utc, curr_end_utc)
+    prev_labels = _labels_for(
+        "1d" if gran == "hour" else range, prev_start_utc, prev_end_utc)
 
     loc_match = _build_loc_match(loc)
 
-    curr_map = _fetch_counts(orders_collection, curr_start_utc, curr_end_utc, exclude_codes, gran, loc_match)
-    prev_map = _fetch_counts(orders_collection, prev_start_utc, prev_end_utc, exclude_codes, gran, loc_match)
+    curr_map = _fetch_counts(
+        orders_collection, curr_start_utc, curr_end_utc, exclude_codes, gran, loc_match)
+    prev_map = _fetch_counts(
+        orders_collection, prev_start_utc, prev_end_utc, exclude_codes, gran, loc_match)
 
     current = [int(curr_map.get(k, 0)) for k in labels]
     previous = [int(prev_map.get(k, 0)) for k in prev_labels]
@@ -664,7 +707,6 @@ def stats_orders(
         "exclusions": exclude_codes,
         "granularity": gran,
     }
-
 
 
 def _fetch_jobs_created_with_preview_per_bucket(
@@ -727,7 +769,8 @@ def _fetch_paid_orders_per_bucket(
 
     pipeline = [
         {"$match": base_match},
-        {"$addFields": {"_dt": {"$toDate": {"$ifNull": ["$processed_at", "$created_at"]}}}},
+        {"$addFields": {
+            "_dt": {"$toDate": {"$ifNull": ["$processed_at", "$created_at"]}}}},
         {"$match": {"_dt": {"$gte": start_utc, "$lt": end_utc}}},
         {"$group": {
             "_id": {
@@ -744,13 +787,13 @@ def _fetch_paid_orders_per_bucket(
     return {r["_id"]: int(r["count"]) for r in col.aggregate(pipeline)}
 
 
-
 @app.get("/stats/preview-vs-orders", tags=["stats"])
 def stats_preview_vs_orders(
     range: RangeKey = Query("1w"),
     start_date: Optional[str] = Query(None),
     end_date: Optional[str] = Query(None),
-    loc: str = Query("IN", description="Country code; IN includes empty/missing"),
+    loc: str = Query(
+        "IN", description="Country code; IN includes empty/missing"),
 ):
     now_utc = datetime.now(tz=UTC)
     if start_date and end_date:
@@ -758,23 +801,29 @@ def stats_preview_vs_orders(
     else:
         cs, ce, ps, pe, gran = _periods(range, now_utc)
 
-    labels = _labels_for("1d" if gran=="hour" else range, cs, ce)
-    prev_labels = _labels_for("1d" if gran=="hour" else range, ps, pe)
+    labels = _labels_for("1d" if gran == "hour" else range, cs, ce)
+    prev_labels = _labels_for("1d" if gran == "hour" else range, ps, pe)
 
     loc_match = _build_loc_match(loc)
 
-    jobs_map_curr = _fetch_jobs_created_with_preview_per_bucket(orders_collection, cs, ce, granularity=gran, loc_match=loc_match)
-    paid_map_curr = _fetch_paid_orders_per_bucket(orders_collection, cs, ce, granularity=gran, loc_match=loc_match)
-    jobs_map_prev = _fetch_jobs_created_with_preview_per_bucket(orders_collection, ps, pe, granularity=gran, loc_match=loc_match)
-    paid_map_prev = _fetch_paid_orders_per_bucket(orders_collection, ps, pe, granularity=gran, loc_match=loc_match)
+    jobs_map_curr = _fetch_jobs_created_with_preview_per_bucket(
+        orders_collection, cs, ce, granularity=gran, loc_match=loc_match)
+    paid_map_curr = _fetch_paid_orders_per_bucket(
+        orders_collection, cs, ce, granularity=gran, loc_match=loc_match)
+    jobs_map_prev = _fetch_jobs_created_with_preview_per_bucket(
+        orders_collection, ps, pe, granularity=gran, loc_match=loc_match)
+    paid_map_prev = _fetch_paid_orders_per_bucket(
+        orders_collection, ps, pe, granularity=gran, loc_match=loc_match)
 
     current_jobs = [int(jobs_map_curr.get(k, 0)) for k in labels]
     current_orders = [int(paid_map_curr.get(k, 0)) for k in labels]
     previous_jobs = [int(jobs_map_prev.get(k, 0)) for k in prev_labels]
     previous_orders = [int(paid_map_prev.get(k, 0)) for k in prev_labels]
 
-    conversion_current = [(o * 100 / j) if j > 0 else 0 for o, j in zip(current_orders, current_jobs)]
-    conversion_previous = [(o * 100 / j) if j > 0 else 0 for o, j in zip(previous_orders, previous_jobs)]
+    conversion_current = [(o * 100 / j) if j > 0 else 0 for o,
+                          j in zip(current_orders, current_jobs)]
+    conversion_previous = [(o * 100 / j) if j > 0 else 0 for o,
+                           j in zip(previous_orders, previous_jobs)]
 
     return {
         "labels": labels,
@@ -786,6 +835,7 @@ def stats_preview_vs_orders(
         "conversion_previous": conversion_previous,
         "granularity": gran,
     }
+
 
 def _fetch_revenue_per_bucket(
     col: Collection,
@@ -815,7 +865,8 @@ def _fetch_revenue_per_bucket(
 
     pipeline = [
         {"$match": base_match},
-        {"$addFields": {"_dt": {"$toDate": {"$ifNull": ["$processed_at", "$created_at"]}}}},
+        {"$addFields": {
+            "_dt": {"$toDate": {"$ifNull": ["$processed_at", "$created_at"]}}}},
         {"$match": {"_dt": {"$gte": start_utc, "$lt": end_utc}}},
         {"$group": {
             "_id": {
@@ -832,12 +883,14 @@ def _fetch_revenue_per_bucket(
     rows = list(col.aggregate(pipeline))
     return {r["_id"]: float(r["revenue"]) for r in rows}
 
+
 @app.get("/stats/revenue", tags=["stats"])
 def stats_revenue(
     range: RangeKey = Query("1w"),
     start_date: Optional[str] = Query(None),
     end_date: Optional[str] = Query(None),
-    loc: str = Query("IN", description="Country code; IN includes empty/missing"),
+    loc: str = Query(
+        "IN", description="Country code; IN includes empty/missing"),
 ):
     now_utc = datetime.now(tz=UTC)
     if start_date and end_date:
@@ -845,13 +898,15 @@ def stats_revenue(
     else:
         cs, ce, ps, pe, gran = _periods(range, now_utc)
 
-    labels = _labels_for("1d" if gran=="hour" else range, cs, ce)
-    prev_labels = _labels_for("1d" if gran=="hour" else range, ps, pe)
+    labels = _labels_for("1d" if gran == "hour" else range, cs, ce)
+    prev_labels = _labels_for("1d" if gran == "hour" else range, ps, pe)
 
     loc_match = _build_loc_match(loc)
 
-    rev_curr = _fetch_revenue_per_bucket(orders_collection, cs, ce, gran, loc_match)
-    rev_prev = _fetch_revenue_per_bucket(orders_collection, ps, pe, gran, loc_match)
+    rev_curr = _fetch_revenue_per_bucket(
+        orders_collection, cs, ce, gran, loc_match)
+    rev_prev = _fetch_revenue_per_bucket(
+        orders_collection, ps, pe, gran, loc_match)
 
     current = [float(rev_curr.get(k, 0.0)) for k in labels]
     previous = [float(rev_prev.get(k, 0.0)) for k in prev_labels]
@@ -863,6 +918,7 @@ def stats_revenue(
         "granularity": gran,
         "currency_hint": "mixed",  # you can switch to currency-specific buckets later if needed
     }
+
 
 @app.get("/orders/hash-ids")
 def list_hash_ids(
@@ -964,6 +1020,7 @@ class ItemShippedPayload(CloudprinterWebhookBase):
 class UnapproveRequest(BaseModel):
     job_ids: List[str]
 
+
 def generate_book_title(book_id, child_name):
     if not child_name:
         child_name = "Your child"
@@ -984,10 +1041,6 @@ def generate_book_title(book_id, child_name):
         return f"{child_name}'s Storybook"
 
 
-import re
-from typing import Optional, List
-from fastapi import Query
-
 @app.get("/orders")
 def get_orders(
     sort_by: Optional[str] = Query(None, description="Field to sort by"),
@@ -997,7 +1050,8 @@ def get_orders(
     filter_print_approval: Optional[str] = Query(None),
     filter_discount_code: Optional[str] = Query(None),
     exclude_discount_code: Optional[List[str]] = Query(None),
-    q: Optional[str] = Query(None, description="Search by job_id, order_id, email, name, discount_code, city, locale, book_id"),
+    q: Optional[str] = Query(
+        None, description="Search by job_id, order_id, email, name, discount_code, city, locale, book_id"),
 ):
     # Base query
     query = {"paid": True}
@@ -1032,11 +1086,13 @@ def get_orders(
         if isinstance(exclude_discount_code, list):
             ex_values = exclude_discount_code
         else:
-            ex_values = [p.strip() for p in str(exclude_discount_code).split(",")]
+            ex_values = [p.strip()
+                         for p in str(exclude_discount_code).split(",")]
 
     ex_values = [v for v in (s.strip() for s in ex_values) if v]
     if ex_values:
-        regexes = [re.compile(rf"^{re.escape(v)}$", re.IGNORECASE) for v in ex_values]
+        regexes = [re.compile(rf"^{re.escape(v)}$", re.IGNORECASE)
+                   for v in ex_values]
         existing = query.pop("discount_code", None)
         exclude_cond = {"discount_code": {"$nin": regexes}}
         if existing is None:
@@ -1095,9 +1151,11 @@ def get_orders(
         "_id": 0,
         "shipped_at": 1,
         "cust_status": 1,
+        "printer": 1,
     }
 
-    records = list(orders_collection.find(query, projection).sort(sort_field, sort_order))
+    records = list(orders_collection.find(
+        query, projection).sort(sort_field, sort_order))
     result = []
 
     for doc in records:
@@ -1123,9 +1181,12 @@ def get_orders(
             "locale": doc.get("locale", ""),
             "shippedAt": doc.get("shipped_at"),
             "quantity": doc.get("quantity", 1),
+            "cust_status": doc.get("cust_status", ""),
+            "printer": doc.get("printer", ""),
         })
 
     return result
+
 
 @app.post("/orders/set-cust-status/{order_id}")
 async def set_cust_status(
@@ -1218,7 +1279,6 @@ def get_product_details(book_style: str | None, book_id: str | None) -> tuple[st
 
     # Fallback to Hardcover for unknown styles
     return ("Hardcover", "photobook_cw_s210_s_fc")
-
 
 
 def get_shipping_level(country_code: str) -> str:
@@ -1523,11 +1583,13 @@ async def approve_printing(order_ids: List[str], background_tasks: BackgroundTas
 
             if response.status_code in [200, 201]:
                 print(f"Updating order status in database for {order_id}...")
+                # mark that Cloudprinter was used and save reference + timestamp
                 orders_collection.update_one(
                     {"order_id": order_id},
                     {
                         "$set": {
                             "print_status": "sent_to_printer",
+                            "printer": "Cloudprinter",                                   # NEW
                             "cloudprinter_reference": response_data.get("reference", ""),
                             "print_sent_at": datetime.now().isoformat()
                         }
@@ -1544,7 +1606,8 @@ async def approve_printing(order_ids: List[str], background_tasks: BackgroundTas
                 )
 
                 if once.modified_count == 1:
-                    to_email = (order.get("customer_email") or order.get("email") or "").strip()
+                    to_email = (order.get("customer_email")
+                                or order.get("email") or "").strip()
                     display_name = order.get("user_name") or "there"
                     child_name = order.get("name") or "Your"
                     job_id = order.get("job_id")
@@ -1558,9 +1621,11 @@ async def approve_printing(order_ids: List[str], background_tasks: BackgroundTas
                             job_id,
                             order_id
                         )
-                        print(f"[EMAIL] queued production email to {to_email} for {order_id}")
+                        print(
+                            f"[EMAIL] queued production email to {to_email} for {order_id}")
                     else:
-                        print(f"[EMAIL] skipped (missing recipient or creds) for {order_id}")
+                        print(
+                            f"[EMAIL] skipped (missing recipient or creds) for {order_id}")
                 else:
                     print(f"[EMAIL] already sent for {order_id}, skipping")
 
@@ -1597,12 +1662,14 @@ async def approve_printing(order_ids: List[str], background_tasks: BackgroundTas
     return results
 
 SPREADSHEET_ID = os.getenv("GOOGLE_SHEET_ID")
-WORKSHEET_NAME = os.getenv("GOOGLE_SHEET_WORKSHEET", "dummy_orders")
+WORKSHEET_NAME = os.getenv("GOOGLE_SHEET_WORKSHEET", "Order Placement")
 VALUE_INPUT_OPTION = os.getenv("GOOGLE_VALUE_INPUT_OPTION", "USER_ENTERED")
 SERVICE_ACCOUNT_FILE = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE")
-SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")  # optional fallback
+SERVICE_ACCOUNT_JSON = os.getenv(
+    "GOOGLE_SERVICE_ACCOUNT_JSON")  # optional fallback
 _SCOPES = ["https://www.googleapis.com/auth/spreadsheets",
            "https://www.googleapis.com/auth/drive.file"]
+
 
 def get_gspread_client():
     """
@@ -1613,14 +1680,18 @@ def get_gspread_client():
 
     creds = None
     if SERVICE_ACCOUNT_FILE and os.path.exists(SERVICE_ACCOUNT_FILE):
-        creds = _GoogleCredentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=_SCOPES)
+        creds = _GoogleCredentials.from_service_account_file(
+            SERVICE_ACCOUNT_FILE, scopes=_SCOPES)
     elif SERVICE_ACCOUNT_JSON:
         info = json.loads(SERVICE_ACCOUNT_JSON)
-        creds = _GoogleCredentials.from_service_account_info(info, scopes=_SCOPES)
+        creds = _GoogleCredentials.from_service_account_info(
+            info, scopes=_SCOPES)
     else:
-        raise RuntimeError("Google service account credentials not configured. Set GOOGLE_SERVICE_ACCOUNT_FILE or GOOGLE_SERVICE_ACCOUNT_JSON")
+        raise RuntimeError(
+            "Google service account credentials not configured. Set GOOGLE_SERVICE_ACCOUNT_FILE or GOOGLE_SERVICE_ACCOUNT_JSON")
 
     return gspread.authorize(creds)
+
 
 def _to_safe_value(v):
     """Convert values that are not JSON-serializable to safe string representations."""
@@ -1638,6 +1709,7 @@ def _to_safe_value(v):
     # fallback: cast to string
     return str(v)
 
+
 def order_to_sheet_row(order: dict) -> list:
     """
     Build a sheet row that leaves column A empty and safely converts datetimes.
@@ -1650,7 +1722,6 @@ def order_to_sheet_row(order: dict) -> list:
     IST_1 = ZoneInfo("Asia/Kolkata")
     now_ist = datetime.now(IST_1)
     order_date = now_ist.strftime("%d %b, %H:%M")
-
 
     child_name = _to_safe_value(order.get("name") or "")
     book_style = _to_safe_value(order.get("book_style") or "")
@@ -1672,7 +1743,8 @@ def order_to_sheet_row(order: dict) -> list:
     address = "\n".join([p for p in address_parts if p])
     address = _to_safe_value(address)
 
-    phone = _to_safe_value(shipping.get("phone") or order.get("phone_number") or order.get("customer_phone") or "")
+    phone = _to_safe_value(shipping.get("phone") or order.get(
+        "phone_number") or order.get("customer_phone") or "")
 
     cover_url = order.get("cover_url") or order.get("coverpage_url") or ""
     interior_url = order.get("book_url") or order.get("interior_pdf") or ""
@@ -1715,7 +1787,8 @@ def append_row_to_google_sheet(row: list):
         # Optionally: update DB to mark 'sheet_logged' = True (if you want)
     except Exception as exc:
         # Replace prints with structured logging in production.
-        print(f"[SHEETS][ERROR] failed to append row for order {row[0]}: {exc}")
+        print(
+            f"[SHEETS][ERROR] failed to append row for order {row[0]}: {exc}")
         # Optionally: write failure to a retry queue or DB field.
 
 
@@ -1730,7 +1803,8 @@ async def send_to_google_sheet(order_ids: List[str], background_tasks: Backgroun
       - mark orders_collection.sheet_queued = True (best-effort)
     """
     if not SPREADSHEET_ID:
-        raise HTTPException(status_code=500, detail="GOOGLE_SHEET_ID is not configured")
+        raise HTTPException(
+            status_code=500, detail="GOOGLE_SHEET_ID is not configured")
 
     results = []
     for order_id in order_ids:
@@ -1738,7 +1812,8 @@ async def send_to_google_sheet(order_ids: List[str], background_tasks: Backgroun
         order = orders_collection.find_one({"order_id": order_id})
         if not order:
             print(f"[SHEETS] Order not found: {order_id}")
-            results.append({"order_id": order_id, "status": "error", "message": "Order not found", "step": "database_lookup"})
+            results.append({"order_id": order_id, "status": "error",
+                           "message": "Order not found", "step": "database_lookup"})
             continue
 
         row = order_to_sheet_row(order)
@@ -1748,13 +1823,26 @@ async def send_to_google_sheet(order_ids: List[str], background_tasks: Backgroun
 
         # best-effort: mark queued
         try:
-            orders_collection.update_one({"order_id": order_id}, {"$set": {"sheet_queued": True}})
+            orders_collection.update_one(
+                {"order_id": order_id},
+                {
+                    "$set": {
+                        "sheet_queued": True,
+                        "printer": "Genesis",
+                        "print_status": "sent_to_genesis",
+                        "print_sent_at": datetime.now().isoformat()
+                    }
+                }
+            )
         except Exception as e:
-            print(f"[SHEETS][WARN] failed to set sheet_queued for {order_id}: {e}")
+            print(
+                f"[SHEETS][WARN] failed to set sheet_queued/printer for {order_id}: {e}")
 
-        results.append({"order_id": order_id, "status": "queued", "message": "Queued for sheet append", "step": "queued"})
+        results.append({"order_id": order_id, "status": "queued",
+                       "message": "Queued for sheet append", "step": "queued"})
 
     return results
+
 
 @app.get("/jobs")
 def get_jobs(
@@ -1800,6 +1888,7 @@ def get_jobs(
         "locale": 1,
         "partial_preview": 1,
         "final_preview": 1,
+        "printer": 1,
         "_id": 0
     }
 
@@ -1811,7 +1900,7 @@ def get_jobs(
         shipping_address = doc.get("shipping_address", {})
         if isinstance(shipping_address, dict):
             city = shipping_address.get("city", "")
-            
+
         else:
             city = ""
         result.append({
@@ -1833,6 +1922,7 @@ def get_jobs(
             "locale": doc.get("locale", ""),
             "partial_preview": doc.get("partial_preview", "") or "",
             "final_preview": doc.get("final_preview", "") or "",
+            "printer": doc.get("printer", "") or "",
         })
 
     return result
@@ -2093,9 +2183,10 @@ def send_nudge_email_to_user(email: str, user_name: str | None, child_name: str 
         logger.warning(f"⚠️ Could not find order for job_id={job_id}")
         return
 
-    preview_link = order.get("preview_url", f"https://diffrun.com/preview/{job_id}")
+    preview_link = order.get(
+        "preview_url", f"https://diffrun.com/preview/{job_id}")
 
-    user_name  = ((user_name or "").strip().title()) or "there"
+    user_name = ((user_name or "").strip().title()) or "there"
     child_name = ((child_name or "").strip().title()) or "your child"
 
     html_content = f"""
@@ -2137,13 +2228,15 @@ def send_nudge_email():
         ist = ZoneInfo("Asia/Kolkata")
         now_ist = datetime.now(ist)
         start_ist_date = (now_ist.date() - timedelta(days=1))
-        end_ist_date   =  now_ist.date()
+        end_ist_date = now_ist.date()
 
-        start_dt_ist = datetime(start_ist_date.year, start_ist_date.month, start_ist_date.day, 0, 0, 0, tzinfo=ist)
-        end_dt_ist   = datetime(end_ist_date.year,   end_ist_date.month,   end_ist_date.day,   0, 0, 0, tzinfo=ist)
+        start_dt_ist = datetime(
+            start_ist_date.year, start_ist_date.month, start_ist_date.day, 0, 0, 0, tzinfo=ist)
+        end_dt_ist = datetime(end_ist_date.year,   end_ist_date.month,
+                              end_ist_date.day,   0, 0, 0, tzinfo=ist)
 
         start_utc = start_dt_ist.astimezone(timezone.utc)
-        end_utc   = end_dt_ist.astimezone(timezone.utc)
+        end_utc = end_dt_ist.astimezone(timezone.utc)
 
         pipeline = [
             {"$match": {
@@ -2159,7 +2252,7 @@ def send_nudge_email():
             }},
             # workflows object length == 13
             {"$match": {
-                "$expr": {"$eq": [ {"$size": {"$objectToArray": "$workflows"}}, 13 ]}
+                "$expr": {"$eq": [{"$size": {"$objectToArray": "$workflows"}}, 13]}
             }},
             {"$sort": {"email": 1, "created_at": -1}},
             {"$group": {"_id": "$email", "doc": {"$first": "$$ROOT"}}},
@@ -2169,7 +2262,8 @@ def send_nudge_email():
         ]
 
         candidates = list(orders_collection.aggregate(pipeline))
-        logger.info(f"Found {len(candidates)} nudge candidates for yesterday (IST).")
+        logger.info(
+            f"Found {len(candidates)} nudge candidates for yesterday (IST).")
 
         for user in candidates:
             try:
@@ -2181,11 +2275,13 @@ def send_nudge_email():
                 )
                 orders_collection.update_one(
                     {"job_id": user["job_id"]},
-                    {"$set": {"nudge_sent": True, "nudge_sent_at": datetime.now(timezone.utc)}}
+                    {"$set": {"nudge_sent": True,
+                              "nudge_sent_at": datetime.now(timezone.utc)}}
                 )
                 logger.info(f"✅ Nudge sent to {user['email']}")
             except Exception as e:
-                logger.error(f"❌ Error sending email to {user.get('email')}: {e}")
+                logger.error(
+                    f"❌ Error sending email to {user.get('email')}: {e}")
     except Exception as e:
         logger.error(f"❌ Nudge email task failed: {e}")
 
@@ -2194,15 +2290,18 @@ def send_nudge_email():
 def debug_nudge_candidates():
     ist = ZoneInfo("Asia/Kolkata")
     now_ist = datetime.now(ist)
-    
+
     # Yesterday in IST (00:00 to 23:59)
     yesterday_ist = now_ist.date() - timedelta(days=1)
-    start_yesterday_ist = datetime(yesterday_ist.year, yesterday_ist.month, yesterday_ist.day, 0, 0, 0, tzinfo=ist)
-    end_yesterday_ist = datetime(yesterday_ist.year, yesterday_ist.month, yesterday_ist.day, 23, 59, 59, tzinfo=ist)
-    
+    start_yesterday_ist = datetime(
+        yesterday_ist.year, yesterday_ist.month, yesterday_ist.day, 0, 0, 0, tzinfo=ist)
+    end_yesterday_ist = datetime(
+        yesterday_ist.year, yesterday_ist.month, yesterday_ist.day, 23, 59, 59, tzinfo=ist)
+
     # Today in IST (00:00 to current time)
     today_ist = now_ist.date()
-    start_today_ist = datetime(today_ist.year, today_ist.month, today_ist.day, 0, 0, 0, tzinfo=ist)
+    start_today_ist = datetime(
+        today_ist.year, today_ist.month, today_ist.day, 0, 0, 0, tzinfo=ist)
     end_today_ist = now_ist  # current time
 
     # Convert to UTC for Mongo
@@ -2224,7 +2323,7 @@ def debug_nudge_candidates():
             },
             "workflows": {"$exists": True}
         }},
-        
+
         # Filter for exactly 13 workflows
         {"$match": {
             "$expr": {
@@ -2234,20 +2333,22 @@ def debug_nudge_candidates():
                 ]
             }
         }},
-        
+
         # Group by email to check payment status
         {"$group": {
             "_id": "$email",
             "docs": {"$push": "$$ROOT"},
-            "has_paid_order": {"$max": "$paid"},  # If any order has paid=true, this becomes true
-            "latest_created_at": {"$max": "$created_at"}  # Find the most recent order
+            # If any order has paid=true, this becomes true
+            "has_paid_order": {"$max": "$paid"},
+            # Find the most recent order
+            "latest_created_at": {"$max": "$created_at"}
         }},
-        
+
         # Only include emails where ALL orders are unpaid (has_paid_order is false)
         {"$match": {
             "has_paid_order": False
         }},
-        
+
         # Find the most recent document for each email
         {"$project": {
             "email": "$_id",
@@ -2262,22 +2363,22 @@ def debug_nudge_candidates():
                 ]
             }
         }},
-        
+
         # Replace root with the latest document
         {"$replaceRoot": {"newRoot": "$latest_doc"}},
-        
+
         # Filter for nudge_sent: false or missing
         {"$match": {
             "$or": [{"nudge_sent": False}, {"nudge_sent": {"$exists": False}}]
         }},
-        
+
         # Project only needed fields
         {"$project": {
-            "_id": 0, 
-            "email": 1, 
-            "user_name": 1, 
-            "name": 1, 
-            "job_id": 1, 
+            "_id": 0,
+            "email": 1,
+            "user_name": 1,
+            "name": 1,
+            "job_id": 1,
             "created_at": 1,
             "paid": 1,
             "nudge_sent": 1,
@@ -2286,7 +2387,7 @@ def debug_nudge_candidates():
     ]
 
     results = list(orders_collection.aggregate(pipeline))
-    
+
     # Add debug info to see what time ranges we're querying
     debug_info = {
         "yesterday_ist_range": {
@@ -2309,7 +2410,7 @@ def debug_nudge_candidates():
         "candidates_found": len(results),
         "candidates": results
     }
-    
+
     return debug_info
 
 
@@ -2440,13 +2541,13 @@ IST_OFFSET = timedelta(hours=5, minutes=30)
 TIMESTAMP_FIELD = "time_req_recieved"
 
 INSTANCE_IDS = [
-    "i-0b1f98e12f9344f9f",  
-    "i-071c197c88296ab8a",  
-    "i-03dbcc37d0a59609d",  
+    "i-0b1f98e12f9344f9f",
+    "i-071c197c88296ab8a",
+    "i-03dbcc37d0a59609d",
     "i-00de64646abb34ad2",
     "i-0e9f5ac83b77815a0",
     "i-0e6c27e8b058676f8",
-    "i-0bfbcb4615bc6b3e3",  
+    "i-0bfbcb4615bc6b3e3",
     "i-0b1f98e12f9344f9f",
     "i-071c197c88296ab8a",
     "i-03dbcc37d0a59609d",
@@ -2563,6 +2664,8 @@ def _get_ec2_status_rows():
         return [], f"AWS error: {e}"
     except Exception as e:
         return [], f"Unexpected error: {e}"
+
+
 def _get_ec2_status_rows() -> Tuple[List[dict], Optional[str]]:
     """
     Return (rows, err).  Skips any missing instance IDs instead of failing.
@@ -2602,7 +2705,8 @@ def _get_ec2_status_rows() -> Tuple[List[dict], Optional[str]]:
                     bad = re.findall(r"i-[0-9a-f]+", msg)
                     if not bad:
                         # If we can't parse, skip this whole chunk and move on
-                        logging.warning("EC2: could not parse missing IDs from: %s", msg)
+                        logging.warning(
+                            "EC2: could not parse missing IDs from: %s", msg)
                         break
                     skipped.extend(bad)
                     to_query = [i for i in to_query if i not in bad]
@@ -2642,7 +2746,8 @@ def _get_ec2_status_rows() -> Tuple[List[dict], Optional[str]]:
             break  # exit the inner while after successful call
 
     if skipped:
-        logging.warning("EC2: skipped missing instance IDs: %s", ", ".join(skipped))
+        logging.warning("EC2: skipped missing instance IDs: %s",
+                        ", ".join(skipped))
 
     # IMPORTANT: we return no error so the caller writes 'ec2_status' (not *_error)
     return rows, None
@@ -2810,7 +2915,8 @@ def download_xlsx(from_date: str = Query(...), to_date: str = Query(...)):
                 if not ec2_df.empty:
                     for col in ec2_df.columns:
                         if pd.api.types.is_datetime64tz_dtype(ec2_df[col]):
-                            ec2_df[col] = ec2_df[col].dt.tz_convert('UTC').dt.tz_localize(None)
+                            ec2_df[col] = ec2_df[col].dt.tz_convert(
+                                'UTC').dt.tz_localize(None)
                         elif ec2_df[col].dtype == "object":
                             if ec2_df[col].apply(lambda v: isinstance(v, datetime) and getattr(v, "tzinfo", None) is not None).any():
                                 ec2_df[col] = ec2_df[col].apply(_to_naive_utc)
@@ -2822,17 +2928,20 @@ def download_xlsx(from_date: str = Query(...), to_date: str = Query(...)):
                 ws1 = writer.sheets["pivot"]
                 ws2 = writer.sheets.get("ec2_status")
                 # if ws1:ws1.freeze_panes(1, 0)  # row 2
-                if ws1:ws1.freeze_panes(1, 1)  # row 2, col B
-                if ws2:ws2.freeze_panes(1, 0)
+                if ws1:
+                    ws1.freeze_panes(1, 1)  # row 2, col B
+                if ws2:
+                    ws2.freeze_panes(1, 0)
 
             else:  # openpyxl
                 # ws1 = writer.sheets.get("orders")
                 ws1 = writer.sheets.get("pivot")
                 ws2 = writer.sheets.get("ec2_status")
                 # if ws1 is not None: ws1.freeze_panes = "A2"
-                if ws1 is not None: ws1.freeze_panes = "B2"
-                if ws2 is not None: ws2.freeze_panes = "A2"
-
+                if ws1 is not None:
+                    ws1.freeze_panes = "B2"
+                if ws2 is not None:
+                    ws2.freeze_panes = "A2"
 
         output.seek(0)
         filename = f"darkfantasy_{from_date}_to_{to_date}.xlsx"
@@ -2847,12 +2956,14 @@ def download_xlsx(from_date: str = Query(...), to_date: str = Query(...)):
         # Return the message so you see the real cause in the browser too
         return Response(f"❌ Error building XLSX: {e}", media_type="text/plain", status_code=500)
 
+
 @app.get("/download-xlsx-yippee")
 def download_xlsx_yippee(from_date: str = Query(...), to_date: str = Query(...)):
     try:
         # Validate range (dates are interpreted as UTC-naive, like your original)
         from_dt = datetime.strptime(from_date, "%Y-%m-%d")
-        to_dt = datetime.strptime(to_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
+        to_dt = datetime.strptime(
+            to_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
         if from_dt > to_dt:
             return Response("from_date cannot be after to_date", media_type="text/plain", status_code=400)
 
@@ -2946,7 +3057,8 @@ def download_xlsx_yippee(from_date: str = Query(...), to_date: str = Query(...))
                 if not ec2_df.empty:
                     for col in ec2_df.columns:
                         if pd.api.types.is_datetime64tz_dtype(ec2_df[col]):
-                            ec2_df[col] = ec2_df[col].dt.tz_convert('UTC').dt.tz_localize(None)
+                            ec2_df[col] = ec2_df[col].dt.tz_convert(
+                                'UTC').dt.tz_localize(None)
                         elif ec2_df[col].dtype == "object":
                             if ec2_df[col].apply(lambda v: isinstance(v, datetime) and getattr(v, "tzinfo", None) is not None).any():
                                 ec2_df[col] = ec2_df[col].apply(_to_naive_utc)
@@ -2979,6 +3091,7 @@ def download_xlsx_yippee(from_date: str = Query(...), to_date: str = Query(...))
     except Exception as e:
         return Response(f"❌ Error building XLSX: {e}", media_type="text/plain", status_code=500)
 
+
 def _format_ec2_status_table(rows: List[dict]) -> pd.DataFrame:
     """
     Shape EC2 rows into the exact table:
@@ -2989,8 +3102,8 @@ def _format_ec2_status_table(rows: List[dict]) -> pd.DataFrame:
     if df.empty:
         # return empty frame with expected columns so Excel writer doesn't choke
         return pd.DataFrame(columns=[
-            "Name","InstanceId","State","OnOff","InstanceStatus","SystemStatus",
-            "PublicIP","PrivateIP","LaunchTime_ISO","CheckedAt_IST"
+            "Name", "InstanceId", "State", "OnOff", "InstanceStatus", "SystemStatus",
+            "PublicIP", "PrivateIP", "LaunchTime_ISO", "CheckedAt_IST"
         ])
 
     # Map OnOff 1/0 -> "on"/"off"
@@ -2999,21 +3112,29 @@ def _format_ec2_status_table(rows: List[dict]) -> pd.DataFrame:
     # Resolve statuses from DescribeInstanceStatus (include stopped)
     status_map = {}
     ec2 = boto3.client("ec2", region_name=os.getenv("AWS_REGION", None))
-    ids = [i for i in df.get("InstanceId", []).tolist() if isinstance(i, str) and i.startswith("i-")]
+    ids = [i for i in df.get("InstanceId", []).tolist(
+    ) if isinstance(i, str) and i.startswith("i-")]
     for i in range(0, len(ids), 100):
         chunk = ids[i:i+100]
         try:
-            resp = ec2.describe_instance_status(InstanceIds=chunk, IncludeAllInstances=True)
+            resp = ec2.describe_instance_status(
+                InstanceIds=chunk, IncludeAllInstances=True)
             for st in resp.get("InstanceStatuses", []):
                 iid = st.get("InstanceId", "")
-                inst_status = (st.get("InstanceStatus", {}) or {}).get("Status", "not-applicable")
-                sys_status  = (st.get("SystemStatus", {}) or {}).get("Status", "not-applicable")
-                status_map[iid] = (inst_status or "not-applicable", sys_status or "not-applicable")
+                inst_status = (st.get("InstanceStatus", {}) or {}).get(
+                    "Status", "not-applicable")
+                sys_status = (st.get("SystemStatus", {}) or {}
+                              ).get("Status", "not-applicable")
+                status_map[iid] = (
+                    inst_status or "not-applicable", sys_status or "not-applicable")
         except ClientError as e:
-            logging.warning("describe_instance_status failed for %s: %s", chunk, e)
+            logging.warning(
+                "describe_instance_status failed for %s: %s", chunk, e)
 
-    df["InstanceStatus"] = df["InstanceId"].map(lambda x: status_map.get(x, ("not-applicable","not-applicable"))[0])
-    df["SystemStatus"]  = df["InstanceId"].map(lambda x: status_map.get(x, ("not-applicable","not-applicable"))[1])
+    df["InstanceStatus"] = df["InstanceId"].map(
+        lambda x: status_map.get(x, ("not-applicable", "not-applicable"))[0])
+    df["SystemStatus"] = df["InstanceId"].map(
+        lambda x: status_map.get(x, ("not-applicable", "not-applicable"))[1])
 
     # LaunchTime -> UTC date string (YYYY-MM-DD), safe for Excel
     def _to_naive_utc(x):
@@ -3022,7 +3143,8 @@ def _format_ec2_status_table(rows: List[dict]) -> pd.DataFrame:
         return x
     launch_col = "LaunchTime" if "LaunchTime" in df.columns else "LaunchTime_ISO"
     df["LaunchTime_ISO"] = df.get(launch_col, "").apply(_to_naive_utc).apply(
-        lambda d: d.strftime("%Y-%m-%d") if isinstance(d, datetime) else (str(d) if d else "")
+        lambda d: d.strftime("%Y-%m-%d") if isinstance(d,
+                                                       datetime) else (str(d) if d else "")
     )
 
     # CheckedAt_IST = today's IST date
@@ -3030,8 +3152,8 @@ def _format_ec2_status_table(rows: List[dict]) -> pd.DataFrame:
 
     # Select & order columns
     out = df.reindex(columns=[
-        "Name","InstanceId","State","OnOff","InstanceStatus","SystemStatus",
-        "PublicIP","PrivateIP","LaunchTime_ISO","CheckedAt_IST"
+        "Name", "InstanceId", "State", "OnOff", "InstanceStatus", "SystemStatus",
+        "PublicIP", "PrivateIP", "LaunchTime_ISO", "CheckedAt_IST"
     ])
     # Fill NAs with empty string
     return out.fillna("")
@@ -3040,7 +3162,8 @@ def _format_ec2_status_table(rows: List[dict]) -> pd.DataFrame:
 def _export_xlsx_bytes(from_dt_utc: datetime, to_dt_utc: datetime) -> Tuple[bytes, str]:
     # ---- helpers ----
     def _load_df_for_collection(mongo_collection) -> pd.DataFrame:
-        mongo_filter = {TIMESTAMP_FIELD: {"$gte": from_dt_utc, "$lte": to_dt_utc}}
+        mongo_filter = {TIMESTAMP_FIELD: {
+            "$gte": from_dt_utc, "$lte": to_dt_utc}}
         projection = {"_id": 0}
         data = list(mongo_collection.find(mongo_filter, projection))
         rows_out = []
@@ -3102,6 +3225,7 @@ def _export_xlsx_bytes(from_dt_utc: datetime, to_dt_utc: datetime) -> Tuple[byte
         if "Total" in base.index:
             base = base.drop(index="Total")
         # sort by real date
+
         def _parse_date_idx(idx: pd.Index) -> list:
             out = []
             for v in idx:
@@ -3110,7 +3234,8 @@ def _export_xlsx_bytes(from_dt_utc: datetime, to_dt_utc: datetime) -> Tuple[byte
                 except Exception:
                     out.append(v)
             return out
-        sort_pairs = sorted(zip(_parse_date_idx(base.index), base.index), key=lambda x: x[0])
+        sort_pairs = sorted(zip(_parse_date_idx(base.index),
+                            base.index), key=lambda x: x[0])
         keep_labels = [lbl for _, lbl in sort_pairs[-n_days:]]
         section = base.loc[keep_labels].copy()
         hours = [f"{h:02d}" for h in range(24)]
@@ -3159,10 +3284,12 @@ def _export_xlsx_bytes(from_dt_utc: datetime, to_dt_utc: datetime) -> Tuple[byte
                       key=lambda x: datetime.strptime(x, "%d/%m/%Y") if isinstance(x, str) else x)
     combined = pd.DataFrame(0, index=all_days, columns=hours)
     if not m_hours.empty:
-        m_aligned = m_hours.reindex(index=all_days, columns=hours, fill_value=0)
+        m_aligned = m_hours.reindex(
+            index=all_days, columns=hours, fill_value=0)
         combined = combined.add(m_aligned, fill_value=0)
     if not y_hours.empty:
-        y_aligned = y_hours.reindex(index=all_days, columns=hours, fill_value=0)
+        y_aligned = y_hours.reindex(
+            index=all_days, columns=hours, fill_value=0)
         combined = combined.add(y_aligned, fill_value=0)
     # totals
     if not combined.empty:
@@ -3215,7 +3342,8 @@ def _export_xlsx_bytes(from_dt_utc: datetime, to_dt_utc: datetime) -> Tuple[byte
             ec2_df = _format_ec2_status_table(ec2_rows)
             if not ec2_df.empty:
                 ec2_df["__on__"] = (ec2_df["OnOff"] == "on").astype(int)
-                ec2_df = ec2_df.sort_values(["__on__", "Name", "InstanceId"], ascending=[False, True, True]).drop(columns="__on__")
+                ec2_df = ec2_df.sort_values(["__on__", "Name", "InstanceId"], ascending=[
+                                            False, True, True]).drop(columns="__on__")
             ec2_sheet_name = "ec2_status"
         ec2_df.to_excel(writer, index=False, sheet_name=ec2_sheet_name)
 
@@ -3229,9 +3357,11 @@ def _export_xlsx_bytes(from_dt_utc: datetime, to_dt_utc: datetime) -> Tuple[byte
         if ws is not None:
             for r in [1,                     # "Dark fantasy"
                       1 + pivot_main.shape[0] + 4 + 1,  # "Yippee"
-                      1 + pivot_main.shape[0] + 4 + 1 + pivot_yippee.shape[0] + 4 + 1]:  # "Combined"
+                      # "Combined"
+                      1 + pivot_main.shape[0] + 4 + 1 + pivot_yippee.shape[0] + 4 + 1]:
                 try:
-                    ws.cell(row=r, column=1).font = ws.cell(row=r, column=1).font.copy(bold=True)
+                    ws.cell(row=r, column=1).font = ws.cell(
+                        row=r, column=1).font.copy(bold=True)
                 except Exception:
                     pass
 
@@ -3319,6 +3449,7 @@ def debug_scheduler_jobs():
         out.append({"id": j.id, "next_run_ist": nxt_ist,
                    "trigger": str(j.trigger)})
     return out
+
 
 try:
     scheduler.add_job(
@@ -3511,11 +3642,13 @@ def cron_feedback_emails(limit: int = 200):
 
     return results
 
+
 def run_feedback_emails_job():
     try:
         cron_feedback_emails(limit=200)
     except Exception:
         logger.exception("Error running feedback emails job")
+
 
 @app.get("/orders/meta/by-job/{job_id}")
 def order_meta_by_job(job_id: str):
@@ -3531,10 +3664,12 @@ def order_meta_by_job(job_id: str):
         "book_style": doc.get("book_style")
     }
 
+
 @app.post("/reconcile/mark")
 def mark_reconciled(payload: dict):
     job_id = payload.get("job_id")
-    razorpay_payment_id = payload.get("razorpay_payment_id")  # optional, nice to store
+    razorpay_payment_id = payload.get(
+        "razorpay_payment_id")  # optional, nice to store
 
     if not job_id:
         raise HTTPException(status_code=400, detail="job_id is required")
@@ -3558,6 +3693,7 @@ def mark_reconciled(payload: dict):
 
     return {"ok": True, "matched": result.matched_count, "modified": result.modified_count}
 
+
 @app.post("/debug/run-reconcile-now")
 def debug_run_reconcile_now():
     _hourly_reconcile_and_email()
@@ -3566,6 +3702,7 @@ def debug_run_reconcile_now():
 ##################################
 # START OF ORDER DETAILS LOGIC
 ##################################
+
 
 def _iso(dt: Any) -> Optional[str]:
     if dt is None:
@@ -3579,6 +3716,7 @@ def _iso(dt: Any) -> Optional[str]:
     except Exception:
         return str(dt)
 
+
 def _first_non_empty(d: Dict[str, Any], keys: List[str], default=None):
     for k in keys:
         val = d.get(k)
@@ -3586,10 +3724,11 @@ def _first_non_empty(d: Dict[str, Any], keys: List[str], default=None):
             return val
     return default
 
+
 def _pick_image_list(doc: Dict[str, Any]) -> List[str]:
 
     candidate_keys = [
-        "saved_files",             
+        "saved_files",
     ]
 
     # helper to normalize a value to a list of basenames
@@ -3621,6 +3760,7 @@ def _pick_image_list(doc: Dict[str, Any]) -> List[str]:
 
     return []
 
+
 def _build_order_response(order: Dict[str, Any]) -> Dict[str, Any]:
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
@@ -3631,54 +3771,70 @@ def _build_order_response(order: Dict[str, Any]) -> Dict[str, Any]:
     if job_id:
         user_doc = orders_collection.find_one({"job_id": job_id}) or {}
 
-    child_name   = _first_non_empty(order, ["name"],   default=_first_non_empty(user_doc, ["name"]))
-    child_age    = _first_non_empty(order, ["age"],    default=_first_non_empty(user_doc, ["age"]))
-    child_gender = _first_non_empty(order, ["gender"], default=_first_non_empty(user_doc, ["gender"]))
+    child_name = _first_non_empty(
+        order, ["name"],   default=_first_non_empty(user_doc, ["name"]))
+    child_age = _first_non_empty(
+        order, ["age"],    default=_first_non_empty(user_doc, ["age"]))
+    child_gender = _first_non_empty(
+        order, ["gender"], default=_first_non_empty(user_doc, ["gender"]))
 
     saved_files = _pick_image_list(order) or _pick_image_list(user_doc)
 
     saved_file_urls: list[str] = []
     if saved_files:
-        saved_file_urls = _presigned_urls_for_saved_files(saved_files, expires_in=3600)
+        saved_file_urls = _presigned_urls_for_saved_files(
+            saved_files, expires_in=3600)
 
-    book_id = _first_non_empty(order, ["book_id"], default=_first_non_empty(user_doc, ["book_id"])) or ""
+    book_id = _first_non_empty(
+        order, ["book_id"], default=_first_non_empty(user_doc, ["book_id"])) or ""
     is_twin = _is_twin_book(book_id)
 
-    child1_age = _first_non_empty(order, ["child1_age"], default=_first_non_empty(user_doc, ["child1_age"]))
-    child2_age = _first_non_empty(order, ["child2_age"], default=_first_non_empty(user_doc, ["child2_age"]))
+    child1_age = _first_non_empty(
+        order, ["child1_age"], default=_first_non_empty(user_doc, ["child1_age"]))
+    child2_age = _first_non_empty(
+        order, ["child2_age"], default=_first_non_empty(user_doc, ["child2_age"]))
 
-    child1_files = _coerce_list(order.get("child1_image_filenames") or user_doc.get("child1_image_filenames"))[:3]
-    child2_files = _coerce_list(order.get("child2_image_filenames") or user_doc.get("child2_image_filenames"))[:3]
+    child1_files = _coerce_list(order.get(
+        "child1_image_filenames") or user_doc.get("child1_image_filenames"))[:3]
+    child2_files = _coerce_list(order.get(
+        "child2_image_filenames") or user_doc.get("child2_image_filenames"))[:3]
 
-    child1_input_urls: list[str] = _presigned_urls_for_saved_files(child1_files, expires_in=3600) if child1_files else []
-    child2_input_urls: list[str] = _presigned_urls_for_saved_files(child2_files, expires_in=3600) if child2_files else []
+    child1_input_urls: list[str] = _presigned_urls_for_saved_files(
+        child1_files, expires_in=3600) if child1_files else []
+    child2_input_urls: list[str] = _presigned_urls_for_saved_files(
+        child2_files, expires_in=3600) if child2_files else []
 
     child_details = {
         "name": (child_name or ""),
-        "age":  (child_age  or ""),                
+        "age":  (child_age or ""),
         "gender": (child_gender or "").lower(),
         "saved_files": saved_files[:3],
         "saved_file_urls": saved_file_urls,
         "is_twin": bool(is_twin),
         "child1_age": child1_age if child1_age not in (None, "") else None,
         "child2_age": child2_age if is_twin and child2_age not in (None, "") else None,
-        "child1_image_filenames": child1_files,     # as stored in DB (for traceability)
+        # as stored in DB (for traceability)
+        "child1_image_filenames": child1_files,
         "child2_image_filenames": child2_files,
-        "child1_input_images": child1_input_urls,   # presigned URLs from replicacomfy/input/<filename>
+        # presigned URLs from replicacomfy/input/<filename>
+        "child1_input_images": child1_input_urls,
         "child2_input_images": child2_input_urls,
     }
 
     # customer details
-    customer_email = _first_non_empty(order, ["email", "customer_email", "paypal_email"], default="")
+    customer_email = _first_non_empty(
+        order, ["email", "customer_email", "paypal_email"], default="")
     ship = order.get("shipping_address", {}) or {}
-    phone_number = _first_non_empty(order, ["phone_number", "phone"], default=_first_non_empty(ship, ["phone"], default=""))
+    phone_number = _first_non_empty(
+        order, ["phone_number", "phone"], default=_first_non_empty(ship, ["phone"], default=""))
     customer_details = {
         "user_name": order.get("user_name", ""),
         "email": customer_email or "",
         "phone_number": phone_number or "",
     }
 
-    cover_url_from_gen = _find_cover_image_url_from_generations(job_id, expires_in=3600)
+    cover_url_from_gen = _find_cover_image_url_from_generations(
+        job_id, expires_in=3600)
 
     # order financials/ids
     order_details = {
@@ -3740,6 +3896,7 @@ def _build_order_response(order: Dict[str, Any]) -> Dict[str, Any]:
     })
     return response
 
+
 @app.get("/orders/{order_id}")
 def get_order_detail(order_id: str):
     order = orders_collection.find_one({"order_id": order_id})
@@ -3747,13 +3904,15 @@ def get_order_detail(order_id: str):
         raise HTTPException(status_code=404, detail="Order not found")
     return _build_order_response(order)
 
+
 class ShippingAddressUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     street: Optional[str] = None
     city:   Optional[str] = None
     state:  Optional[str] = None
-    country:Optional[str] = None
+    country: Optional[str] = None
     zip:    Optional[str] = Field(None, alias="postal_code")
+
 
 class TimelineUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -3762,6 +3921,7 @@ class TimelineUpdate(BaseModel):
     approved_at:   Optional[str] = None
     print_sent_at: Optional[str] = None
     shipped_at:    Optional[str] = None
+
 
 class OrderUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -3783,27 +3943,30 @@ class OrderUpdate(BaseModel):
     book_url:           Optional[str] = None
     user_name: Optional[str] = None
     email:     Optional[EmailStr] = None
-    phone:     Optional[str] = None 
+    phone:     Optional[str] = None
     cust_status: Optional[str] = None
     shipping_address: Optional[ShippingAddressUpdate] = None
     timeline:         Optional[TimelineUpdate] = None
     order_id: Optional[str] = None
     tracking_code: Optional[str] = None
 
+
 IMMUTABLE_PATHS = {
     "saved_files",
     "child.saved_files",
     "child.saved_file_urls",
-    "child.child1_input_images", 
-    "child.child2_input_images",    
-    "child.child1_image_filenames", 
-    "child.child2_image_filenames", 
+    "child.child1_input_images",
+    "child.child2_input_images",
+    "child.child1_image_filenames",
+    "child.child2_image_filenames",
     "cover_image",
     "order.cover_image",
 }
 
+
 def _is_forbidden(path: str) -> bool:
     return any(path == p or path.startswith(p + ".") for p in IMMUTABLE_PATHS)
+
 
 @app.patch("/orders/{order_id}")
 def patch_order(order_id: str, update: OrderUpdate):
@@ -3816,15 +3979,17 @@ def patch_order(order_id: str, update: OrderUpdate):
             if sv is not None:
                 path = f"shipping_address.{sk}"
                 if _is_forbidden(path):
-                    raise HTTPException(status_code=400, detail=f"Field '{path}' is not editable")
+                    raise HTTPException(
+                        status_code=400, detail=f"Field '{path}' is not editable")
                 set_ops[path] = sv
 
     if "timeline" in payload and payload["timeline"]:
         for tk, tv in payload["timeline"].items():
             if tv is not None:
-                path = tk 
+                path = tk
                 if _is_forbidden(path):
-                    raise HTTPException(status_code=400, detail=f"Field '{path}' is not editable")
+                    raise HTTPException(
+                        status_code=400, detail=f"Field '{path}' is not editable")
                 set_ops[path] = tv
 
     field_map = {
@@ -3853,7 +4018,8 @@ def patch_order(order_id: str, update: OrderUpdate):
     for incoming, doc_path in field_map.items():
         if incoming in payload and payload[incoming] is not None:
             if _is_forbidden(doc_path):
-                raise HTTPException(status_code=400, detail=f"Field '{doc_path}' is not editable")
+                raise HTTPException(
+                    status_code=400, detail=f"Field '{doc_path}' is not editable")
             set_ops[doc_path] = payload[incoming]
 
     if not set_ops:
@@ -3862,7 +4028,8 @@ def patch_order(order_id: str, update: OrderUpdate):
             raise HTTPException(status_code=404, detail="Order not found")
         return {"updated": False, "order": _build_order_response(existing)}
 
-    res = orders_collection.update_one({"order_id": order_id}, {"$set": set_ops})
+    res = orders_collection.update_one(
+        {"order_id": order_id}, {"$set": set_ops})
     if res.matched_count == 0:
         raise HTTPException(status_code=404, detail="Order not found")
 
@@ -3877,13 +4044,17 @@ def _get_s3_client() -> Tuple[boto3.client, str]:
     secret_key = os.getenv("AWS_SECRET_ACCESS_KEY", "").strip()
 
     if not bucket:
-        raise HTTPException(status_code=500, detail="REPLICACOMFY_BUCKET not configured")
+        raise HTTPException(
+            status_code=500, detail="REPLICACOMFY_BUCKET not configured")
     if not region:
-        raise HTTPException(status_code=500, detail="AWS_REGION not configured")
+        raise HTTPException(
+            status_code=500, detail="AWS_REGION not configured")
     if not access_key or not secret_key:
-        raise HTTPException(status_code=500, detail="AWS credentials not configured")
+        raise HTTPException(
+            status_code=500, detail="AWS credentials not configured")
 
-    cfg = Config(signature_version="s3v4", region_name=region, retries={"max_attempts": 3, "mode": "standard"})
+    cfg = Config(signature_version="s3v4", region_name=region,
+                 retries={"max_attempts": 3, "mode": "standard"})
     s3 = boto3.client(
         "s3",
         region_name=region,
@@ -3921,19 +4092,24 @@ def _presigned_urls_for_saved_files(files: List[str], expires_in: int = 3600) ->
         try:
             # Verify the object exists before signing
             s3.head_object(Bucket=bucket, Key=key)
-            urls.append(_generate_presigned_url(s3, bucket, key, expires_in=expires_in))
+            urls.append(_generate_presigned_url(
+                s3, bucket, key, expires_in=expires_in))
         except NoCredentialsError:
-            raise HTTPException(status_code=500, detail="AWS credentials not available")
+            raise HTTPException(
+                status_code=500, detail="AWS credentials not available")
         except PartialCredentialsError:
-            raise HTTPException(status_code=500, detail="AWS credentials are incomplete")
+            raise HTTPException(
+                status_code=500, detail="AWS credentials are incomplete")
         except ClientError as e:
             code = getattr(e, "response", {}).get("Error", {}).get("Code")
             if code in ("404", "NoSuchKey", "NotFound", "AccessDenied"):
                 # Skip silently—don’t break the whole order response
                 continue
-            raise HTTPException(status_code=502, detail="S3 error while generating image URLs")
+            raise HTTPException(
+                status_code=502, detail="S3 error while generating image URLs")
         except Exception:
-            raise HTTPException(status_code=502, detail="Unexpected error while generating image URLs")
+            raise HTTPException(
+                status_code=502, detail="Unexpected error while generating image URLs")
     return urls
 
 
@@ -3942,14 +4118,16 @@ def _get_s3_client_generic() -> boto3.client:
     access = (os.getenv("AWS_ACCESS_KEY_ID") or "").strip()
     secret = (os.getenv("AWS_SECRET_ACCESS_KEY") or "").strip()
     if not region or not access or not secret:
-        raise HTTPException(status_code=500, detail="AWS credentials/region not configured")
+        raise HTTPException(
+            status_code=500, detail="AWS credentials/region not configured")
 
     return boto3.client(
         "s3",
         region_name=region,
         aws_access_key_id=access,
         aws_secret_access_key=secret,
-        endpoint_url=f"https://s3.{region}.amazonaws.com",  # force regional endpoint
+        # force regional endpoint
+        endpoint_url=f"https://s3.{region}.amazonaws.com",
         config=Config(
             signature_version="s3v4",
             retries={"max_attempts": 3, "mode": "standard"},
@@ -3989,7 +4167,8 @@ def _find_cover_image_url_from_generations(job_id: str, expires_in: int = 3600) 
     if not objs:
         return None
 
-    preferred = [o for o in objs if str(o.get("Key", "")).lower().endswith("_001.jpg")]
+    preferred = [o for o in objs if str(
+        o.get("Key", "")).lower().endswith("_001.jpg")]
     chosen = min(preferred or objs, key=lambda o: o.get("LastModified"))
 
     try:
@@ -4007,10 +4186,12 @@ def _find_cover_image_url_from_generations(job_id: str, expires_in: int = 3600) 
     except ClientError:
         return None
 
+
 def _is_twin_book(book_id: str) -> bool:
     b = (book_id or "").strip().lower()
     # Adjust the identifiers below to your catalog if needed
     return any(k in b for k in ("twin", "bb", "bg", "gg", "twin_boy_girl", "twin_girl_girl", "twin_boy_boy"))
+
 
 def _get_child_age(order: Dict[str, Any], idx: int) -> Optional[Union[int, str]]:
 
@@ -4039,6 +4220,7 @@ def _get_child_age(order: Dict[str, Any], idx: int) -> Optional[Union[int, str]]
 
     return None
 
+
 def _coerce_list(v: Any) -> List[str]:
     if not v:
         return []
@@ -4046,22 +4228,26 @@ def _coerce_list(v: Any) -> List[str]:
         return [str(x) for x in v if x is not None and str(x).strip()]
     return [str(v)]
 
+
 def _basename_list(files: List[str]) -> List[str]:
     return [os.path.basename(x).strip() for x in files if x]
 
+
 def _pick_saved_files_for_child(order: Dict[str, Any], idx: int) -> List[str]:
-  
+
     child_key = f"child{idx}"
     child = order.get(child_key) or {}
     if isinstance(child, dict):
-        files = _coerce_list(child.get("saved_files") or child.get("images") or child.get("files"))
+        files = _coerce_list(child.get("saved_files")
+                             or child.get("images") or child.get("files"))
         if files:
             return files
 
     # children array
     children = order.get("children") or order.get("kids") or []
     if isinstance(children, list) and len(children) >= idx and isinstance(children[idx - 1], dict):
-        files = _coerce_list(children[idx - 1].get("saved_files") or children[idx - 1].get("images"))
+        files = _coerce_list(
+            children[idx - 1].get("saved_files") or children[idx - 1].get("images"))
         if files:
             return files
 
@@ -4083,8 +4269,9 @@ def _pick_saved_files_for_child(order: Dict[str, Any], idx: int) -> List[str]:
             return files
 
     return []
-    
+
 # JOB_ID Detail API
+
 
 @app.get("/jobs/{job_id}/mini")
 def get_job_mini(job_id: str) -> Dict[str, Any]:
@@ -4092,7 +4279,8 @@ def get_job_mini(job_id: str) -> Dict[str, Any]:
     if not order:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    email = _first_non_empty(order, ["email", "customer_email", "paypal_email"], default="")
+    email = _first_non_empty(
+        order, ["email", "customer_email", "paypal_email"], default="")
     book_id = order.get("book_id", "") or ""
     is_twin = _is_twin_book(book_id)
 
@@ -4102,7 +4290,8 @@ def get_job_mini(job_id: str) -> Dict[str, Any]:
     )
 
     saved_files = _pick_image_list(order)
-    input_image_urls = _presigned_urls_for_saved_files(saved_files, expires_in=3600) if saved_files else []
+    input_image_urls = _presigned_urls_for_saved_files(
+        saved_files, expires_in=3600) if saved_files else []
 
     child1_filenames = order.get("child1_image_filenames") or []
     child2_filenames = order.get("child2_image_filenames") or []
@@ -4111,11 +4300,15 @@ def get_job_mini(job_id: str) -> Dict[str, Any]:
         child1_filenames = [child1_filenames]
     if not isinstance(child2_filenames, list):
         child2_filenames = [child2_filenames]
-    child1_filenames = [str(x).strip() for x in child1_filenames if str(x).strip()][:3]
-    child2_filenames = [str(x).strip() for x in child2_filenames if str(x).strip()][:3]
+    child1_filenames = [str(x).strip()
+                        for x in child1_filenames if str(x).strip()][:3]
+    child2_filenames = [str(x).strip()
+                        for x in child2_filenames if str(x).strip()][:3]
 
-    child1_input_images = _presigned_urls_for_saved_files(child1_filenames, expires_in=3600) if child1_filenames else []
-    child2_input_images = _presigned_urls_for_saved_files(child2_filenames, expires_in=3600) if child2_filenames else []
+    child1_input_images = _presigned_urls_for_saved_files(
+        child1_filenames, expires_in=3600) if child1_filenames else []
+    child2_input_images = _presigned_urls_for_saved_files(
+        child2_filenames, expires_in=3600) if child2_filenames else []
 
     return {
         "job_id": job_id,
@@ -4133,9 +4326,9 @@ def get_job_mini(job_id: str) -> Dict[str, Any]:
         "approved": bool(order.get("approved", False)),
         "child1_age": _get_child_age(order, 1),
         "child2_age": _get_child_age(order, 2) if is_twin else None,
-        "child1_image_filenames": child1_filenames, 
+        "child1_image_filenames": child1_filenames,
         "child2_image_filenames": child2_filenames,
-        "child1_input_images": child1_input_images,  
+        "child1_input_images": child1_input_images,
         "child2_input_images": child2_input_images,
         "is_twin": is_twin,
     }

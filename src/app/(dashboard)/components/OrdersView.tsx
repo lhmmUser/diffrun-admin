@@ -36,6 +36,7 @@ type RawOrder = {
   locale?: string;
   shippedAt?: string;
   quantity?: number;
+  printer?: string;
 };
 
 type Order = {
@@ -60,6 +61,7 @@ type Order = {
   locale: string;
   shippedAt: string;
   quantity: number;
+  printer: string;
 };
 
 type PrinterResponse = {
@@ -305,7 +307,6 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
         status: order.status || "",
         bookId: order.bookId || "",
         bookStyle: order.bookStyle || "",
-        printStatus: order.printStatus || "",
         feedback_email: order.feedback_email === true,
         printApproval: typeof order.print_approval === "boolean" ? order.print_approval : "not found",
         discountCode: order.discount_code || "",
@@ -313,6 +314,8 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
         locale: order.locale || "",
         shippedAt: order.shippedAt || "",
         quantity: order.quantity || 1,
+        printStatus: (order.printStatus ?? '') as string,
+        printer: (order.printer ?? '') as string,
       }));
 
       setOrders(transformed);
@@ -382,12 +385,14 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
         // Initialize progress for all selected orders
         const selectedOrderIds = Array.from(selectedOrders);
         console.log('selectedOrderIds', selectedOrderIds);
-        setPrintResults(selectedOrderIds.map(orderId => ({
-          order_id: orderId,
-          status: 'processing',
-          message: 'Waiting to be processed...',
-          step: 'queued'
-        })));
+        setPrintResults(
+          selectedOrderIds.map((orderId) => ({
+            order_id: orderId,
+            status: 'processing',
+            message: 'Waiting to be processed...',
+            step: 'queued',
+          }))
+        );
 
         const response = await fetch(`${baseUrl}/orders/approve-printing`, {
           method: 'POST',
@@ -405,15 +410,17 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
         setPrintResults(results);
 
         // Handle the results
-        const successfulOrders = results.filter(r => r.status === 'success');
-        const failedOrders = results.filter(r => r.status === 'error');
+        const successfulOrders = results.filter((r) => r.status === 'success');
+        const failedOrders = results.filter((r) => r.status === 'error');
 
         if (successfulOrders.length > 0) {
           alert(`Successfully sent ${successfulOrders.length} orders to printer`);
         }
 
         if (failedOrders.length > 0) {
-          alert(`Failed to send ${failedOrders.length} orders to printer. Check console for details.`);
+          alert(
+            `Failed to send ${failedOrders.length} orders to printer. Check console for details.`
+          );
           console.error('Failed orders:', failedOrders);
         }
 
@@ -422,44 +429,44 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
 
         // Trigger a refetch of orders to update their status
         const params = new URLSearchParams();
-        if (filterStatus !== "all") params.append("filter_status", filterStatus);
-        if (filterBookStyle !== "all") params.append("filter_book_style", filterBookStyle);
-        params.append("sort_by", sortBy);
-        params.append("sort_dir", sortDir);
+        if (filterStatus !== 'all') params.append('filter_status', filterStatus);
+        if (filterBookStyle !== 'all') params.append('filter_book_style', filterBookStyle);
+        params.append('sort_by', sortBy);
+        params.append('sort_dir', sortDir);
 
         const ordersRes = await fetch(`${baseUrl}/orders?${params.toString()}`);
         console.log(baseUrl, 'baseUrl');
         const rawData: RawOrder[] = await ordersRes.json();
 
         const transformed: Order[] = rawData.map((order: RawOrder): Order => {
-
           return {
-            orderId: order.order_id || "N/A",
-            jobId: order.job_id || "N/A",
-            coverPdf: order.coverPdf || "",
-            interiorPdf: order.interiorPdf || "",
-            previewUrl: order.previewUrl || "",
-            name: order.name || "",
-            city: order.city || "",
+            orderId: order.order_id || 'N/A',
+            jobId: order.job_id || 'N/A',
+            coverPdf: order.coverPdf || '',
+            interiorPdf: order.interiorPdf || '',
+            previewUrl: order.previewUrl || '',
+            name: order.name || '',
+            city: order.city || '',
             price: order.price || 0,
-            paymentDate: order.paymentDate || "",
-            approvalDate: order.approvalDate || "",
-            status: order.status || "",
-            bookId: order.bookId || "",
-            bookStyle: order.bookStyle || "",
-            printStatus: order.printStatus || "",
+            paymentDate: order.paymentDate || '',
+            approvalDate: order.approvalDate || '',
+            status: order.status || '',
+            bookId: order.bookId || '',
+            bookStyle: order.bookStyle || '',
+            printStatus: order.printStatus || '',
             feedback_email: false,
             printApproval: (() => {
-              if (typeof order.print_approval === "boolean") return order.print_approval;
+              if (typeof order.print_approval === 'boolean') return order.print_approval;
               console.warn(`⚠️ print_approval missing or invalid for order:`, order);
-              return "not found";
+              return 'not found';
             })(),
 
-            discountCode: order.discount_code || "",
-            currency: order.currency || "INR", // fallback to INR
-            locale: order.locale || "", // default locale
-            shippedAt: order.shippedAt || "",
+            discountCode: order.discount_code || '',
+            currency: order.currency || 'INR', // fallback to INR
+            locale: order.locale || '', // default locale
+            shippedAt: order.shippedAt || '',
             quantity: order.quantity || 1,
+            printer: (order.printer ?? '') as string,
           };
         });
 
@@ -471,12 +478,159 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
         }, 5000);
       } catch (error) {
         console.error('Error sending orders to printer:', error);
-        setPrintResults([{
-          order_id: 'system',
-          status: 'error',
-          message: error instanceof Error ? error.message : 'Failed to send orders to printer',
-          step: 'api_request'
-        }]);
+        setPrintResults([
+          {
+            order_id: 'system',
+            status: 'error',
+            message:
+              error instanceof Error ? error.message : 'Failed to send orders to printer',
+            step: 'api_request',
+          },
+        ]);
+      }
+    } else if (action === 'send_to_genesis') {
+      // NEW: Send selected orders to Genesis (Google Sheet)
+      try {
+        setShowProgress(true);
+        setPrintResults([]);
+
+        // Prepare selected order IDs and init progress UI
+        const selectedOrderIds = Array.from(selectedOrders);
+        if (selectedOrderIds.length === 0) {
+          setShowProgress(false);
+          return;
+        }
+        console.log('send_to_genesis selectedOrderIds', selectedOrderIds);
+        setPrintResults(
+          selectedOrderIds.map((orderId) => ({
+            order_id: orderId,
+            status: 'processing',
+            message: 'Queued for Google Sheets...',
+            step: 'queued',
+          }))
+        );
+
+        // Helper: try POST with JSON array first (common for FastAPI List[str]),
+        // if server returns 422 validation error try sending { order_ids: [...] }.
+        const trySend = async (): Promise<Response> => {
+          const url = `${baseUrl}/orders/send-to-google-sheet`;
+
+          // First attempt: raw JSON array
+          let res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(selectedOrderIds),
+          });
+
+          // If validation error (likely wrong shape), try wrapped object fallback
+          if (res.status === 422) {
+            console.warn('Genesis API returned 422 for array body — retrying with wrapped object');
+            res = await fetch(url, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ order_ids: selectedOrderIds }),
+            });
+          }
+
+          return res;
+        };
+
+        const response = await trySend();
+
+        // If still not ok, surface the error body if present
+        if (!response.ok) {
+          let errorText = `${response.status} ${response.statusText}`;
+          try {
+            const errJson = await response.json();
+            errorText = errJson.detail || JSON.stringify(errJson);
+          } catch (e) {
+            // ignore json parse errors, keep text
+          }
+          throw new Error(`Failed to send to Genesis: ${errorText}`);
+        }
+
+        // Expecting similar shaped response (list of result objects)
+        const results: PrinterResponse[] = await response.json();
+        setPrintResults(results);
+
+        // Show success/failure summary
+        const successfulOrders = results.filter((r) => r.status === 'success');
+        const failedOrders = results.filter((r) => r.status === 'error');
+
+        if (successfulOrders.length > 0) {
+          alert(`Successfully queued ${successfulOrders.length} orders to Genesis`);
+        }
+        if (failedOrders.length > 0) {
+          alert(
+            `Failed to queue ${failedOrders.length} orders to Genesis. Check console for details.`
+          );
+          console.error('Genesis failed orders:', failedOrders);
+        }
+
+        // Clear selection and refresh orders list (same as approve flow)
+        setSelectedOrders(new Set());
+
+        const params = new URLSearchParams();
+        if (filterStatus !== 'all') params.append('filter_status', filterStatus);
+        if (filterBookStyle !== 'all') params.append('filter_book_style', filterBookStyle);
+        params.append('sort_by', sortBy);
+        params.append('sort_dir', sortDir);
+
+        const ordersRes = await fetch(`${baseUrl}/orders?${params.toString()}`);
+        const rawData: RawOrder[] = await ordersRes.json();
+
+        const transformed: Order[] = rawData.map((order: RawOrder): Order => {
+          return {
+            orderId: order.order_id || 'N/A',
+            jobId: order.job_id || 'N/A',
+            coverPdf: order.coverPdf || '',
+            interiorPdf: order.interiorPdf || '',
+            previewUrl: order.previewUrl || '',
+            name: order.name || '',
+            city: order.city || '',
+            price: order.price || 0,
+            paymentDate: order.paymentDate || '',
+            approvalDate: order.approvalDate || '',
+            status: order.status || '',
+            bookId: order.bookId || '',
+            bookStyle: order.bookStyle || '',
+            printStatus: order.printStatus || '',
+            feedback_email: false,
+            printApproval: (() => {
+              if (typeof order.print_approval === 'boolean') return order.print_approval;
+              console.warn(`⚠️ print_approval missing or invalid for order:`, order);
+              return 'not found';
+            })(),
+
+            discountCode: order.discount_code || '',
+            currency: order.currency || 'INR',
+            locale: order.locale || '',
+            shippedAt: order.shippedAt || '',
+            quantity: order.quantity || 1,
+            printer: (order.printer ?? '') as string,
+          };
+        });
+
+        setOrders(transformed);
+
+        // Hide progress after short delay so user can read result modal
+        setTimeout(() => {
+          setShowProgress(false);
+        }, 5000);
+      } catch (error) {
+        console.error('Error sending orders to Genesis:', error);
+        setPrintResults([
+          {
+            order_id: 'system',
+            status: 'error',
+            message: error instanceof Error ? error.message : 'Failed to send orders to Genesis',
+            step: 'api_request',
+          },
+        ]);
+        // keep progress visible so user can read error; hide after 8s
+        setTimeout(() => {
+          setShowProgress(false);
+        }, 8000);
       }
     } else if (action === 'reject') {
       console.log(`Performing ${action} on orders:`, Array.from(selectedOrders));
@@ -485,13 +639,13 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
     } else if (action === 'request_feedback') {
       try {
         for (const orderId of selectedOrders) {
-          const jobId = orders.find(o => o.orderId === orderId)?.jobId;
+          const jobId = orders.find((o) => o.orderId === orderId)?.jobId;
           if (!jobId) continue;
 
           const res = await fetch(`${baseUrl}/send-feedback-email/${jobId}`, { method: 'POST' });
           console.log(baseUrl, 'baseUrl');
           if (res.ok) {
-            setSentFeedbackOrders(prev => new Set(prev).add(jobId));
+            setSentFeedbackOrders((prev) => new Set(prev).add(jobId));
             await fetchOrders();
           } else {
             const err = await res.json();
@@ -500,13 +654,13 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
         }
         alert(`✅ Feedback email sent for ${selectedOrders.size} orders`);
       } catch (err) {
-        console.error("Error sending feedback email:", err);
-        alert("❌ Something went wrong while sending the email.");
+        console.error('Error sending feedback email:', err);
+        alert('❌ Something went wrong while sending the email.');
       }
     } else if (action === 'unapprove') {
       try {
         const selectedJobIds = Array.from(selectedOrders)
-          .map(orderId => orders.find(o => o.orderId === orderId)?.jobId)
+          .map((orderId) => orders.find((o) => o.orderId === orderId)?.jobId)
           .filter(Boolean);
 
         const response = await fetch(`${baseUrl}/orders/unapprove`, {
@@ -525,11 +679,14 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
         setSelectedOrders(new Set()); // Clear selection after unapproval
         fetchOrders(); // Refresh orders to reflect changes
       } catch (error) {
-        console.error("Error unapproving orders:", error);
-        alert(`❌ Failed to unapprove orders: ${error instanceof Error ? error.message : 'Unknown error'}`);
+        console.error('Error unapproving orders:', error);
+        alert(
+          `❌ Failed to unapprove orders: ${error instanceof Error ? error.message : 'Unknown error'
+          }`
+        );
       }
-    } else if (action === "mark_green" || action === "mark_red") {
-      const status = action === "mark_green" ? "green" : "red";
+    } else if (action === 'mark_green' || action === 'mark_red') {
+      const status = action === 'mark_green' ? 'green' : 'red';
       const orderIds = Array.from(selectedOrders);
       if (orderIds.length === 0) return;
 
@@ -539,8 +696,8 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
             const res = await fetch(
               `${baseUrl}/orders/set-cust-status/${encodeURIComponent(orderId)}`,
               {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ status }),
               }
             );
@@ -552,14 +709,14 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
           })
         );
 
-        const successes = results.filter(r => r.status === "fulfilled").length;
-        const failures = results.filter(r => r.status === "rejected");
+        const successes = results.filter((r) => r.status === 'fulfilled').length;
+        const failures = results.filter((r) => r.status === 'rejected');
 
         if (successes > 0) {
           alert(`Set ${status.toUpperCase()} for ${successes} order(s)`);
         }
         if (failures.length > 0) {
-          console.error("Failed to set status for:", failures);
+          console.error('Failed to set status for:', failures);
           alert(`❌ Failed to set status for ${failures.length} order(s). Check console for details.`);
         }
 
@@ -568,11 +725,11 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
         setSelectedOrders(new Set());
       } catch (e) {
         console.error(e);
-        alert("❌ Something went wrong while updating statuses.");
+        alert('❌ Something went wrong while updating statuses.');
       }
     }
+  };
 
-  }
 
   const hasSentFeedbackOrders = () => {
     return Array.from(selectedOrders).some(orderId => {
@@ -683,7 +840,19 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
             : 'bg-green-600 text-white hover:bg-green-700'
             }`}
         >
-          Approve Printing
+          Send to Cloudprinter
+        </button>
+
+        <button
+          onClick={() => handleAction('send_to_genesis')}
+          disabled={selectedOrders.size === 0 || hasNonApprovedOrders()}
+          title={hasNonApprovedOrders() ? "All selected orders must be approved before printing" : ""}
+          className={`px-4 py-2 rounded text-sm font-medium transition ${selectedOrders.size === 0 || hasNonApprovedOrders()
+            ? 'bg-gray-200 text-gray-500 cursor-not-allowed'
+            : 'bg-green-600 text-white hover:bg-green-700'
+            }`}
+        >
+          Send to Genesis
         </button>
 
         <button
@@ -926,8 +1095,15 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
                 <td className="px-2">{order.interiorPdf ? <a href={order.interiorPdf} target="_blank" className="text-blue-600 hover:underline">View PDF</a> : "-"}</td>
 
                 <td className="px-2">
-                  <span className={`px-2 py-1 rounded text-xs font-medium ${order.printStatus === "sent_to_printer" ? "bg-blue-100 text-blue-800" : "bg-gray-100 text-gray-800"}`}>
-                    {order.printStatus === "sent_to_printer" ? "Sent" : "-"}
+                  {/* Show printer name (Genesis / Cloudprinter) when present, else fallback to '-' */}
+                  <span
+                    className={`px-2 py-1 rounded text-xs font-medium ${
+                      // use a positive style when any "sent" status exists
+                      (order.printStatus && order.printStatus.startsWith("sent")) ? "bg-blue-100 text-blue-800" : "bg-gray-100 text-gray-800"
+                      }`}
+                    title={order.printer ? `Printer: ${order.printer}` : (order.printStatus || "")}
+                  >
+                    {order.printer ? order.printer : (order.printStatus && order.printStatus.startsWith("sent") ? "Sent" : "-")}
                   </span>
                 </td>
                 <td className="px-2 text-xs text-center">
