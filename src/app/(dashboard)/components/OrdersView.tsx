@@ -274,6 +274,16 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
     });
   };
 
+  // NEW: block Genesis if any selected order is not India (IN)
+  const hasNonIndiaSelectedOrders = () => {
+    return Array.from(selectedOrders).some(orderId => {
+      const order = orders.find(o => o.orderId === orderId);
+      // treat anything not exactly "IN" as non-India
+      return order && order.locale !== "IN";
+    });
+  };
+
+
   const fetchOrders = async () => {
     try {
       const params = new URLSearchParams();
@@ -845,15 +855,27 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
 
         <button
           onClick={() => handleAction('send_to_genesis')}
-          disabled={selectedOrders.size === 0 || hasNonApprovedOrders()}
-          title={hasNonApprovedOrders() ? "All selected orders must be approved before printing" : ""}
-          className={`px-4 py-2 rounded text-sm font-medium transition ${selectedOrders.size === 0 || hasNonApprovedOrders()
-            ? 'bg-gray-200 text-gray-500 cursor-not-allowed'
-            : 'bg-green-600 text-white hover:bg-green-700'
-            }`}
+          disabled={
+            selectedOrders.size === 0 ||
+            hasNonApprovedOrders() ||
+            hasNonIndiaSelectedOrders()
+          }
+          title={
+            hasNonApprovedOrders()
+              ? "All selected orders must be approved before sending"
+              : hasNonIndiaSelectedOrders()
+                ? "Send to Genesis is available only for India (IN) orders"
+                : ""
+          }
+          className={`px-4 py-2 rounded text-sm font-medium transition ${
+            selectedOrders.size === 0 || hasNonApprovedOrders() || hasNonIndiaSelectedOrders()
+              ? 'bg-gray-200 text-gray-500 cursor-not-allowed'
+              : 'bg-green-600 text-white hover:bg-green-700'
+          }`}
         >
           Send to Genesis
         </button>
+
 
         <button
           onClick={() => handleAction('reject')}

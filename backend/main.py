@@ -1745,6 +1745,8 @@ def order_to_sheet_row(order: dict) -> list:
 
     phone = _to_safe_value(shipping.get("phone") or order.get(
         "phone_number") or order.get("customer_phone") or "")
+    
+    quantity = int(order.get("quantity", 1) or 1)
 
     cover_url = order.get("cover_url") or order.get("coverpage_url") or ""
     interior_url = order.get("book_url") or order.get("interior_pdf") or ""
@@ -1765,12 +1767,23 @@ def order_to_sheet_row(order: dict) -> list:
         address,                   # H
         phone,                     # I
         cover_link_formula,        # J
-        interior_link_formula      # K
+        interior_link_formula,      # K
+        quantity,            # L        
     ]
 
     # ensure every element is a primitive (str/int/float/bool)
     row = [_to_safe_value(x) for x in row]
     return row
+
+def _ensure_quantity_header(worksheet):
+    """Ensure the header 'Quantity' exists in column L (index 12)."""
+    try:
+        header = worksheet.row_values(1)
+        if len(header) < 12 or header[11].strip() == "":
+            worksheet.update_cell(1, 12, "Quantity")
+            print("[SHEETS] Added missing 'Quantity' header in column L")
+    except Exception as e:
+        print(f"[SHEETS][WARN] Could not verify Quantity header: {e}")
 
 
 def append_row_to_google_sheet(row: list):
@@ -1782,66 +1795,83 @@ def append_row_to_google_sheet(row: list):
         client = get_gspread_client()
         sh = client.open_by_key(SPREADSHEET_ID)
         worksheet = sh.worksheet(WORKSHEET_NAME)
+
+        _ensure_quantity_header(worksheet)
+
         worksheet.insert_row(row, index=2, value_input_option="USER_ENTERED")
-        print(f"[SHEETS] appended row for order {row[0]}")
-        # Optionally: update DB to mark 'sheet_logged' = True (if you want)
+        print(f"[SHEETS] appended row for order {row[1]}")
     except Exception as exc:
-        # Replace prints with structured logging in production.
-        print(
-            f"[SHEETS][ERROR] failed to append row for order {row[0]}: {exc}")
-        # Optionally: write failure to a retry queue or DB field.
+        print(f"[SHEETS][ERROR] failed to append row for order {row[1]}: {exc}")
 
 
 @app.post("/orders/send-to-google-sheet")
 async def send_to_google_sheet(order_ids: List[str], background_tasks: BackgroundTasks):
     """
-    POST /orders/send-to-google-sheet
-    Body: {"order_ids": ["#123","#124", ...]}
-    For each id:
-      - fetch order from orders_collection
-      - build row and schedule append as background task
-      - mark orders_collection.sheet_queued = True (best-effort)
+    Idempotent: same order won't be queued twice.
     """
     if not SPREADSHEET_ID:
-        raise HTTPException(
-            status_code=500, detail="GOOGLE_SHEET_ID is not configured")
+        raise HTTPException(status_code=500, detail="GOOGLE_SHEET_ID is not configured")
+
+    # 1) De-duplicate IDs within this request (preserve order)
+    seen = set()
+    unique_order_ids = []
+    for oid in order_ids:
+        if oid not in seen:
+            seen.add(oid)
+            unique_order_ids.append(oid)
 
     results = []
-    for order_id in order_ids:
+    for order_id in unique_order_ids:
         print(f"[SHEETS] Processing order ID: {order_id}")
         order = orders_collection.find_one({"order_id": order_id})
         if not order:
             print(f"[SHEETS] Order not found: {order_id}")
-            results.append({"order_id": order_id, "status": "error",
-                           "message": "Order not found", "step": "database_lookup"})
+            results.append({
+                "order_id": order_id,
+                "status": "error",
+                "message": "Order not found",
+                "step": "database_lookup"
+            })
             continue
 
+        # 2) ATOMIC LOCK: mark as queued only if not already queued
+        lock_update = {
+            "$set": {
+                "sheet_queued": True,
+                "printer": "Genesis",
+                "print_status": "sent_to_genesis",
+                "print_sent_at": datetime.now().isoformat()
+            }
+        }
+        lock_filter = {"_id": order["_id"], "sheet_queued": {"$ne": True}}
+        lock_result = orders_collection.update_one(lock_filter, lock_update)
+
+        if lock_result.modified_count == 0:
+            # Already queued/sent by an earlier request or click
+            results.append({
+                "order_id": order_id,
+                "status": "skipped",
+                "message": "Already queued previously; not sending again",
+                "step": "idempotency_check"
+            })
+            continue
+
+        # 3) Only now build the row and enqueue appends
         row = order_to_sheet_row(order)
+        quantity = int(order.get("quantity", 1) or 1)
+        quantity = max(1, quantity)
+        for _ in range(quantity):
+            background_tasks.add_task(append_row_to_google_sheet, row)
 
-        # schedule background append (non-blocking)
-        background_tasks.add_task(append_row_to_google_sheet, row)
-
-        # best-effort: mark queued
-        try:
-            orders_collection.update_one(
-                {"order_id": order_id},
-                {
-                    "$set": {
-                        "sheet_queued": True,
-                        "printer": "Genesis",
-                        "print_status": "sent_to_genesis",
-                        "print_sent_at": datetime.now().isoformat()
-                    }
-                }
-            )
-        except Exception as e:
-            print(
-                f"[SHEETS][WARN] failed to set sheet_queued/printer for {order_id}: {e}")
-
-        results.append({"order_id": order_id, "status": "queued",
-                       "message": "Queued for sheet append", "step": "queued"})
+        results.append({
+            "order_id": order_id,
+            "status": "queued",
+            "message": "Queued for sheet append",
+            "step": "queued"
+        })
 
     return results
+
 
 
 @app.get("/jobs")
