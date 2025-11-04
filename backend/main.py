@@ -1863,6 +1863,8 @@ async def send_to_google_sheet(order_ids: List[str], background_tasks: Backgroun
         for _ in range(quantity):
             background_tasks.add_task(append_row_to_google_sheet, row)
 
+        
+
         results.append({
             "order_id": order_id,
             "status": "queued",
@@ -4362,3 +4364,239 @@ def get_job_mini(job_id: str) -> Dict[str, Any]:
         "child2_input_images": child2_input_images,
         "is_twin": is_twin,
     }
+
+
+# ===================== Shiprocket: create from order collection =====================
+
+from fastapi import Body
+from typing import Dict, Any
+
+SHIPROCKET_BASE = os.getenv("SHIPROCKET_BASE", "https://apiv2.shiprocket.in").rstrip("/")
+SHIPROCKET_EMAIL = os.getenv("SHIPROCKET_EMAIL")
+SHIPROCKET_PASSWORD = os.getenv("SHIPROCKET_PASSWORD")
+SHIPROCKET_DEFAULT_PICKUP = os.getenv("SHIPROCKET_DEFAULT_PICKUP", "warehouse")
+
+def _sr_login_token() -> str:
+    if not SHIPROCKET_EMAIL or not SHIPROCKET_PASSWORD:
+        raise HTTPException(status_code=500, detail="Shiprocket API creds missing")
+    r = requests.post(
+        f"{SHIPROCKET_BASE}/v1/external/auth/login",
+        json={"email": SHIPROCKET_EMAIL, "password": SHIPROCKET_PASSWORD},
+        timeout=30,
+    )
+    if r.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"Shiprocket auth failed: {r.text}")
+    token = (r.json() or {}).get("token")
+    if not token:
+        raise HTTPException(status_code=502, detail="Shiprocket auth returned no token")
+    return token
+
+def _sr_headers(tok: str) -> Dict[str, str]:
+    return {"Authorization": f"Bearer {tok}", "Content-Type": "application/json"}
+
+def _sr_order_payload_from_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
+    ship = doc.get("shipping_address") or {}
+    # name split (helper exists earlier in this file)
+    first, last = split_full_name(ship.get("name", "") or (doc.get("user_name") or doc.get("name") or ""))
+
+    # price/qty
+    qty = int(doc.get("quantity", 1) or 1)
+    subtotal = float(
+        doc.get("total_amount")
+        or doc.get("total_price")
+        or doc.get("amount")
+        or doc.get("price")
+        or 0.0
+    )
+
+        # package: apply dimensions by book_id
+    book_id = (doc.get("book_id") or "").lower().strip()
+
+    if book_id == "wigu":
+        length, breadth, height = 32.0, 23.0, 3.0
+    else:
+        length, breadth, height = 23.0, 23.0, 3.0
+
+    weight = float(doc.get("weight_kg", 0.5))
+
+
+    # book identity for item line
+    order_id=(doc.get("order_id"))
+    book_id = (doc.get("book_id") or "BOOK").upper()
+    book_style = (doc.get("book_style") or "HARDCOVER").upper()
+
+    # order date "YYYY-MM-DD HH:MM" (IST)
+    dt = doc.get("processed_at") or doc.get("created_at")
+    try:
+        if isinstance(dt, str):
+            dt = parser.isoparse(dt)
+        if isinstance(dt, datetime) and dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        order_date = (dt or datetime.now(timezone.utc)).astimezone(IST_TZ).strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        order_date = datetime.now(IST_TZ).strftime("%Y-%m-%d %H:%M")
+
+    pickup_name = doc.get("pickup_location") or SHIPROCKET_DEFAULT_PICKUP
+    if not pickup_name:
+        raise HTTPException(status_code=400, detail="Shiprocket pickup_location not configured")
+
+    # payment
+    cod = bool(doc.get("payment_method") == "COD")
+
+    return {
+        "order_id": str(doc.get("order_id") or ""),                           # your reference
+        "order_date": order_date,
+        "pickup_location": pickup_name,
+        "comment": doc.get("comment", ""),
+
+        "billing_customer_name": first or ship.get("name", "") or "Customer",
+        "billing_last_name": last,
+        "billing_address": ship.get("address1", ""),
+        "billing_address_2": ship.get("address2", ""),
+        "billing_city": ship.get("city", ""),
+        "billing_pincode": str(ship.get("zip", ""))[:6],
+        "billing_state": ship.get("province", ""),
+        "billing_country": ship.get("country", "India"),
+        "billing_email": (doc.get("email") or doc.get("customer_email") or ""),
+        "billing_phone": ship.get("phone") or doc.get("phone_number") or "",
+
+        "shipping_is_billing": True,
+        "shipping_customer_name": "",
+        "shipping_last_name": "",
+        "shipping_address": "",
+        "shipping_address_2": "",
+        "shipping_city": "",
+        "shipping_pincode": "",
+        "shipping_country": "",
+        "shipping_state": "",
+        "shipping_email": "",
+        "shipping_phone": "",
+
+        "order_items": [
+            {
+                "name": f"Personalised {book_id} ({book_style})",
+                "sku": f"{order_id}",
+                "units": qty,
+                "selling_price": float(round(subtotal / max(qty, 1), 2)),
+                "discount": 0,
+                "tax": 0,
+                "hsn": ""
+            }
+        ],
+        "payment_method": "COD" if cod else "Prepaid",
+        "shipping_charges": 0,
+        "giftwrap_charges": 0,
+        "transaction_charges": 0,
+        "total_discount": 0,
+        "sub_total": float(subtotal),
+
+        "length": length,
+        "breadth": breadth,
+        "height": height,
+        "weight": weight,
+    }
+
+@app.post("/shiprocket/create-from-orders", tags=["shiprocket"])
+def shiprocket_create_from_orders(
+    order_ids: List[str] = Body(..., embed=True, description="Diffrun order_ids like ['#123', '#124']"),
+    request_pickup: bool = Body(True, embed=True),
+):
+    """
+    Creates Shiprocket orders for the provided order_ids (reads delivery details from Mongo),
+    assigns AWB, optionally requests pickup, and persists identifiers back to the same documents.
+    """
+    if not order_ids:
+        raise HTTPException(status_code=400, detail="order_ids required")
+
+    # de-duplicate, preserve order
+    seen, unique_ids = set(), []
+    for oid in order_ids:
+        if oid not in seen:
+            seen.add(oid)
+            unique_ids.append(oid)
+
+    token = _sr_login_token()
+    headers = _sr_headers(token)
+
+    created_refs: List[Dict[str, Any]] = []
+    shipment_ids: List[int] = []
+    errors: List[str] = []
+
+    # --- Create orders (one-by-one for clean error isolation)
+    for oid in unique_ids:
+        doc = orders_collection.find_one({"order_id": oid})  # collection already defined in this file
+        if not doc:  # :contentReference[oaicite:1]{index=1}
+            errors.append(f"{oid}: not found")
+            continue
+
+        try:
+            payload = _sr_order_payload_from_doc(doc)
+            r = requests.post(f"{SHIPROCKET_BASE}/v1/external/orders/create/adhoc",
+                              headers=headers, json=payload, timeout=40)
+            if r.status_code != 200:
+                errors.append(f"{oid}: create failed {r.status_code} {r.text}")
+                continue
+
+            j = r.json() or {}
+            sr_order_id = j.get("order_id")
+            shipment_id = j.get("shipment_id")
+
+            # persist IDs
+            orders_collection.update_one(                                       # :contentReference[oaicite:2]{index=2}
+                {"_id": doc["_id"]},
+                {"$set": {
+                    "sr_order_id": sr_order_id,
+                    "sr_shipment_id": shipment_id,
+                    "shiprocket_created_at": datetime.utcnow().isoformat(),
+                    "shiprocket_pickup_location": payload.get("pickup_location")
+                }}
+            )
+
+            created_refs.append({"order_id": oid, "sr_order_id": sr_order_id, "shipment_id": shipment_id})
+            if shipment_id:
+                shipment_ids.append(int(shipment_id))
+
+        except Exception as e:
+            errors.append(f"{oid}: exception {e}")
+
+    if not shipment_ids:
+        return {"created": created_refs, "awbs": [], "pickup": None, "errors": errors}
+
+    # --- Assign AWB (per shipment)
+    awb_results: List[Dict[str, Any]] = []
+    for sid in shipment_ids:
+        r = requests.post(
+            f"{SHIPROCKET_BASE}/v1/external/courier/assign/awb",
+            headers=headers, json={"shipment_id": sid}, timeout=30
+        )
+        if r.status_code != 200:
+            errors.append(f"awb({sid}) failed {r.status_code}: {r.text}")
+            continue
+        j = r.json() or {}
+        awb_code = j.get("awb_code")
+        courier_id = j.get("courier_company_id")
+
+        awb_results.append({"shipment_id": sid, "awb_code": awb_code, "courier_company_id": courier_id})
+
+        orders_collection.update_one(                                           # :contentReference[oaicite:3]{index=3}
+            {"sr_shipment_id": sid},
+            {"$set": {"awb_code": awb_code, "courier_company_id": courier_id}}
+        )
+
+    # --- Generate pickup (one call for all)
+    pickup_res = None
+    if request_pickup and awb_results:
+        rr = requests.post(
+            f"{SHIPROCKET_BASE}/v1/external/courier/generate/pickup",
+            headers=headers, json={"shipment_id": [x["shipment_id"] for x in awb_results]}, timeout=30
+        )
+        if rr.status_code == 200:
+            pickup_res = rr.json()
+            orders_collection.update_many(                                      # :contentReference[oaicite:4]{index=4}
+                {"sr_shipment_id": {"$in": shipment_ids}},
+                {"$set": {"pickup_requested": True, "pickup_requested_at": datetime.utcnow().isoformat()}}
+            )
+        else:
+            errors.append(f"pickup failed {rr.status_code}: {rr.text}")
+
+    return {"created": created_refs, "awbs": awb_results, "pickup": pickup_res, "errors": errors}
