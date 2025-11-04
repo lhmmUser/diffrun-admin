@@ -159,7 +159,14 @@ function ThumbGrid({ urls }: { urls: string[] }) {
   return (
     <div className="grid grid-cols-3 gap-1">
       {urls.map((u, i) => (
-        <a key={i} href={u} target="_blank" rel="noreferrer" className="block" title={u}>
+        <a
+          key={i}
+          href={u}
+          target="_blank"
+          rel="noreferrer"
+          className="block"
+          title={u}
+        >
           <img
             src={u}
             alt={`child_input_${i + 1}`}
@@ -190,7 +197,9 @@ const TimelineItem = ({
     <div className="flex-1 pb-2">
       <p className="text-xs font-medium text-gray-900">{label}</p>
       <p className="text-xs text-gray-600">{date}</p>
-      {subtext ? <p className="text-xs text-gray-600 mt-0.5">{subtext}</p> : null}
+      {subtext ? (
+        <p className="text-xs text-gray-600 mt-0.5">{subtext}</p>
+      ) : null}
     </div>
   </div>
 );
@@ -216,7 +225,9 @@ const InfoField: React.FC<InfoFieldProps> = React.memo(function InfoField({
   const isLink = type === "link";
 
   return (
-    <div className={`grid grid-cols-[auto,1fr] items-center gap-2 ${className}`}>
+    <div
+      className={`grid grid-cols-[auto,1fr] items-center gap-2 ${className}`}
+    >
       <span className="text-xs font-bold text-gray-700">{label}:</span>
 
       {editable ? (
@@ -407,11 +418,14 @@ export default function OrderDetailPage() {
         alert("No changes to save.");
         return;
       }
-      const res = await fetch(`${API_BASE}/orders/${encodeURIComponent(rawOrderId)}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
+      const res = await fetch(
+        `${API_BASE}/orders/${encodeURIComponent(rawOrderId)}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        }
+      );
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         throw new Error(err.detail || `HTTP ${res.status}`);
@@ -457,14 +471,29 @@ export default function OrderDetailPage() {
 
   const prettyDate = (s?: string | null): string => {
     if (!s) return "-";
-    const m = String(s).trim().match(
-      /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::\d{2}(?:\.\d+)?)?/
-    );
+    const m = String(s)
+      .trim()
+      .match(
+        /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::\d{2}(?:\.\d+)?)?/
+      );
     if (!m) return String(s);
     const [, y, mo, d, hh, mm] = m;
     const dt = new Date(Date.UTC(+y, +mo - 1, +d, +hh, +mm));
     const ist = new Date(dt.getTime() + 330 * 60 * 1000);
-    const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    const months = [
+      "Jan",
+      "Feb",
+      "Mar",
+      "Apr",
+      "May",
+      "Jun",
+      "Jul",
+      "Aug",
+      "Sep",
+      "Oct",
+      "Nov",
+      "Dec",
+    ];
     const day = ist.getUTCDate();
     const mon = months[ist.getUTCMonth()];
     const yr = ist.getUTCFullYear();
@@ -472,10 +501,16 @@ export default function OrderDetailPage() {
     const mins = String(ist.getUTCMinutes()).padStart(2, "0");
     const h12 = hrs % 12 === 0 ? 12 : hrs % 12;
     const ampm = hrs >= 12 ? "pm" : "am";
-    return `${day} ${mon} ${yr}, ${String(h12).padStart(2, "0")}:${mins} ${ampm}`;
+    return `${day} ${mon} ${yr}, ${String(h12).padStart(
+      2,
+      "0"
+    )}:${mins} ${ampm}`;
   };
 
   const coverUrl = order?.cover_image || order?.order?.cover_image || "";
+
+  const isTwinOrder =
+    (order?.book_id || "").toLowerCase() === "twin" || !!order?.child?.is_twin;
 
   return (
     <main className="min-h-screen bg-gray-50 py-4">
@@ -530,7 +565,9 @@ export default function OrderDetailPage() {
 
         {loadErr && (
           <div className="bg-red-50 border border-red-200 rounded p-3 text-center">
-            <p className="text-red-800 font-medium text-xs">Error loading order</p>
+            <p className="text-red-800 font-medium text-xs">
+              Error loading order
+            </p>
             <p className="text-red-600 mt-1 text-xs break-words">{loadErr}</p>
           </div>
         )}
@@ -544,23 +581,64 @@ export default function OrderDetailPage() {
                     Order Information
                   </h3>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-3 gap-y-1.5">
-                    <InfoField label="Order ID" value={order.order_id} editable={isEditing} onChange={(v) => updateForm("order_id", v)} />
-                    <InfoField label="Book ID" value={form.book_id} editable={isEditing} onChange={(v) => updateForm("book_id", v)} />
-                    <InfoField label="Quantity" value={form.quantity} editable={isEditing} onChange={(v) => updateForm("quantity", v)} type="number" />
-                    <InfoField label="Book Style" value={form.book_style} editable={isEditing} onChange={(v) => updateForm("book_style", v)} />
+                    <InfoField
+                      label="Order ID"
+                      value={order.order_id}
+                      editable={isEditing}
+                      onChange={(v) => updateForm("order_id", v)}
+                    />
+                    <InfoField
+                      label="Book ID"
+                      value={form.book_id}
+                      editable={isEditing}
+                      onChange={(v) => updateForm("book_id", v)}
+                    />
+                    <InfoField
+                      label="Quantity"
+                      value={form.quantity}
+                      editable={isEditing}
+                      onChange={(v) => updateForm("quantity", v)}
+                      type="number"
+                    />
+                    <InfoField
+                      label="Book Style"
+                      value={form.book_style}
+                      editable={isEditing}
+                      onChange={(v) => updateForm("book_style", v)}
+                    />
                     <InfoField label="Job ID" value={order.job_id || "-"} />
                     <InfoField label="Locale" value={order.locale || "-"} />
 
                     <InfoField
                       label="Total Price"
-                      value={isEditing ? (form.total_price || "") : formatMoney(form.total_price || "", order.locale)}
+                      value={
+                        isEditing
+                          ? form.total_price || ""
+                          : formatMoney(form.total_price || "", order.locale)
+                      }
                       editable={isEditing}
                       onChange={(v) => updateForm("total_price", v)}
                     />
 
-                    <InfoField label="Discount Code" value={form.discount_code} editable={isEditing} onChange={(v) => updateForm("discount_code", v)} />
-                    <InfoField label="Preview URL" value={form.preview_url} editable={isEditing} onChange={(v) => updateForm("preview_url", v)} type="link" />
-                    <InfoField label="Status" value={form.cust_status} editable={isEditing} onChange={(v) => updateForm("cust_status", v)} />
+                    <InfoField
+                      label="Discount Code"
+                      value={form.discount_code}
+                      editable={isEditing}
+                      onChange={(v) => updateForm("discount_code", v)}
+                    />
+                    <InfoField
+                      label="Preview URL"
+                      value={form.preview_url}
+                      editable={isEditing}
+                      onChange={(v) => updateForm("preview_url", v)}
+                      type="link"
+                    />
+                    <InfoField
+                      label="Status"
+                      value={form.cust_status}
+                      editable={isEditing}
+                      onChange={(v) => updateForm("cust_status", v)}
+                    />
                   </div>
                 </div>
 
@@ -597,20 +675,39 @@ export default function OrderDetailPage() {
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>
                     <div className="flex flex-col flex-wrap gap-1">
-                      <TimelineItem label="Storybook Created" date={formatIso(order.timeline?.created_at)} />
-                      <TimelineItem label="Order Processed" date={formatIso(order.timeline?.processed_at)} />
-                      <TimelineItem label="Order Approved" date={formatIso(order.timeline?.approved_at)} />
-                      <TimelineItem label="Sent for Printing" date={prettyDate(order.timeline?.print_sent_at)} />
+                      <TimelineItem
+                        label="Storybook Created"
+                        date={formatIso(order.timeline?.created_at)}
+                      />
+                      <TimelineItem
+                        label="Order Processed"
+                        date={formatIso(order.timeline?.processed_at)}
+                      />
+                      <TimelineItem
+                        label="Order Approved"
+                        date={formatIso(order.timeline?.approved_at)}
+                      />
+                      <TimelineItem
+                        label="Sent for Printing"
+                        date={prettyDate(order.timeline?.print_sent_at)}
+                      />
                       <TimelineItem
                         label="Order Shipped"
                         date={formatIso(order.timeline?.shipped_at)}
                         subtext={
-                          order.timeline?.shipped_at && order.order?.tracking_code ? (
+                          order.timeline?.shipped_at &&
+                          order.order?.tracking_code ? (
                             <>
-                              <span>Tracking ID: {order.order.tracking_code}</span><br />
-                              <span>Tracking URL:{" "}
+                              <span>
+                                Tracking ID: {order.order.tracking_code}
+                              </span>
+                              <br />
+                              <span>
+                                Tracking URL:{" "}
                                 <a
-                                  href={`https://parcelsapp.com/en/tracking/${encodeURIComponent(order.order.tracking_code.trim())}`}
+                                  href={`https://parcelsapp.com/en/tracking/${encodeURIComponent(
+                                    order.order.tracking_code.trim()
+                                  )}`}
                                   target="_blank"
                                   rel="noopener noreferrer"
                                   className="text-blue-600 underline"
@@ -627,22 +724,86 @@ export default function OrderDetailPage() {
 
                     {isEditing && (
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-3 gap-y-1.5 mt-3">
-                        <InfoField label="created_at" value={form.timeline.created_at} editable onChange={(v) => updateForm("timeline.created_at", v)} />
-                        <InfoField label="processed_at" value={form.timeline.processed_at} editable onChange={(v) => updateForm("timeline.processed_at", v)} />
-                        <InfoField label="approved_at" value={form.timeline.approved_at} editable onChange={(v) => updateForm("timeline.approved_at", v)} />
-                        <InfoField label="print_sent_at" value={form.timeline.print_sent_at} editable onChange={(v) => updateForm("timeline.print_sent_at", v)} />
-                        <InfoField label="shipped_at" value={form.timeline.shipped_at} editable onChange={(v) => updateForm("timeline.shipped_at", v)} />
+                        <InfoField
+                          label="created_at"
+                          value={form.timeline.created_at}
+                          editable
+                          onChange={(v) => updateForm("timeline.created_at", v)}
+                        />
+                        <InfoField
+                          label="processed_at"
+                          value={form.timeline.processed_at}
+                          editable
+                          onChange={(v) =>
+                            updateForm("timeline.processed_at", v)
+                          }
+                        />
+                        <InfoField
+                          label="approved_at"
+                          value={form.timeline.approved_at}
+                          editable
+                          onChange={(v) =>
+                            updateForm("timeline.approved_at", v)
+                          }
+                        />
+                        <InfoField
+                          label="print_sent_at"
+                          value={form.timeline.print_sent_at}
+                          editable
+                          onChange={(v) =>
+                            updateForm("timeline.print_sent_at", v)
+                          }
+                        />
+                        <InfoField
+                          label="shipped_at"
+                          value={form.timeline.shipped_at}
+                          editable
+                          onChange={(v) => updateForm("timeline.shipped_at", v)}
+                        />
                       </div>
                     )}
                   </div>
 
                   <div>
                     <div className="flex flex-col gap-2">
-                      <InfoField label="Street" value={form.shipping_address.street} editable={isEditing} onChange={(v) => updateForm("shipping_address.street", v)} />
-                      <InfoField label="City" value={form.shipping_address.city} editable={isEditing} onChange={(v) => updateForm("shipping_address.city", v)} />
-                      <InfoField label="State" value={form.shipping_address.state} editable={isEditing} onChange={(v) => updateForm("shipping_address.state", v)} />
-                      <InfoField label="Country" value={form.shipping_address.country} editable={isEditing} onChange={(v) => updateForm("shipping_address.country", v)} />
-                      <InfoField label="Postal Code" value={form.shipping_address.postal_code} editable={isEditing} onChange={(v) => updateForm("shipping_address.postal_code", v)} />
+                      <InfoField
+                        label="Street"
+                        value={form.shipping_address.street}
+                        editable={isEditing}
+                        onChange={(v) =>
+                          updateForm("shipping_address.street", v)
+                        }
+                      />
+                      <InfoField
+                        label="City"
+                        value={form.shipping_address.city}
+                        editable={isEditing}
+                        onChange={(v) => updateForm("shipping_address.city", v)}
+                      />
+                      <InfoField
+                        label="State"
+                        value={form.shipping_address.state}
+                        editable={isEditing}
+                        onChange={(v) =>
+                          updateForm("shipping_address.state", v)
+                        }
+                      />
+                      <InfoField
+                        label="Country"
+                        value={form.shipping_address.country}
+                        editable={isEditing}
+                        onChange={(v) =>
+                          updateForm("shipping_address.country", v)
+                        }
+                      />
+                      <InfoField
+                        label="Postal Code"
+                        value={form.shipping_address.postal_code}
+                        editable={isEditing}
+                        onChange={(v) =>
+                          updateForm("shipping_address.postal_code", v)
+                        }
+                      />
                     </div>
                   </div>
                 </div>
@@ -650,20 +811,56 @@ export default function OrderDetailPage() {
 
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
                 <div className="bg-white rounded border border-gray-200 p-3 shadow-sm">
-                  <h3 className="text-base font-semibold text-gray-900 mb-3 pb-1 border-b border-gray-100">Customer Detail</h3>
+                  <h3 className="text-base font-semibold text-gray-900 mb-3 pb-1 border-b border-gray-100">
+                    Customer Detail
+                  </h3>
                   <div className="space-y-2">
-                    <InfoField label="Name" value={form.user_name} editable={isEditing} onChange={(v) => updateForm("user_name", v)} />
-                    <InfoField label="Email" value={form.email} editable={isEditing} onChange={(v) => updateForm("email", v)} type="email" />
-                    <InfoField label="Phone" value={form.phone} editable={isEditing} onChange={(v) => updateForm("phone", v)} type="tel" />
+                    <InfoField
+                      label="Name"
+                      value={form.user_name}
+                      editable={isEditing}
+                      onChange={(v) => updateForm("user_name", v)}
+                    />
+                    <InfoField
+                      label="Email"
+                      value={form.email}
+                      editable={isEditing}
+                      onChange={(v) => updateForm("email", v)}
+                      type="email"
+                    />
+                    <InfoField
+                      label="Phone"
+                      value={form.phone}
+                      editable={isEditing}
+                      onChange={(v) => updateForm("phone", v)}
+                      type="tel"
+                    />
                   </div>
                 </div>
 
                 <div className="bg-white rounded border border-gray-200 p-3 shadow-sm">
-                  <h3 className="text-base font-semibold text-gray-900 mb-3 pb-1 border-b border-gray-100">Transaction ID</h3>
+                  <h3 className="text-base font-semibold text-gray-900 mb-3 pb-1 border-b border-gray-100">
+                    Transaction ID
+                  </h3>
                   <div className="space-y-2">
-                    <InfoField label="Transaction ID" value={form.transaction_id} editable={isEditing} onChange={(v) => updateForm("transaction_id", v)} />
-                    <InfoField label="PayPal Order ID" value={form.paypal_order_id} editable={isEditing} onChange={(v) => updateForm("paypal_order_id", v)} />
-                    <InfoField label="PayPal Capture ID" value={form.paypal_capture_id} editable={isEditing} onChange={(v) => updateForm("paypal_capture_id", v)} />
+                    <InfoField
+                      label="Transaction ID"
+                      value={form.transaction_id}
+                      editable={isEditing}
+                      onChange={(v) => updateForm("transaction_id", v)}
+                    />
+                    <InfoField
+                      label="PayPal Order ID"
+                      value={form.paypal_order_id}
+                      editable={isEditing}
+                      onChange={(v) => updateForm("paypal_order_id", v)}
+                    />
+                    <InfoField
+                      label="PayPal Capture ID"
+                      value={form.paypal_capture_id}
+                      editable={isEditing}
+                      onChange={(v) => updateForm("paypal_capture_id", v)}
+                    />
                   </div>
                 </div>
               </div>
@@ -677,57 +874,95 @@ export default function OrderDetailPage() {
 
             <div className="xl:col-span-1 space-y-3">
               <div className="bg-white rounded border border-gray-200 p-3 shadow-sm">
-                <h3 className="text-base font-semibold text-gray-900 mb-3 pb-1 border-b border-gray-100">Child Detail</h3>
+                <h3 className="text-base font-semibold text-gray-900 mb-3 pb-1 border-b border-gray-100">
+                  Child Detail
+                </h3>
                 <div className="space-y-2">
-                  <InfoField label="Name" value={form.name} editable={isEditing} onChange={(v) => updateForm("name", v)} />
+                  <InfoField
+                    label="Name"
+                    value={form.name}
+                    editable={isEditing}
+                    onChange={(v) => updateForm("name", v)}
+                  />
 
-                  {(order.child?.is_twin ||
-                    order.child?.child1_age !== undefined ||
-                    order.child?.child2_age !== undefined) ? (
+                  {isTwinOrder ? (
                     <>
-                      <InfoField label="Child 1 Age" value={(order.child?.child1_age as any) ?? "-"} />
-                      <InfoField label="Child 2 Age" value={(order.child?.child2_age as any) ?? "-"} />
+                      <InfoField
+                        label="Child 1 Age"
+                        value={order.child?.child1_age ?? "-"}
+                      />
+                      <InfoField
+                        label="Child 2 Age"
+                        value={order.child?.child2_age ?? "-"}
+                      />
                     </>
                   ) : (
-                    <InfoField label="Age" value={form.age || ""} editable={isEditing} onChange={(v) => updateForm("age", v)} />
+                    <InfoField
+                      label="Age"
+                      value={form.age || order.child?.age || ""}
+                      editable={isEditing}
+                      onChange={(v) => updateForm("age", v)}
+                    />
                   )}
 
-                  <InfoField label="Gender" value={form.gender} editable={isEditing} onChange={(v) => updateForm("gender", v)} type="select" />
+                  <InfoField
+                    label="Gender"
+                    value={form.gender}
+                    editable={isEditing}
+                    onChange={(v) => updateForm("gender", v)}
+                    type="select"
+                  />
 
                   {(order.child?.saved_file_urls?.length || 0) > 0 ? (
                     <div className="mt-1">
-                      <ThumbGrid urls={order.child!.saved_file_urls!.slice(0, 3)} />
+                      <ThumbGrid
+                        urls={order.child!.saved_file_urls!.slice(0, 3)}
+                      />
                     </div>
                   ) : (
                     (order.child?.saved_files?.length || 0) > 0 && (
                       <div className="mt-1">
                         <ul className="list-disc ml-4 text-xs text-gray-700">
-                          {order.child!.saved_files!.slice(0, 3).map((name, i) => (
-                            <li key={`saved-name-${i}`} className="break-all">{name}</li>
-                          ))}
+                          {order
+                            .child!.saved_files!.slice(0, 3)
+                            .map((name, i) => (
+                              <li key={`saved-name-${i}`} className="break-all">
+                                {name}
+                              </li>
+                            ))}
                         </ul>
-                        <p className="text-xs text-gray-500 mt-1">No image URLs yet.</p>
+                        <p className="text-xs text-gray-500 mt-1">
+                          No image URLs yet.
+                        </p>
                       </div>
                     )
                   )}
 
-                  {(order.child?.child1_input_images?.length || order.child?.child2_input_images?.length) ? (
+                  {order.child?.child1_input_images?.length ||
+                  order.child?.child2_input_images?.length ? (
                     <div className="mt-2 flex flex-col gap-4">
                       <div>
-                        <div className="text-xs font-semibold text-gray-800 mb-1">Child 1 Inputs</div>
+                        <div className="text-xs font-semibold text-gray-800 mb-1">
+                          Child 1 Inputs
+                        </div>
                         {order.child?.child1_input_images?.length ? (
                           <ThumbGrid urls={order.child.child1_input_images} />
                         ) : (
                           <div className="text-xs text-gray-400">No files</div>
                         )}
                       </div>
-                      {(order.child?.is_twin || order.child?.child2_input_images?.length) ? (
+                      {order.child?.is_twin ||
+                      order.child?.child2_input_images?.length ? (
                         <div>
-                          <div className="text-xs font-semibold text-gray-800 mb-1">Child 2 Inputs</div>
+                          <div className="text-xs font-semibold text-gray-800 mb-1">
+                            Child 2 Inputs
+                          </div>
                           {order.child?.child2_input_images?.length ? (
                             <ThumbGrid urls={order.child.child2_input_images} />
                           ) : (
-                            <div className="text-xs text-gray-400">No files</div>
+                            <div className="text-xs text-gray-400">
+                              No files
+                            </div>
                           )}
                         </div>
                       ) : null}
@@ -737,11 +972,31 @@ export default function OrderDetailPage() {
               </div>
 
               <div className="bg-white rounded border border-gray-200 p-3 shadow-sm">
-                <h3 className="text-base font-semibold text-gray-900 mb-3 pb-1 border-b border-gray-100">Links</h3>
+                <h3 className="text-base font-semibold text-gray-900 mb-3 pb-1 border-b border-gray-100">
+                  Links
+                </h3>
                 <div className="space-y-2">
-                  <InfoField label="Preview URL" value={form.preview_url} editable={isEditing} onChange={(v) => updateForm("preview_url", v)} type="link" />
-                  <InfoField label="Interior PDF" value={form.book_url} editable={isEditing} onChange={(v) => updateForm("book_url", v)} type="link" />
-                  <InfoField label="Cover PDF" value={form.cover_url} editable={isEditing} onChange={(v) => updateForm("cover_url", v)} type="link" />
+                  <InfoField
+                    label="Preview URL"
+                    value={form.preview_url}
+                    editable={isEditing}
+                    onChange={(v) => updateForm("preview_url", v)}
+                    type="link"
+                  />
+                  <InfoField
+                    label="Interior PDF"
+                    value={form.book_url}
+                    editable={isEditing}
+                    onChange={(v) => updateForm("book_url", v)}
+                    type="link"
+                  />
+                  <InfoField
+                    label="Cover PDF"
+                    value={form.cover_url}
+                    editable={isEditing}
+                    onChange={(v) => updateForm("cover_url", v)}
+                    type="link"
+                  />
                 </div>
               </div>
             </div>
