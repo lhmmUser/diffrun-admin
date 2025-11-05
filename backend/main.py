@@ -4499,16 +4499,17 @@ def _sr_order_payload_from_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
 @app.post("/shiprocket/create-from-orders", tags=["shiprocket"])
 def shiprocket_create_from_orders(
     order_ids: List[str] = Body(..., embed=True, description="Diffrun order_ids like ['#123', '#124']"),
-    request_pickup: bool = Body(True, embed=True),
+    assign_awb: bool = Body(False, embed=True, description="If true, assign AWB after creating order"),
+    request_pickup: bool = Body(False, embed=True, description="If true, generate pickup after AWB assignment"),
 ):
     """
     Creates Shiprocket orders for the provided order_ids (reads delivery details from Mongo),
-    assigns AWB, optionally requests pickup, and persists identifiers back to the same documents.
+    optionally assigns AWB and requests pickup. By default this WILL ONLY create orders.
     """
     if not order_ids:
         raise HTTPException(status_code=400, detail="order_ids required")
 
-    # de-duplicate, preserve order
+    # dedupe, preserve order
     seen, unique_ids = set(), []
     for oid in order_ids:
         if oid not in seen:
@@ -4522,17 +4523,19 @@ def shiprocket_create_from_orders(
     shipment_ids: List[int] = []
     errors: List[str] = []
 
-    # --- Create orders (one-by-one for clean error isolation)
+    # 1) Create orders only
     for oid in unique_ids:
-        doc = orders_collection.find_one({"order_id": oid})  # collection already defined in this file
-        if not doc:  # :contentReference[oaicite:1]{index=1}
+        doc = orders_collection.find_one({"order_id": oid})
+        if not doc:
             errors.append(f"{oid}: not found")
             continue
 
         try:
             payload = _sr_order_payload_from_doc(doc)
-            r = requests.post(f"{SHIPROCKET_BASE}/v1/external/orders/create/adhoc",
-                              headers=headers, json=payload, timeout=40)
+            r = requests.post(
+                f"{SHIPROCKET_BASE}/v1/external/orders/create/adhoc",
+                headers=headers, json=payload, timeout=40
+            )
             if r.status_code != 200:
                 errors.append(f"{oid}: create failed {r.status_code} {r.text}")
                 continue
@@ -4541,8 +4544,8 @@ def shiprocket_create_from_orders(
             sr_order_id = j.get("order_id")
             shipment_id = j.get("shipment_id")
 
-            # persist IDs
-            orders_collection.update_one(                                       # :contentReference[oaicite:2]{index=2}
+            # Persist SR ids so you can later call AWB/pickup manually if needed
+            orders_collection.update_one(
                 {"_id": doc["_id"]},
                 {"$set": {
                     "sr_order_id": sr_order_id,
@@ -4554,49 +4557,54 @@ def shiprocket_create_from_orders(
 
             created_refs.append({"order_id": oid, "sr_order_id": sr_order_id, "shipment_id": shipment_id})
             if shipment_id:
+                # keep shipment ids for later steps only if user asked for AWB/pickup
                 shipment_ids.append(int(shipment_id))
-
         except Exception as e:
             errors.append(f"{oid}: exception {e}")
 
-    if not shipment_ids:
+    # If caller didn't request AWB, stop here (this keeps orders unassigned)
+    if not assign_awb:
         return {"created": created_refs, "awbs": [], "pickup": None, "errors": errors}
 
-    # --- Assign AWB (per shipment)
+    # 2) Assign AWB (only if assign_awb == True)
     awb_results: List[Dict[str, Any]] = []
     for sid in shipment_ids:
-        r = requests.post(
-            f"{SHIPROCKET_BASE}/v1/external/courier/assign/awb",
-            headers=headers, json={"shipment_id": sid}, timeout=30
-        )
-        if r.status_code != 200:
-            errors.append(f"awb({sid}) failed {r.status_code}: {r.text}")
-            continue
-        j = r.json() or {}
-        awb_code = j.get("awb_code")
-        courier_id = j.get("courier_company_id")
+        try:
+            rr = requests.post(
+                f"{SHIPROCKET_BASE}/v1/external/courier/assign/awb",
+                headers=headers, json={"shipment_id": sid}, timeout=30
+            )
+            if rr.status_code != 200:
+                errors.append(f"awb({sid}) failed {rr.status_code}: {rr.text}")
+                continue
+            j = rr.json() or {}
+            awb_code = j.get("awb_code")
+            courier_id = j.get("courier_company_id")
+            awb_results.append({"shipment_id": sid, "awb_code": awb_code, "courier_company_id": courier_id})
 
-        awb_results.append({"shipment_id": sid, "awb_code": awb_code, "courier_company_id": courier_id})
+            orders_collection.update_one({"sr_shipment_id": sid}, {"$set": {"awb_code": awb_code, "courier_company_id": courier_id}})
+        except Exception as e:
+            errors.append(f"awb({sid}): exception {e}")
 
-        orders_collection.update_one(                                           # :contentReference[oaicite:3]{index=3}
-            {"sr_shipment_id": sid},
-            {"$set": {"awb_code": awb_code, "courier_company_id": courier_id}}
-        )
-
-    # --- Generate pickup (one call for all)
+    # 3) Generate pickup (only if request_pickup == True)
     pickup_res = None
     if request_pickup and awb_results:
-        rr = requests.post(
-            f"{SHIPROCKET_BASE}/v1/external/courier/generate/pickup",
-            headers=headers, json={"shipment_id": [x["shipment_id"] for x in awb_results]}, timeout=30
-        )
-        if rr.status_code == 200:
-            pickup_res = rr.json()
-            orders_collection.update_many(                                      # :contentReference[oaicite:4]{index=4}
-                {"sr_shipment_id": {"$in": shipment_ids}},
-                {"$set": {"pickup_requested": True, "pickup_requested_at": datetime.utcnow().isoformat()}}
+        try:
+            rr = requests.post(
+                f"{SHIPROCKET_BASE}/v1/external/courier/generate/pickup",
+                headers=headers,
+                json={"shipment_id": [x["shipment_id"] for x in awb_results]},
+                timeout=30
             )
-        else:
-            errors.append(f"pickup failed {rr.status_code}: {rr.text}")
+            if rr.status_code == 200:
+                pickup_res = rr.json()
+                orders_collection.update_many(
+                    {"sr_shipment_id": {"$in": [x["shipment_id"] for x in awb_results]}},
+                    {"$set": {"pickup_requested": True, "pickup_requested_at": datetime.utcnow().isoformat()}}
+                )
+            else:
+                errors.append(f"pickup failed {rr.status_code}: {rr.text}")
+        except Exception as e:
+            errors.append(f"pickup: exception {e}")
 
     return {"created": created_refs, "awbs": awb_results, "pickup": pickup_res, "errors": errors}
