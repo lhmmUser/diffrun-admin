@@ -53,6 +53,7 @@ from bson import ObjectId
 from datetime import datetime, date
 from zoneinfo import ZoneInfo
 from datetime import datetime
+from app.routers.shiprocket_webhook import router as shiprocket_router
 
 
 IST_TZ = pytz.timezone("Asia/Kolkata")
@@ -84,6 +85,14 @@ MONGO_URI_YIPPEE = os.getenv("MONGO_URI_YIPPEE")
 client_yippee = MongoClient(MONGO_URI_YIPPEE)
 yippee_db = client_yippee["yippee-db"]
 collection_yippee = yippee_db["user-data"]
+
+MONGO_URI = os.getenv("MONGO_URI")
+if not MONGO_URI:
+    raise RuntimeError("MONGO_URI not set")
+
+client = MongoClient(MONGO_URI, tz_aware=True)
+db = client["candyman"]
+shipping_collection = db["shipping_details"]
 
 scheduler = BackgroundScheduler(timezone=IST_TZ)
 
@@ -140,6 +149,7 @@ app.include_router(razorpay_router)
 app.include_router(cloudprinter_router)
 
 app.include_router(cp_produce_router)
+app.include_router(shiprocket_router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -1779,12 +1789,56 @@ def _ensure_quantity_header(worksheet):
     except Exception as e:
         print(f"[SHEETS][WARN] Could not verify Quantity header: {e}")
 
+from datetime import datetime, timezone
+
+def _extract_url_from_formula(formula: str) -> str:
+    """
+    Extract the URL from a Google Sheets HYPERLINK formula.
+    Example:
+      '=HYPERLINK("https://abc.com/file.pdf","View")' -> 'https://abc.com/file.pdf'
+    If not a formula, returns the original string.
+    """
+    if not isinstance(formula, str):
+        return formula
+    match = re.search(r'HYPERLINK\("([^"]+)"', formula)
+    if match:
+        return match.group(1)
+    return formula
+
+
+def append_shipping_details(row: list):
+    
+    try:
+        cover_link_raw = _extract_url_from_formula(row[9])
+        interior_link_raw = _extract_url_from_formula(row[10])
+
+        doc = {
+            "order_id": row[1],
+            "order_date": row[2],
+            "child_name": row[3],
+            "book_style": row[4],
+            "book_id": row[5],
+            "city": row[6],
+            "address": row[7],
+            "phone": row[8],
+            "cover_link": cover_link_raw,
+            "interior_link": interior_link_raw,
+            "quantity": row[11],
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        shipping_collection.update_one(
+            {"order_id": doc["order_id"]},
+            {"$set": doc, "$setOnInsert": {"created_at": datetime.now(timezone.utc).isoformat()}},
+            upsert=True,
+        )
+
+        print(f"[MONGO] upserted shipping_details for order {row[1]}")
+    except Exception as exc:
+        print(f"[MONGO][ERROR] failed to upsert shipping_details for order {row[1]}: {exc}")
 
 def append_row_to_google_sheet(row: list):
-    """
-    Append a single row to the configured Google Sheet.
-    Runs in background via BackgroundTasks when scheduled.
-    """
+   
     try:
         client = get_gspread_client()
         sh = client.open_by_key(SPREADSHEET_ID)
@@ -1800,9 +1854,7 @@ def append_row_to_google_sheet(row: list):
 
 @app.post("/orders/send-to-google-sheet")
 async def send_to_google_sheet(order_ids: List[str], background_tasks: BackgroundTasks):
-    """
-    Idempotent: same order won't be queued twice.
-    """
+  
     if not SPREADSHEET_ID:
         raise HTTPException(status_code=500, detail="GOOGLE_SHEET_ID is not configured")
 
@@ -1852,6 +1904,7 @@ async def send_to_google_sheet(order_ids: List[str], background_tasks: Backgroun
 
         # 3) Only now build the row and enqueue appends
         row = order_to_sheet_row(order)
+        background_tasks.add_task(append_shipping_details, row)
         quantity = int(order.get("quantity", 1) or 1)
         quantity = max(1, quantity)
         for _ in range(quantity):
