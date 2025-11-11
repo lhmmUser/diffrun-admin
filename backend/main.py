@@ -1053,7 +1053,7 @@ def get_orders(
     q: Optional[str] = Query(
         None, description="Search by job_id, order_id, email, name, discount_code, city, locale, book_id"),
 ):
-    # Base query
+    # Base query    
     query = {"paid": True}
     ex_values: List[str] = []
 
@@ -1254,12 +1254,6 @@ def get_pdf_page_count(pdf_url: str) -> int:
 
 
 def get_product_details(book_style: str | None, book_id: str | None) -> tuple[str, str]:
-    """
-    Returns (reference_label, cloudprinter_product_code) based on book_id and book_style.
-    - WIGU uses landscape 270x200 mm codes.
-    - All others use square s210 codes.
-    - Falls back to Hardcover if style is unknown.
-    """
     style = (book_style or "").lower()
     bid = (book_id or "").lower()
 
@@ -3905,12 +3899,13 @@ def _build_order_response(order: Dict[str, Any]) -> Dict[str, Any]:
         "quantity": order.get("quantity", 1),
         "phone": order.get("phone_number"),
         "shipping_address": {
-            "street": ship.get("address1", ""),
-            "city": ship.get("city", ""),
-            "state": ship.get("province", ""),
-            "country": ship.get("country", ""),
-            "zip": ship.get("zip", ""),
-            "phone": ship.get("phone", ""),
+            "address1": ship.get("address1", "") or "",
+            "address2": ship.get("address2", "") or "",
+            "city": ship.get("city", "") or "",
+            "state": ship.get("province", "") or "",
+            "country": ship.get("country", "") or "",
+            "zip": ship.get("zip", "") or "",
+            "phone": ship.get("phone", "") or "",
         },
     }
 
@@ -3939,7 +3934,8 @@ def get_order_detail(order_id: str):
 
 class ShippingAddressUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    street: Optional[str] = None
+    address1: Optional[str] = None        
+    address2: Optional[str] = None       
     city:   Optional[str] = None
     state:  Optional[str] = None
     country: Optional[str] = None
@@ -4261,50 +4257,7 @@ def _coerce_list(v: Any) -> List[str]:
     return [str(v)]
 
 
-def _basename_list(files: List[str]) -> List[str]:
-    return [os.path.basename(x).strip() for x in files if x]
-
-
-def _pick_saved_files_for_child(order: Dict[str, Any], idx: int) -> List[str]:
-
-    child_key = f"child{idx}"
-    child = order.get(child_key) or {}
-    if isinstance(child, dict):
-        files = _coerce_list(child.get("saved_files")
-                             or child.get("images") or child.get("files"))
-        if files:
-            return files
-
-    # children array
-    children = order.get("children") or order.get("kids") or []
-    if isinstance(children, list) and len(children) >= idx and isinstance(children[idx - 1], dict):
-        files = _coerce_list(
-            children[idx - 1].get("saved_files") or children[idx - 1].get("images"))
-        if files:
-            return files
-
-    # named fields sometimes used
-    keys = [f"child{idx}_saved_files", f"child{idx}_images"]
-    for k in keys:
-        files = _coerce_list(order.get(k))
-        if files:
-            return files
-
-    # fallback for single-child legacy (only return to child #1)
-    if idx == 1:
-        files = _coerce_list(
-            order.get("saved_files")
-            or order.get("images")
-            or (order.get("child") or {}).get("saved_files")
-        )
-        if files:
-            return files
-
-    return []
-
 # JOB_ID Detail API
-
-
 @app.get("/jobs/{job_id}/mini")
 def get_job_mini(job_id: str) -> Dict[str, Any]:
     order = orders_collection.find_one({"job_id": job_id})

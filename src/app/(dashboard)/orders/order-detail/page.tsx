@@ -43,7 +43,8 @@ function formatMoney(amount: string | number | "", locale?: string) {
 }
 
 type ShippingAddress = {
-  street?: string;
+  address1: string;
+  address2: string;
   city?: string;
   state?: string;
   country?: string;
@@ -138,7 +139,8 @@ type FormState = {
   phone: string;
   cust_status: string;
   shipping_address: {
-    street: string;
+    address1: string;
+    address2: string;
     city: string;
     state: string;
     country: string;
@@ -320,7 +322,8 @@ export default function OrderDetailPage() {
     phone: o.phone || o.customer?.phone_number || "",
     cust_status: (o as any).cust_status || "",
     shipping_address: {
-      street: o.shipping_address?.street || "",
+      address1: o.shipping_address?.address1 || "",
+      address2: o.shipping_address?.address2 || "",
       city: o.shipping_address?.city || "",
       state: o.shipping_address?.state || "",
       country: o.shipping_address?.country || "",
@@ -511,6 +514,15 @@ export default function OrderDetailPage() {
 
   const isTwinOrder =
     (order?.book_id || "").toLowerCase() === "twin" || !!order?.child?.is_twin;
+
+  const formatAddress = (a?: {
+  address1?: string; address2?: string;
+  city?: string; state?: string; postal_code?: string; country?: string;
+}) =>
+  [a?.address1, a?.address2, a?.city, a?.state, a?.postal_code, a?.country]
+    .map(s => String(s || "").trim())
+    .filter(Boolean)
+    .join(", ");
 
   return (
     <main className="min-h-screen bg-gray-50 py-4">
@@ -767,11 +779,19 @@ export default function OrderDetailPage() {
                   <div>
                     <div className="flex flex-col gap-2">
                       <InfoField
-                        label="Street"
-                        value={form.shipping_address.street}
+                        label="Landmark"
+                        value={form.shipping_address.address1}
                         editable={isEditing}
                         onChange={(v) =>
-                          updateForm("shipping_address.street", v)
+                          updateForm("shipping_address.address1", v)
+                        }
+                      />
+                      <InfoField
+                        label="Area"
+                        value={form.shipping_address.address2}
+                        editable={isEditing}
+                        onChange={(v) =>
+                          updateForm("shipping_address.address2", v)
                         }
                       />
                       <InfoField
