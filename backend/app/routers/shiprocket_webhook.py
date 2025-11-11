@@ -3,27 +3,23 @@ import os
 import logging
 from datetime import datetime
 from typing import List, Optional, Union
-
+from .cloudprinter_webhook import _send_tracking_email
 
 from dotenv import load_dotenv, find_dotenv
-load_dotenv(find_dotenv(), override=False) 
+load_dotenv(find_dotenv(), override=False)
 
 from fastapi import APIRouter, Request, Response, BackgroundTasks
 from pydantic import BaseModel, Field, ConfigDict
 from pymongo import MongoClient
 
-router = APIRouter()  # no prefix; we’ll expose a clean path below
+router = APIRouter()
 
-# --- Config
 EXPECTED_TOKEN = (os.getenv("SHIPROCKET_WEBHOOK_TOKEN") or "").strip()
-
-# Reuse the same DB your main.py uses
 MONGO_URI = os.getenv("MONGO_URI")
 client = MongoClient(MONGO_URI, tz_aware=True)
 db = client["candyman"]
 orders_collection = db["shipping_details"]
 
-# ---- Models (lenient; allow extra fields)
 class Scan(BaseModel):
     model_config = ConfigDict(extra="allow")
     date: Optional[str] = None
@@ -42,8 +38,8 @@ class ShiprocketEvent(BaseModel):
     shipment_status: Optional[str] = None
     shipment_status_id: Optional[int] = None
     current_timestamp: Optional[str] = None
-    order_id: Optional[str] = None          # your commerce order ref like "#123"
-    sr_order_id: Optional[int] = None       # Shiprocket's order id
+    order_id: Optional[str] = None
+    sr_order_id: Optional[int] = None
     awb_assigned_date: Optional[str] = None
     pickup_scheduled_date: Optional[str] = None
     etd: Optional[str] = None
@@ -54,17 +50,13 @@ class ShiprocketEvent(BaseModel):
     pod: Optional[str] = None
 
 def _parse_ts(ts: Optional[str]) -> Optional[str]:
-    """Return ISO8601 string or None. Shiprocket sometimes sends '23 05 2023 11:43:52'."""
     if not ts:
         return None
-    # Be tolerant; store raw too. We avoid hard failures here.
     try:
-        # Try day-first “DD MM YYYY HH:MM:SS”
         from datetime import datetime
         return datetime.strptime(ts, "%d %m %Y %H:%M:%S").isoformat()
     except Exception:
         try:
-            # Try common ISO-like formats
             return datetime.fromisoformat(ts.replace("Z", "+00:00")).isoformat()
         except Exception:
             return None
@@ -74,12 +66,10 @@ def _dedupe_key(ev: ShiprocketEvent) -> str:
     import hashlib
     return hashlib.sha256(base.encode()).hexdigest()
 
-# In-memory dedupe for the single-process case; switch to Redis for multi-worker
 _seen: set[str] = set()
 
 from datetime import datetime, timezone
 def _upsert_tracking(e: ShiprocketEvent, raw: dict) -> None:
-    # Prefer matching on your own order_id when present; otherwise keep a separate index by AWB.
     q = {"order_id": e.order_id} if e.order_id else {"awb_code": e.awb}
     update = {
         "$set": {
@@ -97,61 +87,76 @@ def _upsert_tracking(e: ShiprocketEvent, raw: dict) -> None:
                 "pod": e.pod,
                 "last_update_utc": datetime.now(timezone.utc),
                 "scans": [s.model_dump(by_alias=True) for s in (e.scans or [])],
-                "raw": raw,  # keep for debugging
+                "raw": raw,
             },
-            # Convenience mirrors
             "tracking_number": e.awb or raw.get("tracking") or "",
             "courier_partner": e.courier_name or "",
             "delivery_status": "shipped" if (e.current_status or "").upper() in {"DELIVERED", "RTO DELIVERED"} else None,
         }
     }
-    # Avoid wiping print_status to None if not delivered
     if update["$set"]["delivery_status"] is None:
         update["$set"].pop("delivery_status", None)
-
     orders_collection.update_one(q, update, upsert=False)
 
-def _maybe_send_delivered_email(background: BackgroundTasks, e: ShiprocketEvent) -> None:
-    """Stub: hook for delivered notifications. Disabled by default."""
-    if (e.current_status or "").upper() != "DELIVERED":
-        return
-    # Example idempotent flag; off by default to avoid noisy emails.
-    # once = orders_collection.update_one({"order_id": e.order_id, "$or": [{"delivered_email_sent": {"$exists": False}}, {"delivered_email_sent": False}]}, {"$set": {"delivered_email_sent": True}})
-    # if once.modified_count == 1:
-    #     background.add_task(send_delivered_email, ...)
-
-# NOTE: Avoid the banned keywords in the path.
 @router.post("/api/webhook/Genesis")
 @router.post("/api/webhook/Genesis/")
 async def shiprocket_tracking(request: Request, background: BackgroundTasks) -> Response:
-    # Must return 200, always.
     try:
-        # Optional token check (recommended)
         if EXPECTED_TOKEN:
-            token = request.headers.get("x-api-key")  # exact header name
+            token = request.headers.get("x-api-key")
             if not token or token.strip() != EXPECTED_TOKEN:
                 logging.warning("[SR WH] token mismatch; ignoring payload")
                 return Response(status_code=200)
 
-        # Content-type tolerance: if not JSON, ack and drop.
-        if (request.headers.get("content-type") or "").lower() != "application/json":
+        ct = (request.headers.get("content-type") or "").lower()
+        if not ct.startswith("application/json"):
             return Response(status_code=200)
 
         raw = await request.json()
         logging.info(f"[SR WH] payload: {raw}")
         event = ShiprocketEvent.model_validate(raw)
 
-        # Idempotency
         key = _dedupe_key(event)
         if key in _seen:
             return Response(status_code=200)
         _seen.add(key)
 
-        # Persist
         _upsert_tracking(event, raw)
 
-        # Optional delivered email hook
-        _maybe_send_delivered_email(background, event)
+        query_base = {"order_id": event.order_id} if event.order_id else {"awb_code": event.awb}
+        should_attempt = bool(event.awb or (raw.get("tracking")))
+        if should_attempt:
+            filter_once = {
+                **query_base,
+                "$or": [
+                    {"shiprocket_shipped_email_sent": {"$exists": False}},
+                    {"shiprocket_shipped_email_sent": False},
+                ],
+            }
+            set_once = {"$set": {"shiprocket_shipped_email_sent": True}}
+            once = orders_collection.update_one(filter_once, set_once, upsert=False)
+            if once.modified_count == 1:
+                doc = orders_collection.find_one(
+                    query_base,
+                    {"email": 1, "user_name": 1, "child_name": 1, "order_id": 1, "tracking_number": 1, "_id": 0},
+                ) or {}
+                to_email = (doc.get("email") or "").strip()
+                if to_email:
+                    order_ref = (doc.get("order_id") or event.order_id or "").strip()
+                    shipping_option = "shiprocket"
+                    tracking = (doc.get("tracking_number") or event.awb or "").strip()
+                    user_name = doc.get("user_name")
+                    name = doc.get("child_name")
+                    background.add_task(
+                        _send_tracking_email,
+                        to_email,
+                        order_ref,
+                        shipping_option,
+                        tracking,
+                        user_name,
+                        name,
+                    )
+                    logging.info(f"[SR WH] queued shipped-email to {to_email} for {order_ref}")
 
         return Response(status_code=200)
     except Exception as exc:

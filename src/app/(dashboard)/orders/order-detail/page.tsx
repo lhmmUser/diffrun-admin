@@ -206,7 +206,6 @@ const TimelineItem = ({
   </div>
 );
 
-/* ---------- MOVED OUTSIDE: stable identity prevents remount on keystroke ---------- */
 type InfoFieldProps = {
   label: string;
   value: string | number;
@@ -278,7 +277,6 @@ const InfoField: React.FC<InfoFieldProps> = React.memo(function InfoField({
     </div>
   );
 });
-/* ---------------------------------------------------------------------------------- */
 
 export default function OrderDetailPage() {
   const router = useRouter();
@@ -514,15 +512,6 @@ export default function OrderDetailPage() {
 
   const isTwinOrder =
     (order?.book_id || "").toLowerCase() === "twin" || !!order?.child?.is_twin;
-
-  const formatAddress = (a?: {
-  address1?: string; address2?: string;
-  city?: string; state?: string; postal_code?: string; country?: string;
-}) =>
-  [a?.address1, a?.address2, a?.city, a?.state, a?.postal_code, a?.country]
-    .map(s => String(s || "").trim())
-    .filter(Boolean)
-    .join(", ");
 
   return (
     <main className="min-h-screen bg-gray-50 py-4">
