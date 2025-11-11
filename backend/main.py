@@ -1806,11 +1806,33 @@ def _extract_url_from_formula(formula: str) -> str:
     return formula
 
 
-def append_shipping_details(row: list):
-    
+from datetime import datetime, timezone
+# ensure: import re  # needed by _extract_url_from_formula
+
+def append_shipping_details(row: list, order: dict):
+    """
+    Upsert into MongoDB using:
+      - sheet-mirrored fields from `row`
+      - extra fields (user_name, email) directly from `order` (NOT written to sheet)
+    """
     try:
         cover_link_raw = _extract_url_from_formula(row[9])
         interior_link_raw = _extract_url_from_formula(row[10])
+
+        # Pick keys that exist in YOUR payload. These fallbacks are safe:
+        user_name = (
+            order.get("user_name")
+            or order.get("customer_name")
+            or (order.get("shipping_address") or {}).get("name")
+            or order.get("name")
+            or ""
+        )
+        email = (
+            order.get("email")
+            or order.get("customer_email")
+            or (order.get("shipping_address") or {}).get("email")
+            or ""
+        )
 
         doc = {
             "order_id": row[1],
@@ -1824,6 +1846,11 @@ def append_shipping_details(row: list):
             "cover_link": cover_link_raw,
             "interior_link": interior_link_raw,
             "quantity": row[11],
+
+            # Mongo-only additions:
+            "user_name": user_name,
+            "email": email,
+
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
 
@@ -1836,6 +1863,7 @@ def append_shipping_details(row: list):
         print(f"[MONGO] upserted shipping_details for order {row[1]}")
     except Exception as exc:
         print(f"[MONGO][ERROR] failed to upsert shipping_details for order {row[1]}: {exc}")
+
 
 def append_row_to_google_sheet(row: list):
    
@@ -1904,7 +1932,7 @@ async def send_to_google_sheet(order_ids: List[str], background_tasks: Backgroun
 
         # 3) Only now build the row and enqueue appends
         row = order_to_sheet_row(order)
-        background_tasks.add_task(append_shipping_details, row)
+        background_tasks.add_task(append_shipping_details, row, order)
         quantity = int(order.get("quantity", 1) or 1)
         quantity = max(1, quantity)
         for _ in range(quantity):
