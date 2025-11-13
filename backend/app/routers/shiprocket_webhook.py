@@ -4,6 +4,7 @@ import logging
 from datetime import datetime
 from typing import List, Optional, Union
 from .cloudprinter_webhook import _send_tracking_email
+import requests
 
 from dotenv import load_dotenv, find_dotenv
 load_dotenv(find_dotenv(), override=False)
@@ -100,6 +101,8 @@ def _upsert_tracking(e: ShiprocketEvent, raw: dict) -> None:
         update["$set"].pop("delivery_status", None)
     orders_collection.update_one(q, update, upsert=False)
 
+
+
 @router.post("/api/webhook/Genesis")
 @router.post("/api/webhook/Genesis/")
 async def shiprocket_tracking(request: Request, background: BackgroundTasks) -> Response:
@@ -125,6 +128,19 @@ async def shiprocket_tracking(request: Request, background: BackgroundTasks) -> 
 
         _upsert_tracking(event, raw)
 
+        try:
+            internal_id = event.order_id  # same order_id you stored in DB
+            if internal_id:
+                base_url = os.getenv("NEXT_PUBLIC_API_BASE_URL")
+                requests.get(
+                    f"{base_url}/shiprocket/order/show",
+                    params={"internal_order_id": internal_id},
+                    timeout=10
+                )
+                logging.info(f"[SR WH] Triggered /shiprocket/order/show for {internal_id}")
+        except Exception as exc:
+            logging.exception(f"[SR WH] Failed to trigger order/show for {event.order_id}: {exc}")
+        
         query_base = {"order_id": event.order_id} if event.order_id else {"awb_code": event.awb}
         should_attempt = bool(event.awb or (raw.get("tracking")))
         if should_attempt:
