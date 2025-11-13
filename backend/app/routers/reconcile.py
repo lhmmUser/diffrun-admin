@@ -794,7 +794,7 @@ async def _auto_reconcile_and_sign_once() -> None:
             verified = sum(1 for r in rows_for_email if r.get("paid") is True)
             subject = f"[Auto-Reconcile] NA payments: {verified} verified / {len(rows_for_email)} found"
             body_html = _render_na_table(subject, from_iso, to_iso, rows_for_email)
-            _send_email_html(subject, body_html)
+            _send_email_html(None, subject, body_html)
             logger.info(f"[AUTO] Email sent: {subject}")
         else:
             logger.info("[AUTO] No candidate rows gathered; no email.")
