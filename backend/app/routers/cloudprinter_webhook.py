@@ -4,6 +4,7 @@ import time
 import hmac
 import os
 import smtplib
+import urllib.parse
 from email.message import EmailMessage
 from fastapi import APIRouter, Request, HTTPException, status, Depends, BackgroundTasks
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
@@ -17,6 +18,9 @@ BASIC_USER = (os.getenv("CP_WEBHOOK_USER") or "").strip()
 BASIC_PASS = (os.getenv("CP_WEBHOOK_PASS") or "").strip()
 EMAIL_USER = (os.getenv("EMAIL_ADDRESS") or "").strip()
 EMAIL_PASS = (os.getenv("EMAIL_PASSWORD") or "").strip()
+
+# Provider-specific tracking URL templates (keep as constants; don't hardcode inline)
+CLOUDPRINTER_TRACKING_URL_TEMPLATE = "https://parcelsapp.com/en/tracking/{tracking}"
 
 
 def _eq(a: str, b: str) -> bool:
@@ -36,6 +40,9 @@ class ItemShippedPayload(BaseModel):
 
 
 def _tracking_link(shipping_option: str, tracking: str) -> str:
+    """
+    Backwards-compatible fallback. Keeps existing behavior if no template/override is provided.
+    """
     if shipping_option and tracking:
         return f"https://parcelsapp.com/en/tracking/{tracking}"
     return ""
@@ -46,7 +53,20 @@ def _send_tracking_email(to_email: str,
                          shipping_option: str,
                          tracking: str,
                          user_name: str | None = None,
-                         name: str | None = None):
+                         name: str | None = None,
+                         tracking_url_template: str | None = None,
+                         tracking_url_override: str | None = None
+                         ):
+    """
+    Send shipped email.
+
+    Priority for deciding tracking URL:
+      1) tracking_url_override (full URL, used as-is)
+      2) tracking_url_template (format string containing "{tracking}")
+      3) fallback _tracking_link(shipping_option, tracking)
+
+    The function will URL-encode the tracking token when using a template.
+    """
     if not to_email:
         print(f"[MAIL] skipped: empty recipient for order {order_ref}")
         return
@@ -54,7 +74,20 @@ def _send_tracking_email(to_email: str,
     display_name = (user_name or "there").strip().title() or "there"
     child_name = (name or "Your").strip().title() or "Your"
 
-    track_url = _tracking_link(shipping_option, tracking)
+    # Build tracking URL (priority order)
+    if tracking_url_override:
+        track_url = tracking_url_override
+    elif tracking_url_template and tracking:
+        # URL-encode the tracking code to be safe for embedding in URLs
+        safe_tracking = urllib.parse.quote_plus(tracking)
+        try:
+            track_url = tracking_url_template.format(tracking=safe_tracking)
+        except Exception:
+            # If template formatting fails, fallback to raw tracking insertion
+            track_url = tracking_url_template.replace("{tracking}", safe_tracking)
+    else:
+        track_url = _tracking_link(shipping_option, tracking)
+
     track_button_html = (
         f"""
         <p style="margin: 20px 0;">
@@ -254,6 +287,7 @@ async def cloudprinter_webhook(
 
         if to_email:
             # queue email in background
+            # pass the provider-specific template constant (clean, maintainable)
             background_tasks.add_task(
                 _send_tracking_email,
                 to_email,
@@ -261,7 +295,9 @@ async def cloudprinter_webhook(
                 data.shipping_option,
                 data.tracking,
                 user_name,
-                name
+                name,
+                CLOUDPRINTER_TRACKING_URL_TEMPLATE,
+                None
             )
             print(
                 f"[CP WEBHOOK] queued shipped-email to {to_email} for {data.order_reference}")

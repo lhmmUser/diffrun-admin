@@ -49,6 +49,8 @@ class ShiprocketEvent(BaseModel):
     pod_status: Optional[str] = None
     pod: Optional[str] = None
 
+SHIPROCKET_TRACKING_URL_TEMPLATE = "https://shiprocket.co/tracking/{tracking}"
+
 def _parse_ts(ts: Optional[str]) -> Optional[str]:
     if not ts:
         return None
@@ -155,6 +157,8 @@ async def shiprocket_tracking(request: Request, background: BackgroundTasks) -> 
                         tracking,
                         user_name,
                         name,
+                        SHIPROCKET_TRACKING_URL_TEMPLATE,
+                        None
                     )
                     logging.info(f"[SR WH] queued shipped-email to {to_email} for {order_ref}")
 
