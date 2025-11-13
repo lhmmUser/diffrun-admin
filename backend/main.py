@@ -27,6 +27,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 import tempfile
 from dateutil import parser
 from app.routers.reconcile import router as vlookup_router
+from app.routers.reconcile import _auto_reconcile_and_sign_once
 from app.routers.razorpay_export import router as razorpay_router
 from app.routers.cloudprinter_webhook import router as cloudprinter_router
 import pandas as pd
@@ -41,6 +42,7 @@ import re
 import json
 import httpx
 import html
+import asyncio
 import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError, NoCredentialsError, PartialCredentialsError
@@ -103,24 +105,32 @@ async def lifespan(app: FastAPI):
         if not scheduler.running:
             scheduler.start()
 
+        # capture the running loop for thread-safe submission
+        loop = asyncio.get_running_loop()
+
+        def _kick_auto_reconcile():
+            # schedule the coroutine on the FastAPI event loop
+            asyncio.run_coroutine_threadsafe(_auto_reconcile_and_sign_once(), loop)
+
+        # every 5 minutes
         scheduler.add_job(
-            _run_export_and_email,
-            trigger=CronTrigger(hour="0,3,6,9,12,15,18,21",
-                                minute="0", timezone=IST_TZ),
-            id="xlsx_export_fixed_ist_times",
+            _kick_auto_reconcile,
+            trigger=CronTrigger(minute="*/5", timezone=IST_TZ),
+            id="auto_reconcile_every_5m",
             replace_existing=True,
             coalesce=True,
             max_instances=1,
         )
 
-        # scheduler.add_job(
-        #     send_nudge_email,
-        #     trigger=CronTrigger(hour="14", minute="0", timezone=IST_TZ),
-        #     id="nudge_email_daily_14ist",
-        #     replace_existing=True,
-        #     coalesce=True,
-        #     max_instances=1,
-        # )
+        # your existing jobs stay unchanged
+        scheduler.add_job(
+            _run_export_and_email,
+            trigger=CronTrigger(hour="0,3,6,9,12,15,18,21", minute="0", timezone=IST_TZ),
+            id="xlsx_export_fixed_ist_times",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
 
         scheduler.add_job(
             run_feedback_emails_job,
@@ -141,7 +151,6 @@ async def lifespan(app: FastAPI):
             scheduler.shutdown(wait=False)
     except Exception:
         logger.exception("Failed to stop APScheduler in lifespan")
-
 
 app = FastAPI(lifespan=lifespan)
 app.include_router(vlookup_router)
@@ -1804,10 +1813,6 @@ def _extract_url_from_formula(formula: str) -> str:
     if match:
         return match.group(1)
     return formula
-
-
-from datetime import datetime, timezone
-# ensure: import re  # needed by _extract_url_from_formula
 
 def append_shipping_details(row: list, order: dict):
     """
@@ -3806,9 +3811,7 @@ def debug_run_reconcile_now():
     _hourly_reconcile_and_email()
     return {"ok": True}
 
-##################################
-# START OF ORDER DETAILS LOGIC
-##################################
+
 
 
 def _iso(dt: Any) -> Optional[str]:
