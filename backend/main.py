@@ -4461,7 +4461,7 @@ def _sr_order_payload_from_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
     order_id=(doc.get("order_id"))
     book_id = (doc.get("book_id") or "BOOK").upper()
     book_style = (doc.get("book_style") or "HARDCOVER").upper()
-    #order_id_long=(doc.get("order_id_long"))
+    order_id_long=(doc.get("order_id_long"))
 
     # order date "YYYY-MM-DD HH:MM" (IST)
     dt = doc.get("processed_at") or doc.get("created_at")
@@ -4513,7 +4513,7 @@ def _sr_order_payload_from_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
         "order_items": [
             {
                 "name": f"Personalised {book_id} ({book_style})",
-                "sku": f"{order_id}",
+                "sku": f"{order_id_long}",
                 "units": qty,
                 "selling_price": float(round(subtotal / max(qty, 1), 2)),
                 "discount": 0,
