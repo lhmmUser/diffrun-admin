@@ -2681,7 +2681,7 @@ def export_orders_filtered_csv(
         "payment_date", "payment_time", "payment_hour",
         "locale", "name", "user_name",
         # include these if you want nested shipping fields in default
-        "shipping_address.city", "shipping_address.province",
+        "shipping_address.city", "shipping_address.province","shipping_address.zip",
         "discount_code", "paypal_capture_id", "transaction_id", "tracking_code",
         "partial_preview", "final_preview", "cust_status", "printer",
     ]

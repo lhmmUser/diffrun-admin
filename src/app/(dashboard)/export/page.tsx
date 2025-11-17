@@ -57,6 +57,7 @@ const Export = () => {
         // shipping fields
         'shipping_address.city',
         'shipping_address.province',
+        'shipping_address.zip',
 
         // ADDING THESE:
         'discount_code',
