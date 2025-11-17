@@ -4140,7 +4140,8 @@ def _build_order_response(order: Dict[str, Any]) -> Dict[str, Any]:
         "paypal_capture_id": order.get("paypal_capture_id", ""),
         "paypal_order_id": order.get("paypal_order_id", ""),
         "cover_image": cover_url_from_gen or "",
-        "tracking_code": order.get("tracking_code")
+        "tracking_code": order.get("tracking_code"),
+        "printer": order.get("printer", "")
     }
 
     # timeline
@@ -4187,6 +4188,7 @@ def _build_order_response(order: Dict[str, Any]) -> Dict[str, Any]:
         "customer": customer_details,
         "order": order_details,
         "timeline": timeline,
+        "printer": order.get("printer", "")
     })
     return response
 
@@ -4197,6 +4199,17 @@ def get_order_detail(order_id: str):
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
     return _build_order_response(order)
+
+@app.get("/shipping/{order_id}")
+def get_shipping_detail(order_id: str):
+    # debug
+    print("DEBUG received order_id:", repr(order_id))
+    shipping = shipping_collection.find_one({"order_id": order_id})
+    print("DEBUG db find result:", shipping is not None)
+    if not shipping:
+        raise HTTPException(status_code=404, detail="Shipping details not found")
+    shipping["_id"] = str(shipping.get("_id")) if shipping.get("_id") else None
+    return shipping
 
 
 class ShippingAddressUpdate(BaseModel):

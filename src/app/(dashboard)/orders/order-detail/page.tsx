@@ -116,6 +116,7 @@ type OrderDetail = {
   timeline?: Timeline;
   cover_image?: string;
   tracking_code?: string | null;
+  printer?: string;
 };
 
 type FormState = {
@@ -350,7 +351,102 @@ export default function OrderDetailPage() {
           const err = await res.json().catch(() => ({}));
           throw new Error(err.detail || `HTTP ${res.status}`);
         }
-        const data: OrderDetail = await res.json();
+        let data: OrderDetail = await res.json();
+
+        // Debug: log order shape so we can see where printer lives
+        // eslint-disable-next-line no-console
+        console.info("DEBUG /orders response:", data);
+
+        // Find printer info in many possible fields
+        const printerCandidates = [
+          (data.order && (data.order as any).printer) ?? null,
+          (data as any).printer ?? null,
+          (data as any).printer_type ?? null,
+          (data as any).print_status ?? null,
+          (data as any).print_status_label ?? null,
+          (data as any).print_by ?? null,
+          (data as any).print_approval ?? null,
+          (data as any).print ?? null,
+          (data as any).printer_type_label ?? null,
+          (data.order && (data.order as any).print_status) ?? null,
+          (data.order && (data.order as any).printer_type) ?? null,
+        ].filter(Boolean).map(String);
+
+        const printerStr =
+          printerCandidates.length > 0
+            ? printerCandidates.join("|").toLowerCase()
+            : "";
+
+        // eslint-disable-next-line no-console
+        console.info("DEBUG detected printer candidates:", printerCandidates);
+
+        const looksLikeGenesis = printerStr.includes("genesis");
+        const looksLikeCloud = printerStr.includes("cloudprinter") || printerStr.includes("cloud");
+
+        // If it's genesis, fetch shipping doc and merge tracking/shipped_at
+        if (looksLikeGenesis && !looksLikeCloud) {
+          try {
+            const shipUrl = `${API_BASE}/shipping/${encodeURIComponent(data.order_id)}`;
+            // eslint-disable-next-line no-console
+            console.info("DEBUG fetching shipping for genesis:", shipUrl);
+            const shipRes = await fetch(shipUrl, { cache: "no-store" });
+            if (shipRes && shipRes.ok) {
+              const shipDoc = await shipRes.json().catch(() => null);
+              // eslint-disable-next-line no-console
+              console.info("DEBUG shipping doc:", shipDoc);
+              if (shipDoc) {
+                const tracking =
+                  shipDoc.tracking_number ||
+                  shipDoc.shiprocket_data?.awb ||
+                  shipDoc.shiprocket_raw?.awb ||
+                  shipDoc.shiprocket_data?.shipments?.awb ||
+                  shipDoc.shiprocket_raw?.shipments?.awb ||
+                  "";
+
+                let shippedAt =
+                  shipDoc.shiprocket_data?.shipments?.shipped_date ||
+                  shipDoc.shiprocket_raw?.shipments?.shipped_date ||
+                  shipDoc.shiprocket_data?.current_timestamp_iso ||
+                  shipDoc.shiprocket_raw?.delivered_date ||
+                  shipDoc.shiprocket_data?.last_update_utc ||
+                  shipDoc.shipped_date ||
+                  shipDoc.updated_at ||
+                  null;
+
+                if (shippedAt && typeof shippedAt === "string") {
+                  const s = shippedAt.trim();
+                  if (/^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}/.test(s)) {
+                    shippedAt = s.replace(/\s+/, "T") + "Z";
+                  }
+                }
+
+                data = {
+                  ...data,
+                  order: {
+                    ...(data.order || {}),
+                    tracking_code:
+                      (data.order && (data.order as any).tracking_code) || tracking || (data as any).tracking_code || "",
+                  },
+                  timeline: {
+                    ...(data.timeline || {}),
+                    shipped_at:
+                      (data.timeline && data.timeline.shipped_at) || shippedAt || null,
+                  },
+                };
+              }
+            } else {
+              // eslint-disable-next-line no-console
+              console.warn("DEBUG shipping endpoint returned non-ok:", shipRes?.status);
+            }
+          } catch (e) {
+            // eslint-disable-next-line no-console
+            console.warn("DEBUG shipping fetch error:", e);
+          }
+        } else {
+          // eslint-disable-next-line no-console
+          console.info("DEBUG not fetching shipping: genesis not detected (printerStr):", printerStr);
+        }
+
         setOrder(data);
         setForm(toFormState(data));
       } catch (e: any) {
@@ -360,6 +456,8 @@ export default function OrderDetailPage() {
       }
     })();
   }, [rawOrderId]);
+
+
 
   const updateForm = (path: string, value: any) => {
     setForm((prev: any) => {
@@ -697,7 +795,7 @@ export default function OrderDetailPage() {
                         date={formatIso(order.timeline?.shipped_at)}
                         subtext={
                           order.timeline?.shipped_at &&
-                          order.order?.tracking_code ? (
+                            order.order?.tracking_code ? (
                             <>
                               <span>
                                 Tracking ID: {order.order.tracking_code}
@@ -948,7 +1046,7 @@ export default function OrderDetailPage() {
                   )}
 
                   {order.child?.child1_input_images?.length ||
-                  order.child?.child2_input_images?.length ? (
+                    order.child?.child2_input_images?.length ? (
                     <div className="mt-2 flex flex-col gap-4">
                       <div>
                         <div className="text-xs font-semibold text-gray-800 mb-1">
@@ -961,7 +1059,7 @@ export default function OrderDetailPage() {
                         )}
                       </div>
                       {order.child?.is_twin ||
-                      order.child?.child2_input_images?.length ? (
+                        order.child?.child2_input_images?.length ? (
                         <div>
                           <div className="text-xs font-semibold text-gray-800 mb-1">
                             Child 2 Inputs
