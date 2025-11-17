@@ -56,6 +56,7 @@ from datetime import datetime, date
 from zoneinfo import ZoneInfo
 from datetime import datetime
 from app.routers.shiprocket_webhook import router as shiprocket_router
+from dateutil import parser as dateutil_parser
 
 
 IST_TZ = pytz.timezone("Asia/Kolkata")
@@ -2566,14 +2567,14 @@ def export_orders_csv():
         "approved", "created_date", "created_time", "creation_hour",
         "payment_date", "payment_time", "payment_hour",
         "locale", "name", "user_name", "shipping_address.city", "shipping_address.province",
-        "order_id", "discount_code", "paypal_capture_id", "transaction_id", "tracking_code", "partial_preview", "final_preview","cust_status"
+        "order_id", "discount_code", "paypal_capture_id", "transaction_id", "tracking_code", "partial_preview", "final_preview","cust_status", "printer",
     ]
 
     projection = {
         "email": 1, "phone_number": 1, "age": 1, "book_id": 1, "book_style": 1, "total_price": 1,
         "gender": 1, "paid": 1, "approved": 1, "created_at": 1, "processed_at": 1,
         "locale": 1, "name": 1, "user_name": 1, "shipping_address": 1, "order_id": 1,
-        "discount_code": 1, "paypal_capture_id": 1, "transaction_id": 1, "tracking_code": 1, "partial_preview": 1, "final_preview": 1,"cust_status": 1
+        "discount_code": 1, "paypal_capture_id": 1, "transaction_id": 1, "tracking_code": 1, "partial_preview": 1, "final_preview": 1,"cust_status": 1, "printer": 1,
     }
 
     cursor = orders_collection.find({}, projection).sort("created_at", -1)
@@ -2647,6 +2648,188 @@ def export_orders_csv():
 
         temp_file.flush()
         return FileResponse(temp_file.name, media_type="text/csv", filename="orders_export.csv")
+
+
+# IST timezone used in your current code
+IST = pytz.timezone("Asia/Kolkata")
+
+# New endpoint: export filtered CSV
+@app.get("/export-orders-filtered-csv")
+def export_orders_filtered_csv(
+    paid: Optional[bool] = Query(None, description="Filter by paid (true/false)"),
+    approved: Optional[bool] = Query(None, description="Filter by approved (true/false)"),
+    locale: Optional[str] = Query(None, description="Filter by locale"),
+    start: Optional[str] = Query(None, description="Start created_at ISO datetime (inclusive)"),
+    end: Optional[str] = Query(None, description="End created_at ISO datetime (inclusive)"),
+    fields: Optional[str] = Query(
+        None,
+        description="Comma-separated fields to include (nested fields with dot notation). "
+                    "If omitted, a sensible default set will be used."
+    ),
+):
+    """
+    Returns CSV of orders filtered by query params.
+    - only includes documents whose order_id exactly matches '#<digits>' (excludes 'Test', 'reject', etc).
+    - fields param controls which columns are present in the CSV (comma-separated).
+    """
+
+    # Default fields (match your screenshot / typical export)
+    default_fields = [
+        "email", "order_id", "phone_number", "age", "book_id", "book_style", "total_price",
+        "gender", "paid", "approved",
+        "created_date", "created_time", "creation_hour",
+        "payment_date", "payment_time", "payment_hour",
+        "locale", "name", "user_name",
+        # include these if you want nested shipping fields in default
+        "shipping_address.city", "shipping_address.province",
+        "discount_code", "paypal_capture_id", "transaction_id", "tracking_code",
+        "partial_preview", "final_preview", "cust_status", "printer",
+    ]
+
+    # Resolve requested fields
+    if fields:
+        requested_fields = [f.strip() for f in fields.split(",") if f.strip()]
+    else:
+        requested_fields = default_fields
+
+    # Build MongoDB projection from requested_fields
+    projection = {}
+    for f in requested_fields:
+        # Map created_date/time fields to created_at / processed_at in projection if present
+        if f in ("created_date", "created_time", "creation_hour"):
+            projection["created_at"] = 1
+        elif f in ("payment_date", "payment_time", "payment_hour"):
+            projection["processed_at"] = 1
+        else:
+            # Handle nested fields (shipping_address.city -> shipping_address)
+            if "." in f:
+                top = f.split(".")[0]
+                projection[top] = 1
+            else:
+                projection[f] = 1
+
+    # Always include order_id for regex filtering and created/processed if needed
+    projection["order_id"] = 1
+    projection["created_at"] = projection.get("created_at", 0) or 1
+    projection["processed_at"] = projection.get("processed_at", 0) or 1
+
+    # Build query filters
+    query = {}
+
+    # Filter: order_id must be exactly '#digits' (no letters, no Test/reject)
+    query["order_id"] = {"$regex": r"^#\d+$"}
+
+    if paid is not None:
+        query["paid"] = paid
+    if approved is not None:
+        query["approved"] = approved
+    if locale:
+        query["locale"] = locale
+
+    # created_at range handling (expect ISO strings). Inclusive check.
+    try:
+        if start:
+            start_dt = dateutil_parser.isoparse(start)
+            # convert to UTC naive-aware comparable to DB; assume DB stored as UTC or tz-aware
+            if start_dt.tzinfo is None:
+                start_dt = start_dt.replace(tzinfo=timezone.utc)
+            query.setdefault("created_at", {})
+            query["created_at"]["$gte"] = start_dt
+        if end:
+            end_dt = dateutil_parser.isoparse(end)
+            if end_dt.tzinfo is None:
+                end_dt = end_dt.replace(tzinfo=timezone.utc)
+            query.setdefault("created_at", {})
+            query["created_at"]["$lte"] = end_dt
+    except Exception as e:
+        # Bad date parsing -> ignore date filters (or you can raise HTTPException)
+        print("⚠️ Date range parse failed:", e)
+
+    cursor = orders_collection.find(query, projection).sort("created_at", -1)
+
+    # Helper to format datetimes exactly like your current method
+    def format_datetime_parts(dt):
+        try:
+            if isinstance(dt, str):
+                dt = dateutil_parser.isoparse(dt)
+            if isinstance(dt, datetime):
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                dt_ist = dt.astimezone(IST)
+                return (
+                    dt_ist.strftime("%d-%m-%Y"),     # date
+                    dt_ist.strftime("%I:%M %p"),     # time (12-hour with AM/PM)
+                    dt_ist.strftime("%H")            # 24-hour hour
+                )
+        except Exception as e:
+            print("⚠️ Date parse failed:", e)
+        return "", "", ""
+
+    # Write CSV to a temp file and return FileResponse (same pattern as your working endpoint)
+    with tempfile.NamedTemporaryFile(mode="w+", newline='', delete=False, suffix=".csv", encoding="utf-8") as temp_file:
+        writer = csv.writer(temp_file)
+        # write header row from requested_fields (keep order)
+        writer.writerow(requested_fields)
+
+        for doc in cursor:
+            # Apply created/processed formatted values once per doc
+            created_date, created_time, creation_hour = format_datetime_parts(doc.get("created_at"))
+            payment_date, payment_time, payment_hour = format_datetime_parts(doc.get("processed_at"))
+
+            row = []
+            for field in requested_fields:
+                if field == "created_date":
+                    row.append(created_date)
+                    continue
+                if field == "created_time":
+                    row.append(created_time)
+                    continue
+                if field == "creation_hour":
+                    row.append(creation_hour)
+                    continue
+                if field == "payment_date":
+                    row.append(payment_date)
+                    continue
+                if field == "payment_time":
+                    row.append(payment_time)
+                    continue
+                if field == "payment_hour":
+                    row.append(payment_hour)
+                    continue
+
+                # Nested lookup
+                if '.' in field:
+                    value = doc
+                    for part in field.split('.'):
+                        if isinstance(value, dict):
+                            value = value.get(part, "")
+                        else:
+                            value = ""
+                else:
+                    value = doc.get(field, "")
+
+                # Price formatting
+                if field in ["total_price", "price", "amount", "total_amount"]:
+                    try:
+                        value = float(value)
+                        value = "{:.2f}".format(value)
+                    except Exception:
+                        value = ""
+
+                # Clean phone number so it won't break CSV
+                if field == "phone_number":
+                    value = str(value).replace(",", "").strip()
+
+                # Convert booleans to TRUE/FALSE strings (so spreadsheet shows them well)
+                if isinstance(value, bool):
+                    value = "TRUE" if value else "FALSE"
+
+                row.append(value)
+
+            writer.writerow(row)
+
+        temp_file.flush()
+        return FileResponse(temp_file.name, media_type="text/csv", filename="orders_filtered_export.csv")
 
 
 IST_OFFSET = timedelta(hours=5, minutes=30)
@@ -4057,6 +4240,7 @@ class OrderUpdate(BaseModel):
     email:     Optional[EmailStr] = None
     phone:     Optional[str] = None
     cust_status: Optional[str] = None
+    printer:   Optional[str] = None
     shipping_address: Optional[ShippingAddressUpdate] = None
     timeline:         Optional[TimelineUpdate] = None
     order_id: Optional[str] = None
