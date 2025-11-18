@@ -1057,6 +1057,12 @@ def generate_book_title(book_id, child_name):
         return f"{child_name} meets ABC"
     elif book_id == "dream":
         return f"Many Dreams of {child_name}"
+    elif book_id == "sports":
+        return f"Game On, {child_name}!"
+    elif book_id == "hero":
+        return f"{child_name}, the Little Hero"
+    elif book_id == "bloom":
+        return f"{child_name}' is Growing Up Fast" 
     else:
         return f"{child_name}'s Storybook"
 
@@ -4659,6 +4665,8 @@ def _sr_order_payload_from_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
     book_id = (doc.get("book_id") or "BOOK").upper()
     book_style = (doc.get("book_style") or "HARDCOVER").upper()
     order_id_long=(doc.get("order_id_long"))
+    name=(doc.get("name"))
+    product_name=generate_book_title(book_id, name)
 
     # order date "YYYY-MM-DD HH:MM" (IST)
     dt = doc.get("processed_at") or doc.get("created_at")
@@ -4709,7 +4717,7 @@ def _sr_order_payload_from_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
 
         "order_items": [
             {
-                "name": f"Personalised {book_id} ({book_style})",
+                "name": f"{product_name}",
                 "sku": f"{order_id_long}",
                 "units": qty,
                 "selling_price": float(round(subtotal / max(qty, 1), 2)),
