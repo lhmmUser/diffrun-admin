@@ -404,21 +404,8 @@ export default function OrderDetailPage() {
                   "";
 
                 let shippedAt =
-                  shipDoc.shiprocket_data?.shipments?.shipped_date ||
                   shipDoc.shiprocket_raw?.shipments?.shipped_date ||
-                  shipDoc.shiprocket_data?.current_timestamp_iso ||
-                  shipDoc.shiprocket_raw?.delivered_date ||
-                  shipDoc.shiprocket_data?.last_update_utc ||
-                  shipDoc.shipped_date ||
-                  shipDoc.updated_at ||
                   null;
-
-                if (shippedAt && typeof shippedAt === "string") {
-                  const s = shippedAt.trim();
-                  if (/^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}/.test(s)) {
-                    shippedAt = s.replace(/\s+/, "T") + "Z";
-                  }
-                }
 
                 data = {
                   ...data,

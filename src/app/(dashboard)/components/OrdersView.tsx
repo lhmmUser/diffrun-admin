@@ -300,9 +300,14 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
       if (search && search.trim() !== "") params.append("q", search.trim());
 
       const res = await fetch(`${baseUrl}/orders?${params.toString()}`);
+      if (!res.ok) {
+        console.error("[fetchOrders] /orders returned", res.status, res.statusText);
+        return;
+      }
+
       const rawData: RawOrder[] = await res.json();
 
-      // ... map to your Order[] exactly as before ...
+      // initial transform (same as before) — keep shippedAt from API if present
       const transformed: Order[] = rawData.map((order) => ({
         orderId: order.order_id || "N/A",
         jobId: order.job_id || "N/A",
@@ -322,13 +327,70 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
         discountCode: order.discount_code || "",
         currency: order.currency || "INR",
         locale: order.locale || "",
-        shippedAt: order.shippedAt || "",
+        shippedAt: order.shippedAt || "",         // initial value may be empty for Genesis
         quantity: order.quantity || 1,
         printStatus: (order.printStatus ?? '') as string,
         printer: (order.printer ?? '') as string,
       }));
 
+      // set the list immediately so UI responds fast
       setOrders(transformed);
+
+      // find genesis orders that do not have shippedAt populated yet
+      const genesisToFetch = transformed.filter(
+        (o) => (o.printer || "").toLowerCase() === "genesis" && !o.shippedAt
+      );
+
+      if (!baseUrl || genesisToFetch.length === 0) return;
+
+      // limit parallel fetches if you are concerned about rate limiting. Here we do them all,
+      // you can change to chunking if needed.
+      const fetchPromises = genesisToFetch.map(async (order) => {
+        const orderId = order.orderId;
+        try {
+          const shipRes = await fetch(`${baseUrl}/shipping/${encodeURIComponent(orderId)}`);
+          if (!shipRes.ok) {
+            // if 404 or error, ignore and leave shippedAt as-is
+            console.warn(`[fetchOrders] shipping/${orderId} returned ${shipRes.status}`);
+            return { orderId, shippedAt: null };
+          }
+          const shipDoc = await shipRes.json();
+
+          // defensive extraction (prefer shiprocket_raw.shipments.shipped_date)
+          const shippedAtCandidate =
+            shipDoc?.shiprocket_raw?.shipments?.shipped_date ||
+            shipDoc?.shiprocket_raw?.shipments?.delivered_date ||
+            shipDoc?.shiprocket_raw?.shipments?.shipped_date?.toString?.() ||
+            shipDoc?.shiprocket_data?.shipments?.shipped_date ||
+            shipDoc?.shipments?.shipped_date ||
+            shipDoc?.shipped_date ||
+            shipDoc?.shipped_at ||
+            null;
+
+          return { orderId, shippedAt: shippedAtCandidate };
+        } catch (e) {
+          console.error(`[fetchOrders] failed to fetch shipping for ${order.orderId}`, e);
+          return { orderId: order.orderId, shippedAt: null };
+        }
+      });
+
+      const settled = await Promise.allSettled(fetchPromises);
+
+      // update state with results (only those that returned a non-null shippedAt)
+      setOrders((prev) => {
+        if (!Array.isArray(prev)) return prev;
+        const byId = new Map(prev.map((p) => [p.orderId, p]));
+        for (const s of settled) {
+          if (s.status === "fulfilled" && s.value && s.value.shippedAt) {
+            const { orderId, shippedAt } = s.value;
+            const old = byId.get(orderId);
+            if (old) {
+              byId.set(orderId, { ...old, shippedAt });
+            }
+          }
+        }
+        return Array.from(byId.values());
+      });
     } catch (e) {
       console.error("❌ Failed to fetch orders:", e);
     }
@@ -927,8 +989,8 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
                 : ""
           }
           className={`px-4 py-2 rounded text-sm font-medium transition ${selectedOrders.size === 0 || hasNonApprovedOrders() || hasNonIndiaSelectedOrders()
-              ? 'bg-gray-200 text-gray-500 cursor-not-allowed'
-              : 'bg-green-600 text-white hover:bg-green-700'
+            ? 'bg-gray-200 text-gray-500 cursor-not-allowed'
+            : 'bg-green-600 text-white hover:bg-green-700'
             }`}
         >
           Send to Genesis
