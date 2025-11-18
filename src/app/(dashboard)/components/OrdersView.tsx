@@ -37,6 +37,7 @@ type RawOrder = {
   shippedAt?: string;
   quantity?: number;
   printer?: string;
+  shippingStatus?: string;
 };
 
 type Order = {
@@ -60,6 +61,7 @@ type Order = {
   currency: string;
   locale: string;
   shippedAt: string;
+  shippingStatus: string;     // <-- NEW
   quantity: number;
   printer: string;
 };
@@ -328,6 +330,7 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
         currency: order.currency || "INR",
         locale: order.locale || "",
         shippedAt: order.shippedAt || "",         // initial value may be empty for Genesis
+        shippingStatus: (order.shippingStatus as string) || "", // <-- NEW
         quantity: order.quantity || 1,
         printStatus: (order.printStatus ?? '') as string,
         printer: (order.printer ?? '') as string,
@@ -352,7 +355,7 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
           if (!shipRes.ok) {
             // if 404 or error, ignore and leave shippedAt as-is
             console.warn(`[fetchOrders] shipping/${orderId} returned ${shipRes.status}`);
-            return { orderId, shippedAt: null };
+            return { orderId, shippedAt: null, shippingStatus: null };
           }
           const shipDoc = await shipRes.json();
 
@@ -360,32 +363,63 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
           const shippedAtCandidate =
             shipDoc?.shiprocket_raw?.shipments?.shipped_date ||
             shipDoc?.shiprocket_raw?.shipments?.delivered_date ||
-            shipDoc?.shiprocket_raw?.shipments?.shipped_date?.toString?.() ||
             shipDoc?.shiprocket_data?.shipments?.shipped_date ||
             shipDoc?.shipments?.shipped_date ||
             shipDoc?.shipped_date ||
             shipDoc?.shipped_at ||
             null;
 
-          return { orderId, shippedAt: shippedAtCandidate };
+          // ----- SHIPPING STATUS extraction (NEW) -----
+          // Prefer last sr-status-label from shiprocket_data.scans
+          const lastScanLabel =
+            Array.isArray(shipDoc?.shiprocket_data?.scans) && shipDoc.shiprocket_data.scans.length
+              ? shipDoc.shiprocket_data.scans[shipDoc.shiprocket_data.scans.length - 1]["sr-status-label"] ||
+                shipDoc.shiprocket_data.scans[shipDoc.shiprocket_data.scans.length - 1]["sr-status_label"] ||
+                shipDoc.shiprocket_data.scans[shipDoc.shiprocket_data.scans.length - 1]["activity"] ||
+                null
+              : null;
+
+          // fallback to raw.scans
+          const lastRawScanLabel =
+            Array.isArray(shipDoc?.shiprocket_data?.raw?.scans) && shipDoc.shiprocket_data.raw.scans.length
+              ? shipDoc.shiprocket_data.raw.scans[shipDoc.shiprocket_data.raw.scans.length - 1]["sr-status-label"] ||
+                shipDoc.shiprocket_data.raw.scans[shipDoc.shiprocket_data.raw.scans.length - 1]["sr-status_label"] ||
+                shipDoc.shiprocket_data.raw.scans[shipDoc.shiprocket_data.raw.scans.length - 1]["activity"] ||
+                null
+              : null;
+
+          // other fallbacks: shiprocket_data.current_status / shiprocket_data.shipment_status / shiprocket_raw.status
+          const statusFallback =
+            shipDoc?.shiprocket_data?.current_status ||
+            shipDoc?.shiprocket_data?.shipment_status ||
+            shipDoc?.shiprocket_raw?.status ||
+            shipDoc?.delivery_status ||
+            null;
+
+          const shippingStatusCandidate = (lastScanLabel || lastRawScanLabel || statusFallback || null);
+
+          return { orderId, shippedAt: shippedAtCandidate, shippingStatus: shippingStatusCandidate };
         } catch (e) {
           console.error(`[fetchOrders] failed to fetch shipping for ${order.orderId}`, e);
-          return { orderId: order.orderId, shippedAt: null };
+          return { orderId: order.orderId, shippedAt: null, shippingStatus: null };
         }
       });
 
       const settled = await Promise.allSettled(fetchPromises);
 
-      // update state with results (only those that returned a non-null shippedAt)
+      // update state with results (only those that returned a non-null shippedAt or shippingStatus)
       setOrders((prev) => {
         if (!Array.isArray(prev)) return prev;
         const byId = new Map(prev.map((p) => [p.orderId, p]));
         for (const s of settled) {
-          if (s.status === "fulfilled" && s.value && s.value.shippedAt) {
-            const { orderId, shippedAt } = s.value;
+          if (s.status === "fulfilled" && s.value) {
+            const { orderId, shippedAt, shippingStatus } = s.value;
             const old = byId.get(orderId);
             if (old) {
-              byId.set(orderId, { ...old, shippedAt });
+              const updated = { ...old };
+              if (shippedAt) updated.shippedAt = shippedAt;
+              if (shippingStatus) updated.shippingStatus = shippingStatus;
+              byId.set(orderId, updated);
             }
           }
         }
@@ -535,6 +569,7 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
             currency: order.currency || 'INR', // fallback to INR
             locale: order.locale || '', // default locale
             shippedAt: order.shippedAt || '',
+            shippingStatus: (order.shippingStatus as string) || '', // <-- NEW
             quantity: order.quantity || 1,
             printer: (order.printer ?? '') as string,
           };
@@ -742,6 +777,7 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
             currency: order.currency || 'INR',
             locale: order.locale || '',
             shippedAt: order.shippedAt || '',
+            shippingStatus: (order.shippingStatus as string) || '',
             quantity: order.quantity || 1,
             printer: (order.printer ?? '') as string,
           };
@@ -1047,6 +1083,8 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
             }) ? 'bg-gray-200 text-gray-500 cursor-not-allowed' :
             'bg-red-500 text-white hover:bg-red-600'
             }`}>
+
+
           Unapprove
         </button>
 
@@ -1178,7 +1216,7 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
               </th>
               {[
                 "Order ID", "Name", "City", "Loc", "Book ID", "Book Style", "Price", "Payment Date",
-                "Approval Date", "Status", "Print Approval", "Preview", "Cover PDF", "Interior PDF", "Print Status", "Quantity", "Shipped At", "Discount Code", "Feedback Email",
+                "Approval Date", "Status", "Print Approval", "Preview", "Cover PDF", "Interior PDF", "Print Status", "Quantity", "Shipped At", "Shipping Status", "Discount Code", "Feedback Email",
               ].map((heading, i) => (
                 <th key={i} className="p-3 whitespace-nowrap">{heading}</th>
               ))}
@@ -1253,6 +1291,15 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
                 </td>
                 <td className="px-2 text-xs">
                   {order.shippedAt && formatDayMonUTC(order.shippedAt)}
+                </td>
+                <td className="px-2 text-xs">
+                  {order.shippingStatus ? (
+                    <span className="px-2 py-1 rounded text-xs font-medium bg-gray-100 text-gray-800" title={order.shippingStatus}>
+                      {order.shippingStatus}
+                    </span>
+                  ) : (
+                    <span className="text-gray-400">-</span>
+                  )}
                 </td>
                 <td className="px-2">
                   {order.discountCode ? (

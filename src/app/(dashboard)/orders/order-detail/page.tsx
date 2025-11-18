@@ -92,6 +92,7 @@ type Timeline = {
   approved_at?: string | null;
   print_sent_at?: string | null;
   shipped_at?: string | null;
+  delivered_at?: string | null;
 };
 
 type OrderDetail = {
@@ -153,6 +154,7 @@ type FormState = {
     approved_at: string;
     print_sent_at: string;
     shipped_at: string;
+    delivered_at: string;
   };
   tracking_code: string;
 };
@@ -334,6 +336,7 @@ export default function OrderDetailPage() {
       approved_at: o.timeline?.approved_at || "",
       print_sent_at: o.timeline?.print_sent_at || "",
       shipped_at: o.timeline?.shipped_at || "",
+      delivered_at: (o.timeline as any)?.delivered_at || "",
     },
     tracking_code: o.tracking_code || "",
   });
@@ -403,9 +406,22 @@ export default function OrderDetailPage() {
                   shipDoc.shiprocket_raw?.shipments?.awb ||
                   "";
 
-                let shippedAt =
+                // normalize shipped and delivered timestamps to ISO-ish forms
+                let shippedAtRaw =
                   shipDoc.shiprocket_raw?.shipments?.shipped_date ||
+                  shipDoc.shiprocket_raw?.shipments?.shipped_at ||
                   null;
+
+                let shippedAt = normalizeShiprocketTimestamp(shippedAtRaw);
+
+                const deliveredRaw =
+                  shipDoc.shiprocket_data?.current_status === "DELIVERED"
+                    ? shipDoc.shiprocket_data?.current_timestamp_raw || null
+                    : null;
+
+                const deliveredAt = normalizeShiprocketTimestamp(deliveredRaw);
+
+
 
                 data = {
                   ...data,
@@ -418,6 +434,8 @@ export default function OrderDetailPage() {
                     ...(data.timeline || {}),
                     shipped_at:
                       (data.timeline && data.timeline.shipped_at) || shippedAt || null,
+                    delivered_at:
+                      (data.timeline && (data.timeline as any).delivered_at) || deliveredAt || null,
                   },
                 };
               }
@@ -553,6 +571,31 @@ export default function OrderDetailPage() {
     } catch {
       return iso as string;
     }
+  };
+  // normalize various shiprocket timestamp shapes into an ISO-ish string
+  const normalizeShiprocketTimestamp = (s?: string | null): string | null => {
+    if (!s) return null;
+    const raw = String(s).trim();
+
+    // already ISO-like with T
+    if (/^\d{4}-\d{2}-\d{2}T/.test(raw)) return raw;
+
+    // 2025-11-17 18:39:16  -> 2025-11-17T18:39:16
+    if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(raw)) {
+      return raw.replace(" ", "T");
+    }
+
+    // 17 11 2025 18:39:16  -> 2025-11-17T18:39:16
+    const m = raw.match(/^(\d{1,2})\s+(\d{1,2})\s+(\d{4})\s+(\d{2}:\d{2}:\d{2})$/);
+    if (m) {
+      const [, dd, mm, yyyy, time] = m;
+      const ddP = dd.padStart(2, "0");
+      const mmP = mm.padStart(2, "0");
+      return `${yyyy}-${mmP}-${ddP}T${time}`;
+    }
+
+    // fallback: return original (formatIso will fall back to showing raw if unparseable)
+    return raw;
   };
 
   const prettyDate = (s?: string | null): string => {
@@ -804,8 +847,16 @@ export default function OrderDetailPage() {
                             </>
                           ) : undefined
                         }
-                        isLast
                       />
+                      {order.timeline?.delivered_at ? (
+                        <TimelineItem
+                          label="Delivered"
+                          date={formatIso(order.timeline.delivered_at)}
+                          isLast
+                        />
+                      ) : (
+                        <TimelineItem label="Delivered" date="-" isLast />
+                      )}
                     </div>
 
                     {isEditing && (
@@ -845,6 +896,12 @@ export default function OrderDetailPage() {
                           value={form.timeline.shipped_at}
                           editable
                           onChange={(v) => updateForm("timeline.shipped_at", v)}
+                        />
+                        <InfoField
+                          label="delivered_at"
+                          value={form.timeline.delivered_at}
+                          editable
+                          onChange={(v) => updateForm("timeline.delivered_at", v)}
                         />
                       </div>
                     )}
