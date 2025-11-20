@@ -374,18 +374,18 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
           const lastScanLabel =
             Array.isArray(shipDoc?.shiprocket_data?.scans) && shipDoc.shiprocket_data.scans.length
               ? shipDoc.shiprocket_data.scans[shipDoc.shiprocket_data.scans.length - 1]["sr-status-label"] ||
-                shipDoc.shiprocket_data.scans[shipDoc.shiprocket_data.scans.length - 1]["sr-status_label"] ||
-                shipDoc.shiprocket_data.scans[shipDoc.shiprocket_data.scans.length - 1]["activity"] ||
-                null
+              shipDoc.shiprocket_data.scans[shipDoc.shiprocket_data.scans.length - 1]["sr-status_label"] ||
+              shipDoc.shiprocket_data.scans[shipDoc.shiprocket_data.scans.length - 1]["activity"] ||
+              null
               : null;
 
           // fallback to raw.scans
           const lastRawScanLabel =
             Array.isArray(shipDoc?.shiprocket_data?.raw?.scans) && shipDoc.shiprocket_data.raw.scans.length
               ? shipDoc.shiprocket_data.raw.scans[shipDoc.shiprocket_data.raw.scans.length - 1]["sr-status-label"] ||
-                shipDoc.shiprocket_data.raw.scans[shipDoc.shiprocket_data.raw.scans.length - 1]["sr-status_label"] ||
-                shipDoc.shiprocket_data.raw.scans[shipDoc.shiprocket_data.raw.scans.length - 1]["activity"] ||
-                null
+              shipDoc.shiprocket_data.raw.scans[shipDoc.shiprocket_data.raw.scans.length - 1]["sr-status_label"] ||
+              shipDoc.shiprocket_data.raw.scans[shipDoc.shiprocket_data.raw.scans.length - 1]["activity"] ||
+              null
               : null;
 
           // other fallbacks: shiprocket_data.current_status / shiprocket_data.shipment_status / shiprocket_raw.status
@@ -608,7 +608,7 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
           selectedOrderIds.map((orderId) => ({
             order_id: orderId,
             status: 'processing',
-            message: 'Queued for Google Sheets...',
+            message: 'Queued for Genesis Google Sheets...',
             step: 'queued',
           }))
         );
@@ -800,7 +800,206 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
         // keep progress visible so user can read error; hide after 8s
         setTimeout(() => setShowProgress(false), 8000);
       }
-    } else if (action === 'reject') {
+    } else if (action === 'send_to_yara') {
+      try {
+        setShowProgress(true);
+        setPrintResults([]);
+
+        const selectedOrderIds = Array.from(selectedOrders);
+        console.log('[YARA] selectedOrderIds:', selectedOrderIds);
+        if (selectedOrderIds.length === 0) {
+          console.warn('[YARA] No selected orders; aborting.');
+          setShowProgress(false);
+          return;
+        }
+
+        setPrintResults(
+          selectedOrderIds.map((orderId) => ({
+            order_id: orderId,
+            status: 'processing',
+            message: 'Queued for Yara Google Sheets...',
+            step: 'queued',
+          }))
+        );
+
+        // Try POST with JSON array first, fallback to wrapped object on 422
+        const trySend = async (): Promise<Response> => {
+          const url = `${baseUrl}/orders/send-to-yara`;
+          console.log('[YARA] POST', url, 'body:', selectedOrderIds);
+
+          let res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(selectedOrderIds),
+          });
+
+          console.log('[YARA] First attempt status:', res.status, res.statusText);
+
+          if (res.status === 422) {
+            console.warn('[YARA] 422 for array body — retrying with wrapped object');
+            res = await fetch(url, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ order_ids: selectedOrderIds }),
+            });
+            console.log('[YARA] Second attempt status:', res.status, res.statusText);
+          }
+
+          return res;
+        };
+
+        const response = await trySend();
+
+        if (!response.ok) {
+          let errorText = `${response.status} ${response.statusText}`;
+          try {
+            const errJson = await response.json();
+            errorText = errJson.detail || JSON.stringify(errJson);
+          } catch {
+            // ignore JSON parse failures
+          }
+          throw new Error(`Failed to send to Yara: ${errorText}`);
+        }
+
+        let results: any;
+        try {
+          results = await response.json();
+        } catch {
+          results = null;
+        }
+        console.log('[YARA] Response OK (200). Parsed results:', results);
+        if (results) setPrintResults(results);
+
+        // 🔹 NEW RULE (same as genesis): If Yara returned 200, ALWAYS trigger Shiprocket
+        try {
+          const shiprocketOrderIds = selectedOrderIds;
+          console.log('[SHIPROCKET] Triggering with order_ids:', shiprocketOrderIds);
+
+          const srPayload = {
+            order_ids: shiprocketOrderIds,
+            request_pickup: true,
+          };
+          console.log('[SHIPROCKET] POST payload:', srPayload);
+
+          const srRes = await fetch(`${baseUrl}/shiprocket/create-from-orders`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(srPayload),
+          });
+
+          console.log('[SHIPROCKET] create-from-orders status:', srRes.status, srRes.statusText);
+
+          if (!srRes.ok) {
+            let srErrMsg = `${srRes.status} ${srRes.statusText}`;
+            try {
+              const err = await srRes.json();
+              console.log('[SHIPROCKET] Error body:', err);
+              srErrMsg = err.detail || JSON.stringify(err);
+            } catch {
+              // keep default msg
+            }
+            throw new Error(srErrMsg);
+          }
+
+          const srJson = await srRes.json();
+          console.log('[SHIPROCKET] Success body:', srJson);
+
+          const created = Array.isArray(srJson.created) ? srJson.created.length : 0;
+          const awbs = Array.isArray(srJson.awbs) ? srJson.awbs.length : 0;
+          const errCount = Array.isArray(srJson.errors) ? srJson.errors.length : 0;
+          const pickup = srJson.pickup ? 'requested' : 'skipped';
+
+          alert(
+            `Shiprocket → created: ${created}, AWBs: ${awbs}, pickup: ${pickup}${errCount ? `, errors: ${errCount}` : ''}`
+          );
+        } catch (e) {
+          console.error('[SHIPROCKET] create-from-orders failed:', e);
+          alert(`❌ Shiprocket create failed: ${e instanceof Error ? e.message : 'Unknown error'}`);
+        }
+
+        // Show success/failure summary for Yara (informational)
+        try {
+          if (Array.isArray(results)) {
+            const successfulOrders = results.filter((r: any) => r.status !== 'error');
+            const failedOrders = results.filter((r: any) => r.status === 'error');
+            if (successfulOrders.length > 0) {
+              alert(`Successfully queued ${successfulOrders.length} orders to Yara`);
+            }
+            if (failedOrders.length > 0) {
+              alert(`Failed to queue ${failedOrders.length} orders to Yara. Check console for details.`);
+              console.error('[YARA] Failed orders:', failedOrders);
+            }
+          } else {
+            console.log('[YARA] Non-array response; skipping success/error breakdown.');
+          }
+        } catch (e) {
+          console.warn('[YARA] Summary parsing failed:', e);
+        }
+
+        // Clear selection and refresh orders
+        setSelectedOrders(new Set());
+
+        const params = new URLSearchParams();
+        if (filterStatus !== 'all') params.append('filter_status', filterStatus);
+        if (filterBookStyle !== 'all') params.append('filter_book_style', filterBookStyle);
+        params.append('sort_by', sortBy);
+        params.append('sort_dir', sortDir);
+
+        console.log('[YARA] Refetching orders with params:', params.toString());
+        const ordersRes = await fetch(`${baseUrl}/orders?${params.toString()}`);
+        console.log('[YARA] orders GET status:', ordersRes.status, ordersRes.statusText);
+        const rawData: RawOrder[] = await ordersRes.json();
+
+        const transformed: Order[] = rawData.map((order: RawOrder): Order => {
+          return {
+            orderId: order.order_id || 'N/A',
+            jobId: order.job_id || 'N/A',
+            coverPdf: order.coverPdf || '',
+            interiorPdf: order.interiorPdf || '',
+            previewUrl: order.previewUrl || '',
+            name: order.name || '',
+            city: order.city || '',
+            price: order.price || 0,
+            paymentDate: order.paymentDate || '',
+            approvalDate: order.approvalDate || '',
+            status: order.status || '',
+            bookId: order.bookId || '',
+            bookStyle: order.bookStyle || '',
+            printStatus: order.printStatus || '',
+            feedback_email: false,
+            printApproval: (() => {
+              if (typeof order.print_approval === 'boolean') return order.print_approval;
+              console.warn(`⚠️ [YARA] print_approval missing or invalid for order:`, order);
+              return 'not found';
+            })(),
+            discountCode: order.discount_code || '',
+            currency: order.currency || 'INR',
+            locale: order.locale || '',
+            shippedAt: order.shippedAt || '',
+            shippingStatus: (order.shippingStatus as string) || '',
+            quantity: order.quantity || 1,
+            printer: (order.printer ?? '') as string,
+          };
+        });
+
+        setOrders(transformed);
+
+        setTimeout(() => setShowProgress(false), 5000);
+      } catch (error) {
+        console.error('[YARA] Error sending orders to Yara:', error);
+        setPrintResults([
+          {
+            order_id: 'system',
+            status: 'error',
+            message: error instanceof Error ? error.message : 'Failed to send orders to Yara',
+            step: 'api_request',
+          },
+        ]);
+        setTimeout(() => setShowProgress(false), 8000);
+      }
+    }
+
+    else if (action === 'reject') {
       console.log(`[REJECT] Performing ${action} on orders:`, Array.from(selectedOrders));
     } else if (action === 'finalise') {
       console.log(`[FINALISE] Performing ${action} on orders:`, Array.from(selectedOrders));
@@ -1032,6 +1231,27 @@ export default function OrdersView({ defaultDiscountCode = "all", hideDiscountFi
           Send to Genesis
         </button>
 
+        <button
+          onClick={() => handleAction('send_to_yara')}
+          disabled={
+            selectedOrders.size === 0 ||
+            hasNonApprovedOrders() ||
+            hasNonIndiaSelectedOrders()
+          }
+          title={
+            hasNonApprovedOrders()
+              ? "All selected orders must be approved before sending"
+              : hasNonIndiaSelectedOrders()
+                ? "Send to Yara is available only for India (IN) orders"
+                : ""
+          }
+          className={`px-4 py-2 rounded text-sm font-medium transition ${selectedOrders.size === 0 || hasNonApprovedOrders() || hasNonIndiaSelectedOrders()
+            ? 'bg-gray-200 text-gray-500 cursor-not-allowed'
+            : 'bg-green-600 text-white hover:bg-green-700'
+            }`}
+        >
+          Send to Yara
+        </button>
 
         <button
           onClick={() => handleAction('reject')}
