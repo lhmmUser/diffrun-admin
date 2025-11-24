@@ -2221,8 +2221,11 @@ def get_jobs(
     sort_dir: Optional[str] = Query("asc", description="asc or desc"),
     filter_status: Optional[str] = Query(None),
     filter_book_style: Optional[str] = Query(None),
+    q: Optional[str] = Query(None, description="Search by job_id, order_id, name"),  
+    page: int = Query(1, ge=1), 
+    limit: int = Query(50, ge=1, le=1000), 
 ):
-    # No paid filter for jobs
+
     query = {}
 
     if filter_status == "approved":
@@ -2232,6 +2235,19 @@ def get_jobs(
 
     if filter_book_style:
         query["book_style"] = filter_book_style
+
+    # NEW: Search functionality
+    if q and q.strip():
+        term = q.strip()
+        rx = re.compile(re.escape(term), re.IGNORECASE)
+        query.setdefault("$and", []).append({
+            "$or": [
+                {"job_id": {"$regex": rx}},
+                {"order_id": {"$regex": rx}},
+                {"name": {"$regex": rx}},
+                {"book_id": {"$regex": rx}},
+            ]
+        })
 
     sort_field = sort_by if sort_by else "created_at"
     sort_order = 1 if sort_dir == "asc" else -1
@@ -2263,15 +2279,18 @@ def get_jobs(
         "_id": 0
     }
 
+    skip = (page - 1) * limit
+    total_count = orders_collection.count_documents(query)
+    
     records = list(orders_collection.find(
-        query, projection).sort(sort_field, sort_order))
+        query, projection).sort(sort_field, sort_order).skip(skip).limit(limit))
+    
     result = []
 
     for doc in records:
         shipping_address = doc.get("shipping_address", {})
         if isinstance(shipping_address, dict):
             city = shipping_address.get("city", "")
-
         else:
             city = ""
         result.append({
@@ -2296,8 +2315,15 @@ def get_jobs(
             "printer": doc.get("printer", "") or "",
         })
 
-    return result
-
+    return {
+        "jobs": result,
+        "pagination": {
+            "page": page,
+            "limit": limit,
+            "total": total_count,
+            "pages": (total_count + limit - 1) // limit
+        }
+    }
 
 @app.get("/stats/jobs-timeline")
 def jobs_timeline(interval: str = Query("day", enum=["day", "week", "month"])):
