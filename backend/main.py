@@ -1078,6 +1078,8 @@ def get_orders(
     exclude_discount_code: Optional[List[str]] = Query(None),
     q: Optional[str] = Query(
         None, description="Search by job_id, order_id, email, name, discount_code, city, locale, book_id"),
+    page: int = Query(1, ge=1),
+    limit: int = Query(50, ge=1, le=1000), 
 ):
     # Base query    
     query = {"paid": True}
@@ -1144,6 +1146,9 @@ def get_orders(
                 ]
             })
 
+    skip = (page - 1) * limit
+    total_count = orders_collection.count_documents(query)
+
     # Sorting
     sort_field = sort_by if sort_by else "created_at"
     sort_order = 1 if sort_dir == "asc" else -1
@@ -1180,8 +1185,8 @@ def get_orders(
         "printer": 1,
     }
 
-    records = list(orders_collection.find(
-        query, projection).sort(sort_field, sort_order))
+    cursor = orders_collection.find(query, projection).sort(sort_field, sort_order).skip(skip).limit(limit)
+    records = list(cursor)
     result = []
 
     for doc in records:
@@ -1211,7 +1216,15 @@ def get_orders(
             "printer": doc.get("printer", ""),
         })
 
-    return result
+    return {
+        "orders": result,
+        "pagination": {
+            "page": page,
+            "limit": limit,
+            "total": total_count,
+            "pages": (total_count + limit - 1) // limit
+        }
+    }
 
 
 @app.post("/orders/set-cust-status/{order_id}")
@@ -5197,5 +5210,3 @@ def shiprocket_order_show(internal_order_id: str):
         "courier_name": courier_name,
         "shipping_charges": shipping_charges
     }
-
-
