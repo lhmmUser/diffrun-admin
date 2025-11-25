@@ -4957,7 +4957,16 @@ def _sr_order_payload_from_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
     except Exception:
         order_date = datetime.now(IST_TZ).strftime("%Y-%m-%d %H:%M")
 
-    pickup_name = doc.get("pickup_location") or SHIPROCKET_DEFAULT_PICKUP
+    # ---- PICKUP LOCATION BASED ON PRINTER ----
+    printer = (doc.get("printer") or "").strip().lower()
+
+    if printer == "yara":
+        # must match the pickup name configured in Shiprocket
+        pickup_name = "Diffrun"
+    elif printer == "genesis":
+        # must match the pickup name configured in Shiprocket
+        pickup_name = "warehouse-1"
+
     if not pickup_name:
         raise HTTPException(status_code=400, detail="Shiprocket pickup_location not configured")
 
@@ -5130,17 +5139,6 @@ def shiprocket_create_from_orders(
 
     return {"created": created_refs, "awbs": awb_results, "pickup": pickup_res, "errors": errors}
 
-from fastapi import HTTPException
-
-@app.get("/shiprocket/run-create/{order_id}")
-def run_shiprocket_create(order_id: str):
-    # simple adapter that calls your POST handler synchronously
-    payload = {
-        "order_ids": [order_id],
-        "assign_awb": False,
-        "request_pickup": False,
-    }
-    return shiprocket_create_from_orders(**payload)
 
 
 def _to_number(value):
