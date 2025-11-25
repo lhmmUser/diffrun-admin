@@ -79,7 +79,6 @@ export default function OrdersView({
   title = "Orders",
   excludeTestDiscount,
 }: OrdersViewProps) {
-
   const router = useRouter();
   const searchParams = useSearchParams();
 
@@ -327,7 +326,7 @@ export default function OrdersView({
       }
 
       const data = await res.json();
-      console.log("Raw API response:", data); 
+      console.log("Raw API response:", data);
       const rawData: RawOrder[] = data.orders;
       console.log("Raw data:", rawData[0]);
 
@@ -662,8 +661,8 @@ export default function OrdersView({
               return "not found";
             })(),
             discountCode: order.discount_code || "",
-            currency: order.currency || "INR", 
-            locale: order.locale || "", 
+            currency: order.currency || "INR",
+            locale: order.locale || "",
             shippedAt: order.shippedAt || "",
             shippingStatus: (order.shippingStatus as string) || "",
             quantity: order.quantity || 1,
@@ -673,7 +672,6 @@ export default function OrdersView({
 
         setOrders(transformed);
         setTotalOrders(data.pagination.total);
-
       } catch (error) {
         console.error("[APPROVE] Error sending orders to printer:", error);
         setPrintResults([
@@ -752,9 +750,7 @@ export default function OrdersView({
           try {
             const errJson = await response.json();
             errorText = errJson.detail || JSON.stringify(errJson);
-          } catch {
-           
-          }
+          } catch {}
           throw new Error(`Failed to send to Genesis: ${errorText}`);
         }
 
@@ -776,7 +772,7 @@ export default function OrdersView({
 
           const srPayload = {
             order_ids: shiprocketOrderIds,
-            request_pickup: true, 
+            request_pickup: true,
           };
           console.log("[SHIPROCKET] POST payload:", srPayload);
 
@@ -881,7 +877,9 @@ export default function OrdersView({
           ordersRes.status,
           ordersRes.statusText
         );
-        const rawData: RawOrder[] = await ordersRes.json();
+
+        const data = await ordersRes.json();
+        const rawData: RawOrder[] = data.orders || [];
 
         const transformed: Order[] = rawData.map((order: RawOrder): Order => {
           return {
@@ -1133,7 +1131,9 @@ export default function OrdersView({
           ordersRes.status,
           ordersRes.statusText
         );
-        const rawData: RawOrder[] = await ordersRes.json();
+
+        const data = await ordersRes.json();
+        const rawData: RawOrder[] = data.orders || [];
 
         const transformed: Order[] = rawData.map((order: RawOrder): Order => {
           return {
@@ -1340,7 +1340,7 @@ export default function OrdersView({
       SGD: "S$",
       JPY: "¥",
     };
-    return symbols[code] || code + " "; 
+    return symbols[code] || code + " ";
   }
 
   const formatDate = (dateInput: any) => {
