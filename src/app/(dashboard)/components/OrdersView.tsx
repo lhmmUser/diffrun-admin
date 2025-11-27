@@ -688,16 +688,33 @@ export default function OrdersView({
       }
     } else if (action === "send_to_genesis") {
       try {
-        setShowProgress(true);
-        setPrintResults([]);
-
         const selectedOrderIds = Array.from(selectedOrders);
         console.log("[GENESIS] selectedOrderIds:", selectedOrderIds);
+
         if (selectedOrderIds.length === 0) {
           console.warn("[GENESIS] No selected orders; aborting.");
-          setShowProgress(false);
           return;
         }
+
+        // 🔴 NEW: check if any selected order has bookId "abcd"
+        const hasAbcdBook = selectedOrderIds.some((orderId) => {
+          const order = orders.find((o) => o.orderId === orderId);
+          return order?.bookId === "abcd";
+        });
+
+        if (hasAbcdBook) {
+          const confirmed = window.confirm(
+            "Do you want to send this abcd book to Genesis?"
+          );
+          if (!confirmed) {
+            // user said "No" → stop here
+            return;
+          }
+        }
+        // 🔴 END NEW
+
+        setShowProgress(true);
+        setPrintResults([]);
 
         setPrintResults(
           selectedOrderIds.map((orderId) => ({
