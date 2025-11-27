@@ -4117,6 +4117,7 @@ def cron_feedback_emails(limit: int = 200):
                 "feedback_email": {"$ne": True},
                 "shipping_option": "bluedart_in_domestic",
                 "shipped_at": {"$exists": True, "$ne": None},
+                "book_style": {"$ne": "paperback"},  # Add this line to skip paperback books
                 "$or": [
                     {"discount_code": {"$exists": False}},
                     {"discount_code": {"$ne": "TEST"}}
@@ -4220,7 +4221,6 @@ def cron_feedback_emails(limit: int = 200):
             )
 
     return results
-
 
 def run_feedback_emails_job():
     try:
