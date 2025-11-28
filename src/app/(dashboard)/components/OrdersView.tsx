@@ -370,12 +370,15 @@ export default function OrdersView({
     if (!baseUrl) return;
     if (!orders.length) return;
 
-    const targets = orders.filter(
-      (o) =>
-        (o.printer || "").toLowerCase() === "genesis" &&
-        !o.shippedAt &&
-        !shippingFetched.has(o.orderId)
-    );
+    const targets = orders.filter((o) => {
+  const printer = (o.printer || "").toLowerCase();
+
+  return (
+    (printer === "genesis" || printer === "yara") &&
+    !o.shippedAt &&
+    !shippingFetched.has(o.orderId)
+  );
+});
 
     if (!targets.length) return;
 

@@ -384,10 +384,11 @@ export default function OrderDetailPage() {
         console.info("DEBUG detected printer candidates:", printerCandidates);
 
         const looksLikeGenesis = printerStr.includes("genesis");
+        const looksLikeYara = printerStr.includes("yara");
         const looksLikeCloud = printerStr.includes("cloudprinter") || printerStr.includes("cloud");
 
         // If it's genesis, fetch shipping doc and merge tracking/shipped_at
-        if (looksLikeGenesis && !looksLikeCloud) {
+        if ((looksLikeGenesis || looksLikeYara) && !looksLikeCloud) {
           try {
             const shipUrl = `${API_BASE}/shipping/${encodeURIComponent(data.order_id)}`;
             // eslint-disable-next-line no-console
