@@ -39,9 +39,10 @@ type RangeKey = "1d" | "1w" | "1m" | "6m" | "this_month" | "custom";
 type Metric = "orders" | "jobs" | "conversion" | "revenue";
 
 // NEW: Country codes and options
-type CountryCode = "IN" | "AE" | "CA" | "US" | "GB";
+type CountryCode = "IN" | "AE" | "CA" | "US" | "GB" | "IN_ONLY";
 const COUNTRY_OPTIONS: { label: string; value: CountryCode }[] = [
-  { label: "India", value: "IN" },
+  { label: "All", value: "IN" },        // default – uses current behaviour
+  { label: "India", value: "IN_ONLY" },
   { label: "United Arab Emirates", value: "AE" },
   { label: "Canada", value: "CA" },
   { label: "United States", value: "US" },
@@ -75,11 +76,35 @@ export default function Home() {
   // NEW: require explicit Apply for custom
   const [customApplied, setCustomApplied] = useState(false);
 
+  // --- Shipment status table state (NEW) ---
+  const [shipRows, setShipRows] = useState<any[]>([]);
+  const [shipActivities, setShipActivities] = useState<string[]>([]);
+  const [shipError, setShipError] = useState<string>("");
+  const [shipLoading, setShipLoading] = useState<boolean>(false);
+  const [showShipTable, setShowShipTable] = useState(false);
+
+  const buildShipStatusUrl = (r: RangeKey) => {
+    const params = new URLSearchParams();
+    if (r === "custom") {
+      params.append("start_date", startDate);
+      params.append("end_date", endDate);
+    } else {
+      params.append("range", r);
+    }
+    // default to all printers; front-end can be extended to pass 'printer' from UI
+    params.append("printer", "all");
+    params.append("loc", country);
+    return `${baseUrl}/stats/ship-status?${params.toString()}`;
+  };
+  // --- end shipment state ---
+
+
   const addDays = (ymd: string, days: number) => {
     const d = new Date(ymd + "T00:00:00Z");
     d.setUTCDate(d.getUTCDate() + days);
     return d.toISOString().slice(0, 10);
   };
+
 
   const exclusions = ["TEST", "LHMM", "COLLAB", "REJECTED"];
 
@@ -237,6 +262,61 @@ export default function Home() {
       .catch((e) => setRevenueError(String(e)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [baseUrl, range, startDate, endDate, canFetch, country]);
+
+  // --- Fetch shipment status table (NEW) ---
+  useEffect(() => {
+    if (!canFetch) return;
+
+    if (country !== "IN_ONLY") {
+      // clear any old data and stop loading
+      setShipRows([]);
+      setShipActivities([]);
+      setShipError("");
+      setShipLoading(false);
+      return;
+    }
+
+    fetch(buildShipStatusUrl(range), { cache: "no-store" })
+      .then((r) => {
+        if (!r.ok) return r.text().then((txt) => Promise.reject(txt || r.status));
+        return r.json();
+      })
+      .then((json) => {
+        // Expecting { labels: [...], activities: [...], rows: [...] }
+        const activities = Array.isArray(json.activities) ? json.activities : [];
+
+        // rows should be array of { date, total, counts: { activityName: count, ... } }
+        let rows: any[] = Array.isArray(json.rows) ? json.rows : [];
+
+        // Normalize rows: ensure date, total and counts exist
+        rows = rows.map((r: any) => ({
+          date: (r.date ?? r.label ?? "").toString(),
+          total: Number.isFinite(r.total) ? r.total : 0, // Total orders (new column)
+          sent_to_print: Number.isFinite(r.sent_to_print)
+            ? r.sent_to_print
+            : (Number.isFinite(r.total) ? r.total : 0),  // fallback for old backend
+          counts: r.counts && typeof r.counts === "object" ? r.counts : {},
+        }));
+
+        // Optional: sort rows descending by date (newest first)
+        rows.sort((a: any, b: any) => {
+          const da = a.date.length === 10 ? new Date(a.date + "T00:00:00Z") : new Date(a.date);
+          const db = b.date.length === 10 ? new Date(b.date + "T00:00:00Z") : new Date(b.date);
+          return db.getTime() - da.getTime();
+        });
+
+        setShipActivities(activities);
+        setShipRows(rows);
+      })
+      .catch((err) => {
+        console.error("ship-status fetch error:", err);
+        setShipError(String(err));
+      })
+      .finally(() => setShipLoading(false));
+  }, [baseUrl, range, startDate, endDate, canFetch, country]);
+  // --- end fetch shipment table ---
+
+
 
   // Helpers
   const parseYMD = (input: unknown) => {
@@ -640,6 +720,105 @@ export default function Home() {
           />
         )}
       </section>
+      {/* --- Shipment Status Table (NEW) --- */}
+      {country === "IN_ONLY" && (
+        <section className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4 sm:p-6 mt-6">
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-lg font-medium text-slate-800">Shipment Status India</h3>
+          <div className="flex items-center gap-2">
+            {/* You can later change this to a printer dropdown if you want */}
+            <button
+              onClick={() => setShowShipTable(prev => !prev)}
+              className="text-sm px-3 py-1 rounded bg-slate-200 hover:bg-slate-300"
+            >
+              {showShipTable ? "▲" : "▼"}
+            </button>
+            <button
+              onClick={() => {
+                // refresh
+                // refresh
+                setShipLoading(true);
+                setShipError("");
+                fetch(buildShipStatusUrl(range), { cache: "no-store" })
+                  .then((r) => (r.ok ? r.json() : Promise.reject(r.statusText)))
+                  .then((j) => {
+                    const activities = Array.isArray(j.activities) ? j.activities : [];
+                    const rows = Array.isArray(j.rows) ? j.rows : [];
+                    // normalize & sort as above
+                    const normalized = rows.map((r: any) => ({
+                      date: (r.date ?? r.label ?? "").toString(),
+                      total: Number.isFinite(r.total) ? r.total : 0,
+                      sent_to_print: Number.isFinite(r.sent_to_print)
+                        ? r.sent_to_print
+                        : (Number.isFinite(r.total) ? r.total : 0),
+                      counts: r.counts && typeof r.counts === "object" ? r.counts : {},
+                    })).sort((a: any, b: any) => {
+                      const da = a.date.length === 10 ? new Date(a.date + "T00:00:00Z") : new Date(a.date);
+                      const db = b.date.length === 10 ? new Date(b.date + "T00:00:00Z") : new Date(b.date);
+                      return db.getTime() - da.getTime();
+                    });
+                    setShipActivities(activities);
+                    setShipRows(normalized);
+                  })
+                  .catch((e) => setShipError(String(e)))
+                  .finally(() => setShipLoading(false));
+
+              }}
+              className="text-sm px-3 py-1 rounded bg-slate-100 hover:bg-slate-200"
+            >
+              Refresh
+            </button>
+          </div>
+        </div>
+
+        {shipLoading && <div className="text-sm text-slate-500">Loading shipment data…</div>}
+        {shipError && <div className="text-sm text-red-600">Error: {shipError}</div>}
+
+        {!shipLoading && shipRows.length === 0 && <div className="text-sm text-slate-500"></div>}
+
+        {showShipTable && !shipLoading && shipRows.length > 0 && (
+          <div className="overflow-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-slate-600 border-b">
+                  <th className="p-2">Date</th>
+                  {/* dynamic activity columns */}
+                  {shipActivities.map((act) => (
+                    <th key={act} className="p-2">{act}</th>
+                  ))}
+                  <th className="p-2">Sent to Print</th>
+                  <th className="p-2">Total</th>
+                  
+                </tr>
+              </thead>
+              <tbody>
+                {shipRows.map((r: any) => (
+                  <tr key={r.date} className="border-t hover:bg-slate-50">
+                    <td className="p-2">{r.date}</td>
+                    {/* render counts for each activity (fallback 0) */}
+                    {shipActivities.map((act) => (
+                      <td key={act} className="p-2">
+                        {Number(r.counts?.[act] ?? 0)}
+                      </td>
+                    ))}
+                    {/* NEW: Total orders for the day (loc-filtered) */}
+                    <td className="p-2 font-medium">
+                      {r.sent_to_print ?? r.total ?? 0}
+                    </td>
+                    <td className="p-2 font-medium">{r.total ?? 0}</td>
+                    {/* Sent to Print (genesis + yara) */}
+                    
+                  </tr>
+                ))}
+              </tbody>
+
+
+            </table>
+          </div>
+        )}
+      </section>)}
+      {/* --- end shipment status table --- */}
+
     </main>
   );
 }

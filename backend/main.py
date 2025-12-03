@@ -659,17 +659,18 @@ def _align_prev_to_curr_by_index(curr_len: int, prev_series: List[int]) -> List[
 
 def _build_loc_match(loc: str) -> dict:
     """
-    Business rule:
-      - If loc == 'IN': include docs where locale/LOC is exactly 'IN' OR empty/missing/None.
-      - Else: include only exact matches for the provided loc (case-insensitive safe).
-    We support either field name: 'locale' or 'LOC'.
+    loc values:
+      - 'ALL' or 'IN' (default) → current behaviour:
+            India + empty/missing locale
+      - 'IN_ONLY' or 'INDIA'    → ONLY India (locale/LOC == 'IN')
+      - 'US', 'GB', ...         → ONLY that country code
     """
+    # default – keep backwards-compat
     loc = (loc or "IN").upper()
 
-    # Match either field name
-    loc_eq = {"$or": [{"locale": loc}, {"LOC": loc}]}
-
-    if loc == "IN":
+    # CURRENT BEHAVIOUR (your existing India behaviour) → use this for "ALL"
+    if loc in ("ALL", "IN"):
+        in_clause = {"$or": [{"locale": "IN"}, {"LOC": "IN"}]}
         empty_or_missing = {
             "$or": [
                 {"locale": {"$exists": False}},
@@ -680,9 +681,15 @@ def _build_loc_match(loc: str) -> dict:
                 {"LOC": ""},
             ]
         }
-        return {"$or": [loc_eq, empty_or_missing]}
-    else:
-        return loc_eq
+        return {"$or": [in_clause, empty_or_missing]}
+
+    # STRICT INDIA ONLY
+    if loc in ("IN_ONLY", "INDIA"):
+        return {"$or": [{"locale": "IN"}, {"LOC": "IN"}]}
+
+    # everything else – simple exact match
+    return {"$or": [{"locale": loc}, {"LOC": loc}]}
+
 
 
 @app.get("/stats/orders")
@@ -937,6 +944,218 @@ def stats_revenue(
         "previous": previous,
         "granularity": gran,
         "currency_hint": "mixed",  # you can switch to currency-specific buckets later if needed
+    }
+
+
+
+# --- START: dynamic-activity ship-status endpoint (ONLY shiprocket_data.scans[*].activity) ---
+from fastapi import Query
+from typing import Optional
+from dateutil import parser as date_parser
+from datetime import datetime, timezone, timedelta
+from collections import Counter
+
+@app.get("/stats/ship-status")
+def stats_ship_status(
+    range: str = Query("1w", description="range key like 1d, 1w, 1m, 6m, this_month, custom"),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    printer: Optional[str] = Query("all", description="genesis | yara | all"),
+    loc: Optional[str] = Query("IN", description="country code"),
+):
+    """
+    Dynamic-activity version (batched, STRICT) – **always day-level**:
+
+    - For each date (labels) we take paid orders whose processed_at (IST) falls into the date.
+    - We select only orders routed to 'genesis' or 'yara' (or filtered by top-level printer param).
+    - total = number of genesis|yara orders for that date.
+    - We fetch shipping docs in a single batched query for all candidate orders.
+    - For each order we look ONLY at shiprocket_data.scans and take the LAST element's 'activity' field.
+    - We count occurrences of each distinct activity string per date.
+    """
+    order_totals_by_date: Dict[str, int] = {}
+
+    try:
+        loc_match = _build_loc_match(loc)
+    except Exception:
+        loc_match = None
+
+    # ---- 1) Choose the time window & labels ----
+    now_utc = datetime.now(timezone.utc)
+
+    # We **never** want hourly buckets for this endpoint.
+    # Treat '1d' as '1w' for shipment status.
+    effective_range = "1w" if range == "1d" else range
+
+    try:
+        if start_date and end_date:
+            # Respect custom dates (regardless of 'range' query value)
+            cs, ce, ps, pe, _gran = _periods_custom(start_date, end_date)
+            # Any range_key != '1d' gives day-wise labels
+            labels = _labels_for("custom", cs, ce)
+        else:
+            cs, ce, ps, pe, gran = _periods(effective_range, now_utc)
+            # gran from _periods may be "hour" for 1d, but we have already
+            # normalised 1d -> 1w above, so this is always day-level here.
+            labels = _labels_for(effective_range, cs, ce)
+        
+        exclude_codes = ["TEST", "LHMM", "COLLAB", "REJECTED"]
+        if cs and ce:
+            order_totals_by_date = _fetch_counts(
+                orders_collection,
+                cs,
+                ce,
+                exclude_codes,
+                "day",        # ship-status is always day-level
+                loc_match or {},  # may be None if _build_loc_match failed
+            )
+
+    except Exception:
+        # Fallback: last 7 calendar days in IST
+        today = datetime.now(timezone.utc)
+        labels = []
+        for i in range(6, -1, -1):
+            d = (today - timedelta(days=i)).astimezone(IST_TZ)
+            labels.append(d.strftime("%Y-%m-%d"))
+
+        # ---- 2) Base order query (unchanged apart from loc filter reuse) ----
+    base_match = {"paid": True, "processed_at": {"$exists": True, "$ne": None}}
+    if loc_match:
+        base_match = {"$and": [base_match, loc_match]}
+
+
+    projection = {"order_id": 1, "processed_at": 1, "printer": 1, "_id": 0}
+    cursor = orders_collection.find(base_match, projection)
+
+    # group orders by IST date and remember printer
+    orders_by_date = {k.split(" ")[0]: [] for k in labels}
+    order_printer_map: dict = {}
+    all_printer_candidates: set = set()
+
+    for doc in cursor:
+        try:
+            dt = doc.get("processed_at")
+            if isinstance(dt, str):
+                dt = date_parser.isoparse(dt)
+            if not dt:
+                continue
+
+            ist_d = dt.astimezone(IST_TZ).strftime("%Y-%m-%d")
+            if ist_d not in orders_by_date:
+                continue
+
+            oid = doc.get("order_id")
+            doc_printer = (doc.get("printer") or "").strip().lower()
+            order_printer_map[oid] = doc_printer
+
+            # respect top-level printer filter if provided
+            if printer and printer.lower() not in ("all", ""):
+                if doc_printer != printer.lower():
+                    continue
+
+            orders_by_date[ist_d].append(oid)
+
+            # only genesis / yara to be considered for shipment status
+            if doc_printer in ("genesis", "yara"):
+                all_printer_candidates.add(oid)
+        except Exception:
+            continue
+
+        # no printer candidates at all
+    if not all_printer_candidates:
+        rows = []
+        for lbl in labels:
+            date_key = lbl.split(" ")[0]
+            total_orders = int(order_totals_by_date.get(date_key, 0))
+            rows.append({
+                "date": date_key,
+                "total": total_orders,   # NEW: total orders for the day (loc-filtered)
+                "sent_to_print": 0,      # no genesis/yara orders
+                "counts": {},
+            })
+        return {
+            "labels": labels,
+            "activities": [],
+            "rows": rows,
+            "printer": printer or "all",
+        }
+
+
+    # ---- 3) Fetch shiprocket scans for all candidate orders ----
+    shipping_docs = list(
+        shipping_collection.find(
+            {"order_id": {"$in": list(all_printer_candidates)}},
+            {"order_id": 1, "shiprocket_data.scans": 1},
+        )
+    )
+    sh_map = {s.get("order_id"): s for s in shipping_docs}
+
+    global_activity_set = set()
+    rows = []
+
+    # ---- 4) Build per-day rows ----
+    for lbl in labels:
+        date_key = lbl.split(" ")[0]
+        order_ids = orders_by_date.get(date_key, [])
+
+        # total orders for that day (Orders graph style, loc-filtered)
+        total_orders = int(order_totals_by_date.get(date_key, 0))
+
+        if not order_ids:
+            rows.append({
+                "date": date_key,
+                "total": total_orders,
+                "sent_to_print": 0,
+                "counts": {},
+            })
+            continue
+
+        # only genesis|yara for this date (sent to print)
+        printer_candidates = [
+            oid
+            for oid in order_ids
+            if (order_printer_map.get(oid) or "").lower() in ("genesis", "yara")
+        ]
+
+        sent_to_print_count = len(printer_candidates)
+        counts = Counter()
+
+        if printer_candidates:
+            for oid in printer_candidates:
+                s = sh_map.get(oid)
+                last_activity_str = None
+
+                if s:
+                    sr_data = s.get("shiprocket_data")
+                    scans = sr_data.get("scans") if isinstance(sr_data, dict) else None
+
+                    if isinstance(scans, list) and scans:
+                        last = scans[-1]
+                        # STRICT: only activity field
+                        last_activity_str = last.get("sr-status-label")
+
+                # if no activity or no scans/doc → mark as NEW
+                act_label = str(last_activity_str).strip() if last_activity_str else "NEW"
+
+                counts[act_label] += 1
+                global_activity_set.add(act_label)
+
+        rows.append({
+            "date": date_key,
+            "total": total_orders,               # NEW column value
+            "sent_to_print": sent_to_print_count,
+            "counts": dict(counts),
+        })
+
+
+    # sorted list of activity labels (NO_SCAN last)
+    activities = sorted(global_activity_set, key=lambda s: (s == "NEW", s.lower()))
+
+    return {
+        "labels": labels,
+        "activities": activities,
+        "rows": rows,
+        "printer": printer or "all",
     }
 
 

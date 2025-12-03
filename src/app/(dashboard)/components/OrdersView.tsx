@@ -371,14 +371,14 @@ export default function OrdersView({
     if (!orders.length) return;
 
     const targets = orders.filter((o) => {
-  const printer = (o.printer || "").toLowerCase();
+      const printer = (o.printer || "").toLowerCase();
 
-  return (
-    (printer === "genesis" || printer === "yara") &&
-    !o.shippedAt &&
-    !shippingFetched.has(o.orderId)
-  );
-});
+      return (
+        (printer === "genesis" || printer === "yara") &&
+        !o.shippedAt &&
+        !shippingFetched.has(o.orderId)
+      );
+    });
 
     if (!targets.length) return;
 
@@ -415,20 +415,20 @@ export default function OrdersView({
 
           const lastScanLabel =
             Array.isArray(shipDoc?.shiprocket_data?.scans) &&
-            shipDoc.shiprocket_data.scans.length
+              shipDoc.shiprocket_data.scans.length
               ? shipDoc.shiprocket_data.scans.at(-1)["sr-status-label"] ||
-                shipDoc.shiprocket_data.scans.at(-1)["sr-status_label"] ||
-                shipDoc.shiprocket_data.scans.at(-1)["activity"] ||
-                null
+              shipDoc.shiprocket_data.scans.at(-1)["sr-status_label"] ||
+              shipDoc.shiprocket_data.scans.at(-1)["activity"] ||
+              null
               : null;
 
           const lastRawScanLabel =
             Array.isArray(shipDoc?.shiprocket_data?.raw?.scans) &&
-            shipDoc.shiprocket_data.raw.scans.length
+              shipDoc.shiprocket_data.raw.scans.length
               ? shipDoc.shiprocket_data.raw.scans.at(-1)["sr-status-label"] ||
-                shipDoc.shiprocket_data.raw.scans.at(-1)["sr-status_label"] ||
-                shipDoc.shiprocket_data.raw.scans.at(-1)["activity"] ||
-                null
+              shipDoc.shiprocket_data.raw.scans.at(-1)["sr-status_label"] ||
+              shipDoc.shiprocket_data.raw.scans.at(-1)["activity"] ||
+              null
               : null;
 
           const statusFallback =
@@ -770,7 +770,7 @@ export default function OrdersView({
           try {
             const errJson = await response.json();
             errorText = errJson.detail || JSON.stringify(errJson);
-          } catch {}
+          } catch { }
           throw new Error(`Failed to send to Genesis: ${errorText}`);
         }
 
@@ -836,15 +836,13 @@ export default function OrdersView({
           const pickup = srJson.pickup ? "requested" : "skipped";
 
           alert(
-            `Shiprocket → created: ${created}, AWBs: ${awbs}, pickup: ${pickup}${
-              errCount ? `, errors: ${errCount}` : ""
+            `Shiprocket → created: ${created}, AWBs: ${awbs}, pickup: ${pickup}${errCount ? `, errors: ${errCount}` : ""
             }`
           );
         } catch (e) {
           console.error("[SHIPROCKET] create-from-orders failed:", e);
           alert(
-            `❌ Shiprocket create failed: ${
-              e instanceof Error ? e.message : "Unknown error"
+            `❌ Shiprocket create failed: ${e instanceof Error ? e.message : "Unknown error"
             }`
           );
         }
@@ -1091,15 +1089,13 @@ export default function OrdersView({
           const pickup = srJson.pickup ? "requested" : "skipped";
 
           alert(
-            `Shiprocket → created: ${created}, AWBs: ${awbs}, pickup: ${pickup}${
-              errCount ? `, errors: ${errCount}` : ""
+            `Shiprocket → created: ${created}, AWBs: ${awbs}, pickup: ${pickup}${errCount ? `, errors: ${errCount}` : ""
             }`
           );
         } catch (e) {
           console.error("[SHIPROCKET] create-from-orders failed:", e);
           alert(
-            `❌ Shiprocket create failed: ${
-              e instanceof Error ? e.message : "Unknown error"
+            `❌ Shiprocket create failed: ${e instanceof Error ? e.message : "Unknown error"
             }`
           );
         }
@@ -1280,8 +1276,7 @@ export default function OrdersView({
       } catch (error) {
         console.error("[UNAPPROVE] Error unapproving orders:", error);
         alert(
-          `❌ Failed to unapprove orders: ${
-            error instanceof Error ? error.message : "Unknown error"
+          `❌ Failed to unapprove orders: ${error instanceof Error ? error.message : "Unknown error"
           }`
         );
       }
@@ -1433,11 +1428,10 @@ export default function OrdersView({
               ? "All selected orders must be approved before printing"
               : ""
           }
-          className={`px-4 py-2 rounded text-sm font-medium transition ${
-            selectedOrders.size === 0 || hasNonApprovedOrders()
-              ? "bg-gray-200 text-gray-500 cursor-not-allowed"
-              : "bg-green-600 text-white hover:bg-green-700"
-          }`}
+          className={`px-4 py-2 rounded text-sm font-medium transition ${selectedOrders.size === 0 || hasNonApprovedOrders()
+            ? "bg-gray-200 text-gray-500 cursor-not-allowed"
+            : "bg-green-600 text-white hover:bg-green-700"
+            }`}
         >
           Send to Cloudprinter
         </button>
@@ -1453,16 +1447,15 @@ export default function OrdersView({
             hasNonApprovedOrders()
               ? "All selected orders must be approved before sending"
               : hasNonIndiaSelectedOrders()
-              ? "Send to Genesis is available only for India (IN) orders"
-              : ""
+                ? "Send to Genesis is available only for India (IN) orders"
+                : ""
           }
-          className={`px-4 py-2 rounded text-sm font-medium transition ${
-            selectedOrders.size === 0 ||
+          className={`px-4 py-2 rounded text-sm font-medium transition ${selectedOrders.size === 0 ||
             hasNonApprovedOrders() ||
             hasNonIndiaSelectedOrders()
-              ? "bg-gray-200 text-gray-500 cursor-not-allowed"
-              : "bg-green-600 text-white hover:bg-green-700"
-          }`}
+            ? "bg-gray-200 text-gray-500 cursor-not-allowed"
+            : "bg-green-600 text-white hover:bg-green-700"
+            }`}
         >
           Send to Genesis
         </button>
@@ -1478,16 +1471,15 @@ export default function OrdersView({
             hasNonApprovedOrders()
               ? "All selected orders must be approved before sending"
               : hasNonIndiaSelectedOrders()
-              ? "Send to Yara is available only for India (IN) orders"
-              : ""
+                ? "Send to Yara is available only for India (IN) orders"
+                : ""
           }
-          className={`px-4 py-2 rounded text-sm font-medium transition ${
-            selectedOrders.size === 0 ||
+          className={`px-4 py-2 rounded text-sm font-medium transition ${selectedOrders.size === 0 ||
             hasNonApprovedOrders() ||
             hasNonIndiaSelectedOrders()
-              ? "bg-gray-200 text-gray-500 cursor-not-allowed"
-              : "bg-green-600 text-white hover:bg-green-700"
-          }`}
+            ? "bg-gray-200 text-gray-500 cursor-not-allowed"
+            : "bg-green-600 text-white hover:bg-green-700"
+            }`}
         >
           Send to Yara
         </button>
@@ -1495,11 +1487,10 @@ export default function OrdersView({
         <button
           onClick={() => handleAction("reject")}
           disabled={selectedOrders.size === 0}
-          className={`px-4 py-2 rounded text-sm font-medium transition ${
-            selectedOrders.size === 0
-              ? "bg-gray-200 text-gray-500 cursor-not-allowed"
-              : "bg-red-600 text-white hover:bg-red-700"
-          }`}
+          className={`px-4 py-2 rounded text-sm font-medium transition ${selectedOrders.size === 0
+            ? "bg-gray-200 text-gray-500 cursor-not-allowed"
+            : "bg-red-600 text-white hover:bg-red-700"
+            }`}
         >
           Reject
         </button>
@@ -1512,11 +1503,10 @@ export default function OrdersView({
               ? "Cannot finalise orders that are already approved"
               : ""
           }
-          className={`px-4 py-2 rounded text-sm font-medium transition ${
-            selectedOrders.size === 0 || hasApprovedOrders()
-              ? "bg-gray-200 text-gray-500 cursor-not-allowed"
-              : "bg-yellow-600 text-white hover:bg-yellow-700"
-          }`}
+          className={`px-4 py-2 rounded text-sm font-medium transition ${selectedOrders.size === 0 || hasApprovedOrders()
+            ? "bg-gray-200 text-gray-500 cursor-not-allowed"
+            : "bg-yellow-600 text-white hover:bg-yellow-700"
+            }`}
         >
           Finalise Book
         </button>
@@ -1524,11 +1514,10 @@ export default function OrdersView({
         <button
           onClick={() => handleAction("request_feedback")}
           disabled={selectedOrders.size === 0 || hasSentFeedbackOrders()}
-          className={`px-4 py-2 rounded text-sm font-medium transition ${
-            selectedOrders.size === 0 || hasSentFeedbackOrders()
-              ? "bg-gray-200 text-gray-500 cursor-not-allowed"
-              : "bg-indigo-600 text-white hover:bg-indigo-700"
-          }`}
+          className={`px-4 py-2 rounded text-sm font-medium transition ${selectedOrders.size === 0 || hasSentFeedbackOrders()
+            ? "bg-gray-200 text-gray-500 cursor-not-allowed"
+            : "bg-indigo-600 text-white hover:bg-indigo-700"
+            }`}
         >
           Request Feedback
         </button>
@@ -1542,15 +1531,14 @@ export default function OrdersView({
               return order?.status !== "Approved";
             })
           }
-          className={`px-4 py-2 rounded test-sm font-medium transition ${
-            selectedOrders.size === 0 ||
+          className={`px-4 py-2 rounded test-sm font-medium transition ${selectedOrders.size === 0 ||
             Array.from(selectedOrders).some((orderId) => {
               const order = orders.find((o) => o.orderId === orderId);
               return order?.status !== "Approved";
             })
-              ? "bg-gray-200 text-gray-500 cursor-not-allowed"
-              : "bg-red-500 text-white hover:bg-red-600"
-          }`}
+            ? "bg-gray-200 text-gray-500 cursor-not-allowed"
+            : "bg-red-500 text-white hover:bg-red-600"
+            }`}
         >
           Unapprove
         </button>
@@ -1559,11 +1547,10 @@ export default function OrdersView({
           type="button"
           onClick={() => handleAction("mark_red")}
           disabled={selectedOrders.size === 0} // <= was: selectedOrders.size !== 1
-          className={`px-4 py-2 rounded text-sm font-medium transition ${
-            selectedOrders.size === 0
-              ? "bg-gray-200 text-gray-500 cursor-not-allowed"
-              : "bg-rose-600 text-white hover:bg-rose-700"
-          }`}
+          className={`px-4 py-2 rounded text-sm font-medium transition ${selectedOrders.size === 0
+            ? "bg-gray-200 text-gray-500 cursor-not-allowed"
+            : "bg-rose-600 text-white hover:bg-rose-700"
+            }`}
         >
           Mark Red
         </button>
@@ -1761,11 +1748,10 @@ export default function OrdersView({
                 </td>
                 <td className="px-2">
                   <span
-                    className={`px-2 py-1 rounded text-xs font-medium ${
-                      order.status === "Approved"
-                        ? "bg-green-100 text-green-800"
-                        : "bg-yellow-100 text-yellow-800"
-                    }`}
+                    className={`px-2 py-1 rounded text-xs font-medium ${order.status === "Approved"
+                      ? "bg-green-100 text-green-800"
+                      : "bg-yellow-100 text-yellow-800"
+                      }`}
                   >
                     {order.status}
                   </span>
@@ -1836,7 +1822,7 @@ export default function OrdersView({
                       order.printStatus && order.printStatus.startsWith("sent")
                         ? "bg-blue-100 text-blue-800"
                         : "bg-gray-100 text-gray-800"
-                    }`}
+                      }`}
                     title={
                       order.printer
                         ? `Printer: ${order.printer}`
@@ -1847,8 +1833,8 @@ export default function OrdersView({
                       ? order.printer
                       : order.printStatus &&
                         order.printStatus.startsWith("sent")
-                      ? "Sent"
-                      : "-"}
+                        ? "Sent"
+                        : "-"}
                   </span>
                 </td>
                 <td className="px-2 text-xs text-center">
@@ -1882,11 +1868,10 @@ export default function OrdersView({
                 </td>
                 <td className="px-2">
                   <span
-                    className={`px-2 py-1 rounded text-xs font-medium ${
-                      order.feedback_email
-                        ? "bg-green-100 text-green-800"
-                        : "bg-gray-100 text-gray-800"
-                    }`}
+                    className={`px-2 py-1 rounded text-xs font-medium ${order.feedback_email
+                      ? "bg-green-100 text-green-800"
+                      : "bg-gray-100 text-gray-800"
+                      }`}
                   >
                     {order.feedback_email ? "Sent" : "-"}
                   </span>
@@ -1908,9 +1893,8 @@ export default function OrdersView({
             <>
               <button
                 onClick={() => setCurrentPage(1)}
-                className={`px-3 py-1 rounded border text-sm ${
-                  currentPage === 1 ? "bg-blue-600 text-white" : "bg-white"
-                }`}
+                className={`px-3 py-1 rounded border text-sm ${currentPage === 1 ? "bg-blue-600 text-white" : "bg-white"
+                  }`}
               >
                 1
               </button>
@@ -1928,11 +1912,10 @@ export default function OrdersView({
               <button
                 key={page}
                 onClick={() => setCurrentPage(page)}
-                className={`px-3 py-1 rounded border text-sm ${
-                  currentPage === page
-                    ? "bg-blue-600 text-white"
-                    : "bg-white text-gray-800"
-                }`}
+                className={`px-3 py-1 rounded border text-sm ${currentPage === page
+                  ? "bg-blue-600 text-white"
+                  : "bg-white text-gray-800"
+                  }`}
               >
                 {page}
               </button>
@@ -1947,11 +1930,10 @@ export default function OrdersView({
               )}
               <button
                 onClick={() => setCurrentPage(totalPages)}
-                className={`px-3 py-1 rounded border text-sm ${
-                  currentPage === totalPages
-                    ? "bg-blue-600 text-white"
-                    : "bg-white text-gray-800"
-                }`}
+                className={`px-3 py-1 rounded border text-sm ${currentPage === totalPages
+                  ? "bg-blue-600 text-white"
+                  : "bg-white text-gray-800"
+                  }`}
               >
                 {totalPages}
               </button>
@@ -2255,11 +2237,10 @@ export default function OrdersView({
                   <button
                     onClick={saveOrder}
                     disabled={saving || !dirty}
-                    className={`px-3 py-2 rounded text-sm ${
-                      saving || !dirty
-                        ? "bg-gray-200 text-gray-500"
-                        : "bg-blue-600 text-white hover:bg-blue-700"
-                    }`}
+                    className={`px-3 py-2 rounded text-sm ${saving || !dirty
+                      ? "bg-gray-200 text-gray-500"
+                      : "bg-blue-600 text-white hover:bg-blue-700"
+                      }`}
                     type="button"
                   >
                     {saving ? "Saving..." : "Save"}
