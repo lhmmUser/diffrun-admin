@@ -700,7 +700,7 @@ def stats_orders(
         None, description="YYYY-MM-DD (only when using custom)"),
     end_date: Optional[str] = Query(
         None, description="YYYY-MM-DD (only when using custom)"),
-    exclude_codes: List[str] = Query(["TEST", "LHMM", "COLLAB", "REJECTED"]),
+    exclude_codes: List[str] = Query(["TEST", "COLLAB", "REJECTED"]),
     loc: str = Query(
         "IN", description="Country code; IN includes empty/missing"),
 ):
@@ -720,7 +720,7 @@ def stats_orders(
     loc_match = _build_loc_match(loc)
 
     curr_map = _fetch_counts(
-        orders_collection, curr_start_utc, curr_end_utc, exclude_codes, gran, loc_match)
+        orders_collection, curr_start_utc, curr_end_utc,  exclude_codes, gran, loc_match)
     prev_map = _fetch_counts(
         orders_collection, prev_start_utc, prev_end_utc, exclude_codes, gran, loc_match)
 
@@ -999,7 +999,7 @@ def stats_ship_status(
             # normalised 1d -> 1w above, so this is always day-level here.
             labels = _labels_for(effective_range, cs, ce)
         
-        exclude_codes = ["TEST", "LHMM", "COLLAB", "REJECTED"]
+        exclude_codes = ["TEST", "COLLAB", "REJECTED"]
         if cs and ce:
             order_totals_by_date = _fetch_counts(
                 orders_collection,

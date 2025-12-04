@@ -106,7 +106,7 @@ export default function Home() {
   };
 
 
-  const exclusions = ["TEST", "LHMM", "COLLAB", "REJECTED"];
+  const exclusions = ["TEST", "COLLAB", "REJECTED"];
 
   // NEW: helper to build URLs and always include `loc`
   const withParams = (path: string, params: Record<string, string | number | undefined>) => {
