@@ -835,7 +835,7 @@ export default function OrderDetailPage() {
                               <span>
                                 Tracking URL:{" "}
                                 <a
-                                  href={`https://parcelsapp.com/en/tracking/${encodeURIComponent(
+                                  href={`https://shiprocket.co/tracking/${encodeURIComponent(
                                     order.order.tracking_code.trim()
                                   )}`}
                                   target="_blank"
