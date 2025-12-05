@@ -60,6 +60,7 @@ from dateutil import parser as dateutil_parser
 from fastapi import HTTPException, Body
 from pydantic import BaseModel, EmailStr
 from datetime import datetime, timezone
+from pydantic import BaseModel, EmailStr
 
 
 
@@ -1410,6 +1411,7 @@ def get_orders(
         "locked": 1,
         "locked_by": 1,
         "unlock_by": 1, 
+        "print_sent_by": 1,
     }
 
     cursor = orders_collection.find(query, projection).sort(sort_field, sort_order).skip(skip).limit(limit)
@@ -1444,6 +1446,7 @@ def get_orders(
             "locked": bool(doc.get("locked", False)),
             "locked_by": doc.get("locked_by", ""),
             "unlock_by": doc.get("unlock_by", ""),
+            "print_sent_by": doc.get("print_sent_by", ""),
         })
 
     return {
@@ -1802,9 +1805,15 @@ def _send_production_email(
         smtp.login(EMAIL_USER, EMAIL_PASS)
         smtp.send_message(msg)
 
+class BulkPrintRequest(BaseModel):
+    order_ids: List[str]
+    print_sent_by: Optional[EmailStr] = None
+
 
 @app.post("/orders/approve-printing")
-async def approve_printing(order_ids: List[str], background_tasks: BackgroundTasks):
+async def approve_printing(payload: BulkPrintRequest, background_tasks: BackgroundTasks):
+    order_ids = payload.order_ids
+    print_sent_by = payload.print_sent_by
     CLOUDPRINTER_API_KEY = os.getenv(
         "CLOUDPRINTER_API_KEY", "1414e4bd0220dc1e518e268937ff18a3")
     CLOUDPRINTER_API_URL = "https://api.cloudprinter.com/cloudcore/1.0/orders/add"
@@ -1945,7 +1954,8 @@ async def approve_printing(order_ids: List[str], background_tasks: BackgroundTas
                             "print_status": "sent_to_printer",
                             "printer": "Cloudprinter",                                   # NEW
                             "cloudprinter_reference": response_data.get("reference", ""),
-                            "print_sent_at": datetime.now().isoformat()
+                            "print_sent_at": datetime.now().isoformat(),
+                            "print_sent_by": print_sent_by
                         }
                     }
                 )
@@ -2228,7 +2238,9 @@ def append_row_to_google_sheet(row: list):
 
 
 @app.post("/orders/send-to-google-sheet")
-async def send_to_google_sheet(order_ids: List[str], background_tasks: BackgroundTasks):
+async def send_to_google_sheet(payload: BulkPrintRequest, background_tasks: BackgroundTasks):
+    order_ids = payload.order_ids
+    print_sent_by = payload.print_sent_by
   
     if not SPREADSHEET_ID:
         raise HTTPException(status_code=500, detail="GOOGLE_SHEET_ID is not configured")
@@ -2261,7 +2273,8 @@ async def send_to_google_sheet(order_ids: List[str], background_tasks: Backgroun
                 "sheet_queued": True,
                 "printer": "Genesis",
                 "print_status": "sent_to_genesis",
-                "print_sent_at": datetime.now().isoformat()
+                "print_sent_at": datetime.now().isoformat(),
+                "print_sent_by": print_sent_by,
             }
         }
         lock_filter = {"_id": order["_id"], "sheet_queued": {"$ne": True}}
@@ -2468,7 +2481,9 @@ def append_row_to_google_sheet_yara(row: list):
 
 
 @app.post("/orders/send-to-yara")
-async def send_to_yara(order_ids: List[str], background_tasks: BackgroundTasks):
+async def send_to_yara(payload: BulkPrintRequest, background_tasks: BackgroundTasks):
+    order_ids = payload.order_ids
+    print_sent_by = payload.print_sent_by
 
     # Ensure the Yara spreadsheet id is configured
     if not SPREADSHEET_ID_YARA:
@@ -2502,7 +2517,8 @@ async def send_to_yara(order_ids: List[str], background_tasks: BackgroundTasks):
                 "sheet_queued": True,
                 "printer": "Yara",
                 "print_status": "sent_to_yara",
-                "print_sent_at": datetime.now().isoformat()
+                "print_sent_at": datetime.now().isoformat(),
+                "print_sent_by": print_sent_by,
             }
         }
         lock_filter = {"_id": order["_id"], "sheet_queued": {"$ne": True}}

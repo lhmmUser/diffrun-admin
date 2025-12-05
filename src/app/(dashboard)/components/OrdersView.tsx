@@ -597,7 +597,10 @@ export default function OrdersView({
         const response = await fetch(`${baseUrl}/orders/approve-printing`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(selectedOrderIds),
+          body: JSON.stringify({
+            order_ids: selectedOrderIds,
+            print_sent_by: adminEmail,
+          }),
         });
 
         console.log(
@@ -751,7 +754,10 @@ export default function OrdersView({
           let res = await fetch(url, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(selectedOrderIds),
+            body: JSON.stringify({
+              order_ids: selectedOrderIds,
+              print_sent_by: adminEmail,
+            }),
           });
 
           console.log(
@@ -767,7 +773,10 @@ export default function OrdersView({
             res = await fetch(url, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ order_ids: selectedOrderIds }),
+              body: JSON.stringify({
+                order_ids: selectedOrderIds,
+                print_sent_by: adminEmail,
+              }),
             });
             console.log(
               "[GENESIS] Second attempt status:",
@@ -1002,7 +1011,10 @@ export default function OrdersView({
           let res = await fetch(url, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(selectedOrderIds),
+            body: JSON.stringify({
+              order_ids: selectedOrderIds,
+              print_sent_by: adminEmail,
+            }),
           });
 
           console.log(
@@ -1018,7 +1030,10 @@ export default function OrdersView({
             res = await fetch(url, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ order_ids: selectedOrderIds }),
+              body: JSON.stringify({
+                order_ids: selectedOrderIds,
+                print_sent_by: adminEmail,
+              }),
             });
             console.log(
               "[YARA] Second attempt status:",
