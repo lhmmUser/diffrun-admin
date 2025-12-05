@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import PrintProgress from "./PrintProgress";
 import { useRouter, useSearchParams } from "next/navigation";
+import { useUser, useAuth } from "@clerk/nextjs"; // add this import
 
 type OrdersViewProps = {
   defaultDiscountCode?: string;
@@ -37,6 +38,9 @@ type RawOrder = {
   quantity?: number;
   printer?: string;
   shippingStatus?: string;
+  locked?: boolean;
+  locked_by?: string;
+  unlock_by?: string;
 };
 
 type Order = {
@@ -63,6 +67,7 @@ type Order = {
   shippingStatus: string; // <-- NEW
   quantity: number;
   printer: string;
+  locked: boolean;
 };
 
 type PrinterResponse = {
@@ -103,6 +108,15 @@ export default function OrdersView({
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [form, setForm] = useState<any>(null);
+  // ✅ Get the logged-in Clerk user
+  const { user } = useUser();
+
+  // Safely read email
+  const adminEmail =
+    user?.primaryEmailAddress?.emailAddress ||
+    user?.emailAddresses?.[0]?.emailAddress ||
+    null;
+
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
@@ -357,6 +371,7 @@ export default function OrdersView({
         quantity: order.quantity || 1,
         printStatus: (order.printStatus ?? "") as string,
         printer: (order.printer ?? "") as string,
+        locked: !!order.locked,
       }));
 
       setOrders(transformed);
@@ -670,6 +685,7 @@ export default function OrdersView({
             shippingStatus: (order.shippingStatus as string) || "",
             quantity: order.quantity || 1,
             printer: (order.printer ?? "") as string,
+            locked: !!order.locked,
           };
         });
 
@@ -932,6 +948,7 @@ export default function OrdersView({
             shippingStatus: (order.shippingStatus as string) || "",
             quantity: order.quantity || 1,
             printer: (order.printer ?? "") as string,
+            locked: !!order.locked,
           };
         });
 
@@ -1184,6 +1201,7 @@ export default function OrdersView({
             shippingStatus: (order.shippingStatus as string) || "",
             quantity: order.quantity || 1,
             printer: (order.printer ?? "") as string,
+            locked: !!order.locked,
           };
         });
 
@@ -1334,7 +1352,80 @@ export default function OrdersView({
         console.error("[MARK] Error updating statuses:", e);
         alert("❌ Something went wrong while updating statuses.");
       }
+    } else if (action === "lock") {
+      if (selectedOrders.size !== 1) {
+        alert("Please select exactly 1 order to lock.");
+        return;
+      }
+
+      const [orderId] = Array.from(selectedOrders);
+
+      try {
+        const res = await fetch(`${baseUrl}/orders/lock`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            order_id: orderId,
+            // TODO: replace with real logged-in email later
+            user_email: adminEmail,
+          }),
+        });
+
+        if (!res.ok) {
+          let msg = `HTTP ${res.status}`;
+          try {
+            const err = await res.json();
+            msg = err.detail || JSON.stringify(err);
+          } catch (_) { }
+          alert(`❌ Failed to lock order ${orderId}: ${msg}`);
+          return;
+        }
+
+        alert(`✅ Order ${orderId} locked`);
+        setSelectedOrders(new Set());
+        await fetchOrders();
+      } catch (e) {
+        console.error("[LOCK] Error locking order", e);
+        alert("❌ Something went wrong while locking the order.");
+      }
+    } else if (action === "unlock") {
+      if (selectedOrders.size !== 1) {
+        alert("Please select exactly 1 order to unlock.");
+        return;
+      }
+
+      const [orderId] = Array.from(selectedOrders);
+
+      try {
+        const res = await fetch(`${baseUrl}/orders/unlock`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            order_id: orderId,
+            // TODO: replace with real logged-in email later
+            user_email: adminEmail,
+          }),
+        });
+
+        if (!res.ok) {
+          let msg = `HTTP ${res.status}`;
+          try {
+            const err = await res.json();
+            msg = err.detail || JSON.stringify(err);
+          } catch (_) { }
+          alert(`❌ Failed to unlock order ${orderId}: ${msg}`);
+          return;
+        }
+
+        alert(`✅ Order ${orderId} unlocked`);
+        setSelectedOrders(new Set());
+        await fetchOrders();
+      } catch (e) {
+        console.error("[UNLOCK] Error unlocking order", e);
+        alert("❌ Something went wrong while unlocking the order.");
+      }
     }
+
   };
 
   const hasSentFeedbackOrders = () => {
@@ -1343,6 +1434,14 @@ export default function OrdersView({
       return order && sentFeedbackOrders.has(order.jobId);
     });
   };
+
+  const hasLockedSelectedOrders = () => {
+    return Array.from(selectedOrders).some((orderId) => {
+      const order = orders.find((o) => o.orderId === orderId);
+      return order?.locked === true;
+    });
+  };
+
 
   function getCurrencySymbol(code: string): string {
     const symbols: Record<string, string> = {
@@ -1422,13 +1521,17 @@ export default function OrdersView({
       <div className="flex flex-wrap gap-2 items-center">
         <button
           onClick={() => handleAction("approve")}
-          disabled={selectedOrders.size === 0 || hasNonApprovedOrders()}
+          disabled={selectedOrders.size === 0 || hasNonApprovedOrders() ||
+            hasLockedSelectedOrders()}
           title={
             hasNonApprovedOrders()
               ? "All selected orders must be approved before printing"
-              : ""
+              : hasLockedSelectedOrders()
+                ? "Locked orders cannot be sent to Cloudprinter"
+                : ""
           }
-          className={`px-4 py-2 rounded text-sm font-medium transition ${selectedOrders.size === 0 || hasNonApprovedOrders()
+          className={`px-4 py-2 rounded text-sm font-medium transition ${selectedOrders.size === 0 || hasNonApprovedOrders() ||
+            hasLockedSelectedOrders()
             ? "bg-gray-200 text-gray-500 cursor-not-allowed"
             : "bg-green-600 text-white hover:bg-green-700"
             }`}
@@ -1441,18 +1544,22 @@ export default function OrdersView({
           disabled={
             selectedOrders.size === 0 ||
             hasNonApprovedOrders() ||
-            hasNonIndiaSelectedOrders()
+            hasNonIndiaSelectedOrders() ||
+            hasLockedSelectedOrders()
           }
           title={
             hasNonApprovedOrders()
               ? "All selected orders must be approved before sending"
               : hasNonIndiaSelectedOrders()
                 ? "Send to Genesis is available only for India (IN) orders"
-                : ""
+                : hasLockedSelectedOrders()
+                  ? "Locked orders cannot be sent to Genesis"
+                  : ""
           }
           className={`px-4 py-2 rounded text-sm font-medium transition ${selectedOrders.size === 0 ||
             hasNonApprovedOrders() ||
-            hasNonIndiaSelectedOrders()
+            hasNonIndiaSelectedOrders() ||
+            hasLockedSelectedOrders()
             ? "bg-gray-200 text-gray-500 cursor-not-allowed"
             : "bg-green-600 text-white hover:bg-green-700"
             }`}
@@ -1465,18 +1572,22 @@ export default function OrdersView({
           disabled={
             selectedOrders.size === 0 ||
             hasNonApprovedOrders() ||
-            hasNonIndiaSelectedOrders()
+            hasNonIndiaSelectedOrders() ||
+            hasLockedSelectedOrders()
           }
           title={
             hasNonApprovedOrders()
               ? "All selected orders must be approved before sending"
               : hasNonIndiaSelectedOrders()
                 ? "Send to Yara is available only for India (IN) orders"
-                : ""
+                : hasLockedSelectedOrders()
+                  ? "Locked orders cannot be sent to Yara"
+                  : ""
           }
           className={`px-4 py-2 rounded text-sm font-medium transition ${selectedOrders.size === 0 ||
             hasNonApprovedOrders() ||
-            hasNonIndiaSelectedOrders()
+            hasNonIndiaSelectedOrders() ||
+            hasLockedSelectedOrders()
             ? "bg-gray-200 text-gray-500 cursor-not-allowed"
             : "bg-green-600 text-white hover:bg-green-700"
             }`}
@@ -1554,6 +1665,32 @@ export default function OrdersView({
         >
           Mark Red
         </button>
+        {/* 🔴 NEW: Lock button */}
+        <button
+          type="button"
+          onClick={() => handleAction("lock")}
+          disabled={selectedOrders.size === 0}
+          className={`px-4 py-2 rounded text-sm font-medium transition ${selectedOrders.size === 0
+            ? "bg-gray-200 text-gray-500 cursor-not-allowed"
+            : "bg-slate-700 text-white hover:bg-slate-800"
+            }`}
+        >
+          Lock
+        </button>
+
+        {/* 🔴 NEW: Unlock button */}
+        <button
+          type="button"
+          onClick={() => handleAction("unlock")}
+          disabled={selectedOrders.size === 0}
+          className={`px-4 py-2 rounded text-sm font-medium transition ${selectedOrders.size === 0
+            ? "bg-gray-200 text-gray-500 cursor-not-allowed"
+            : "bg-slate-500 text-white hover:bg-slate-600"
+            }`}
+        >
+          Unlock
+        </button>
+
       </div>
 
       <div className="flex flex-wrap gap-2">
@@ -1688,7 +1825,7 @@ export default function OrdersView({
                 "Cover PDF",
                 "Interior PDF",
                 "Print Status",
-                "Quantity",
+                "Qty",
                 "Shipped At",
                 "Shipping Status",
                 "Discount Code",
@@ -1725,6 +1862,7 @@ export default function OrdersView({
                     >
                       {" "}
                       {order.orderId}{" "}
+                      {order.locked && "🔒"}
                     </button>
                   ) : (
                     <span>N/A</span>
@@ -1794,7 +1932,7 @@ export default function OrdersView({
                       rel="noopener noreferrer"
                       className="text-blue-600 hover:underline"
                     >
-                      View
+                      Cover
                     </a>
                   ) : (
                     <span className="text-gray-400">-</span>
@@ -1807,7 +1945,7 @@ export default function OrdersView({
                       target="_blank"
                       className="text-blue-600 hover:underline"
                     >
-                      View PDF
+                      Interior
                     </a>
                   ) : (
                     "-"
@@ -2112,7 +2250,7 @@ export default function OrdersView({
                           />
                         </div>
                         <div>
-                          <label className="block font-medium">Quantity</label>
+                          <label className="block font-medium">Qty</label>
                           <input
                             type="number"
                             min={1}

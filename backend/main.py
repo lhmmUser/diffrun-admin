@@ -57,6 +57,11 @@ from zoneinfo import ZoneInfo
 from datetime import datetime
 from app.routers.shiprocket_webhook import router as shiprocket_router
 from dateutil import parser as dateutil_parser
+from fastapi import HTTPException, Body
+from pydantic import BaseModel, EmailStr
+from datetime import datetime, timezone
+
+
 
 
 IST_TZ = pytz.timezone("Asia/Kolkata")
@@ -1402,6 +1407,9 @@ def get_orders(
         "shipped_at": 1,
         "cust_status": 1,
         "printer": 1,
+        "locked": 1,
+        "locked_by": 1,
+        "unlock_by": 1, 
     }
 
     cursor = orders_collection.find(query, projection).sort(sort_field, sort_order).skip(skip).limit(limit)
@@ -1433,6 +1441,9 @@ def get_orders(
             "quantity": doc.get("quantity", 1),
             "cust_status": doc.get("cust_status", ""),
             "printer": doc.get("printer", ""),
+            "locked": bool(doc.get("locked", False)),
+            "locked_by": doc.get("locked_by", ""),
+            "unlock_by": doc.get("unlock_by", ""),
         })
 
     return {
@@ -1471,6 +1482,88 @@ async def set_cust_status(
         "matched_count": result.matched_count,
         "modified_count": result.modified_count,
         "upserted_id": str(result.upserted_id) if result.upserted_id else None,
+    }
+
+class LockRequest(BaseModel):
+    # Who is locking/unlocking – you can use admin email here
+    order_id: str
+    user_email: EmailStr
+
+
+@app.post("/orders/lock")
+async def lock_order(payload: LockRequest):
+    order_id = payload.order_id
+
+    order = orders_collection.find_one({"order_id": order_id})
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    if order.get("locked"):
+        locked_by = order.get("locked_by") or "unknown"
+        raise HTTPException(
+            status_code=400,
+            detail=f"Order is already locked by {locked_by}",
+        )
+
+    result = orders_collection.update_one(
+        {"order_id": order_id},
+        {
+            "$set": {
+                "locked": True,
+                "locked_by": payload.user_email,
+                "locked_at": datetime.now(timezone.utc).isoformat(),
+                "unlock_by": "",
+                "unlock_at": "",
+            }
+        },
+    )
+
+    if result.modified_count == 0:
+        raise HTTPException(
+            status_code=409,
+            detail="Failed to lock order – please retry",
+        )
+
+    return {
+        "order_id": order_id,
+        "locked": True,
+        "locked_by": payload.user_email,
+    }
+
+@app.post("/orders/unlock")
+async def unlock_order(payload: LockRequest):
+    order_id = payload.order_id
+
+    order = orders_collection.find_one({"order_id": order_id})
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    if not order.get("locked"):
+        raise HTTPException(
+            status_code=400,
+            detail="Order is not locked",
+        )
+
+    result = orders_collection.update_one(
+        {"order_id": order_id},
+        {
+            "$set": {
+                "locked": False,
+                "unlock_by": payload.user_email,
+                "unlock_at": datetime.now(timezone.utc).isoformat(),
+            }
+        },
+    )
+
+    if result.modified_count == 0:
+        raise HTTPException(
+            status_code=409,
+            detail="Failed to unlock order – please retry",
+        )
+
+    return {
+        "order_id": order_id,
+        "locked": False,
     }
 
 
@@ -1728,6 +1821,15 @@ async def approve_printing(order_ids: List[str], background_tasks: BackgroundTas
                 "status": "error",
                 "message": "Order not found",
                 "step": "database_lookup"
+            })
+            continue
+
+        if order.get("locked"):
+            results.append({
+                "order_id": order_id,
+                "status": "skipped",
+                "message": "Order is locked; cannot send to printer",
+                "step": "locked",
             })
             continue
 
