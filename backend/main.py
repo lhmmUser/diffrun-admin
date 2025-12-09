@@ -1447,6 +1447,7 @@ def get_orders(
             "locked_by": doc.get("locked_by", ""),
             "unlock_by": doc.get("unlock_by", ""),
             "print_sent_by": doc.get("print_sent_by", ""),
+            
         })
 
     return {

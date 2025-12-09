@@ -28,6 +28,7 @@ type RawOrder = {
   bookId: string;
   bookStyle: string;
   printStatus: string;
+  print_sent_by?: string;
   approved_at?: { $date?: { $numberLong?: string } } | string | null;
   feedback_email: boolean;
   print_approval?: boolean;
@@ -58,6 +59,7 @@ type Order = {
   bookId: string;
   bookStyle: string;
   printStatus: string;
+  printSentBy: string;
   feedback_email: boolean;
   printApproval: boolean | "not found";
   discountCode: string;
@@ -68,6 +70,7 @@ type Order = {
   quantity: number;
   printer: string;
   locked: boolean;
+  print_sent_by?: string;
 };
 
 type PrinterResponse = {
@@ -370,6 +373,7 @@ export default function OrdersView({
         shippingStatus: (order.shippingStatus as string) || "",
         quantity: order.quantity || 1,
         printStatus: (order.printStatus ?? "") as string,
+        printSentBy: order.print_sent_by || "",
         printer: (order.printer ?? "") as string,
         locked: !!order.locked,
       }));
@@ -671,6 +675,7 @@ export default function OrdersView({
             bookId: order.bookId || "",
             bookStyle: order.bookStyle || "",
             printStatus: order.printStatus || "",
+            printSentBy: order.print_sent_by || "",
             feedback_email: false,
             printApproval: (() => {
               if (typeof order.print_approval === "boolean")
@@ -940,6 +945,7 @@ export default function OrdersView({
             bookId: order.bookId || "",
             bookStyle: order.bookStyle || "",
             printStatus: order.printStatus || "",
+            printSentBy: order.print_sent_by || "",
             feedback_email: false,
             printApproval: (() => {
               if (typeof order.print_approval === "boolean")
@@ -1199,6 +1205,7 @@ export default function OrdersView({
             bookId: order.bookId || "",
             bookStyle: order.bookStyle || "",
             printStatus: order.printStatus || "",
+            printSentBy: order.print_sent_by || "",
             feedback_email: false,
             printApproval: (() => {
               if (typeof order.print_approval === "boolean")
@@ -1840,6 +1847,7 @@ export default function OrdersView({
                 "Cover PDF",
                 "Interior PDF",
                 "Print Status",
+                "By",
                 "Qty",
                 "Shipped At",
                 "Shipping Status",
@@ -1989,6 +1997,12 @@ export default function OrdersView({
                         ? "Sent"
                         : "-"}
                   </span>
+                </td>
+                <td className="px-2 text-xs">
+                  {order.printSentBy
+                    ? order.printSentBy.split("@")[0].slice(0, 3).charAt(0).toUpperCase() +
+                    order.printSentBy.split("@")[0].slice(1, 3).toLowerCase()
+                    : "-"}
                 </td>
                 <td className="px-2 text-xs text-center">
                   {order.quantity && order.quantity > 1
