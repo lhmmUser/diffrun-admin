@@ -825,8 +825,7 @@ export default function OrderDetailPage() {
                         label="Order Shipped"
                         date={formatIso(order.timeline?.shipped_at)}
                         subtext={
-                          order.timeline?.shipped_at &&
-                            order.order?.tracking_code ? (
+                          order.timeline?.shipped_at && order.order?.tracking_code ? (
                             <>
                               <span>
                                 Tracking ID: {order.order.tracking_code}
@@ -835,9 +834,15 @@ export default function OrderDetailPage() {
                               <span>
                                 Tracking URL:{" "}
                                 <a
-                                  href={`https://shiprocket.co/tracking/${encodeURIComponent(
-                                    order.order.tracking_code.trim()
-                                  )}`}
+                                  href={
+                                    (order.shipping_address?.country || "").toUpperCase() === "INDIA"
+                                      ? `https://shiprocket.co/tracking/${encodeURIComponent(
+                                        order.order.tracking_code.trim()
+                                      )}`
+                                      : `https://parcelsapp.com/en/tracking/${encodeURIComponent(
+                                        order.order.tracking_code.trim()
+                                      )}`
+                                  }
                                   target="_blank"
                                   rel="noopener noreferrer"
                                   className="text-blue-600 underline"
@@ -848,6 +853,7 @@ export default function OrderDetailPage() {
                             </>
                           ) : undefined
                         }
+
                       />
                       {order.timeline?.delivered_at ? (
                         <TimelineItem
