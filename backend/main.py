@@ -613,7 +613,7 @@ def _fetch_counts(
     discount_ne = [{"discount_code": {"$ne": code}} for code in exclude_codes]
     base_match = {
         "paid": True,
-        "order_id": {"$regex": r"^#\d+$"},
+        "order_id": {"$regex": r"^#\d+(_\d+)?$"},
         "processed_at": {"$exists": True, "$ne": None},
     }
 
@@ -1135,6 +1135,312 @@ def stats_ship_status(
 
     # sorted list of activity labels (NO_SCAN last)
     activities = sorted(global_activity_set, key=lambda s: (s == "NEW", s.lower()))
+
+    return {
+        "labels": labels,
+        "activities": activities,
+        "rows": rows,
+        "printer": printer or "all",
+    }
+
+
+###################################Shipment Status Endpoint V2####################################
+# --- START: dynamic-activity ship-status endpoint (ONLY shiprocket_data.scans[*].activity) ---
+###################################Shipment Status Endpoint V2####################################
+from typing import Optional, Dict
+from fastapi import Query
+from datetime import datetime, timezone, timedelta
+
+@app.get("/stats/ship-status-v2")
+def stats_ship_status_v2(
+    range: str = Query("1w", description="range key like 1d, 1w, 1m, 6m, this_month, custom"),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    printer: Optional[str] = Query("all", description="genesis | yara"),
+    loc: Optional[str] = Query("IN", description="country code"),
+):
+    """
+    Fixed-column Shipment Status:
+
+    Columns:
+    - Date
+    - Unapproved  (no printer, discount code NOT in exclude_codes)
+    - Sent to Print
+    - New
+    - Out for pickup
+    - Pickup Exception
+    - In Transit
+    - Delivered
+    - Issue
+    - Total
+    """
+
+    # discount / coupon codes to exclude everywhere (Total + Unapproved + statuses)
+    exclude_codes = ["TEST", "COLLAB", "REJECTED"]
+    exclude_set = {c.upper() for c in exclude_codes}
+
+    try:
+        loc_match = _build_loc_match(loc)
+    except Exception:
+        loc_match = None
+
+    # ---- 1) Choose the time window & labels ----
+    now_utc = datetime.now(timezone.utc)
+    effective_range = "1w" if range == "1d" else range
+
+    try:
+        if start_date and end_date:
+            cs, ce, ps, pe, _gran = _periods_custom(start_date, end_date)
+            labels = _labels_for("custom", cs, ce)
+        else:
+            cs, ce, ps, pe, gran = _periods(effective_range, now_utc)
+            labels = _labels_for(effective_range, cs, ce)
+    except Exception:
+        # Fallback: last 7 calendar days in IST
+        today = datetime.now(timezone.utc)
+        labels = []
+        for i in range(6, -1, -1):
+            d = (today - timedelta(days=i)).astimezone(IST_TZ)
+            labels.append(d.strftime("%Y-%m-%d"))
+
+        cs = ce = None  # just to avoid "undefined" later
+
+    # ---- 2) Base order query ----
+    base_match: Dict = {"paid": True, "processed_at": {"$exists": True, "$ne": None}}
+    if loc_match:
+        base_match = {"$and": [base_match, loc_match]}
+
+    # if you also restrict by created_at/processed_at range at query time, apply here
+    if cs and ce:
+        # assuming processed_at is used for date bucketing, align with that
+        date_filter = {"processed_at": {"$gte": cs, "$lt": ce}}
+        if "$and" in base_match:
+            base_match["$and"].append(date_filter)
+        else:
+            base_match = {"$and": [base_match, date_filter]}
+
+    # NOTE: include discount field in projection so we can filter per order
+    projection = {
+        "order_id": 1,
+        "processed_at": 1,
+        "printer": 1,
+        "discount_code": 1,  # <-- CHANGE this field name if your schema is different
+        "_id": 0,
+    }
+    cursor = orders_collection.find(base_match, projection)
+
+    # group orders by IST date and remember printer
+    orders_by_date: Dict[str, list] = {k.split(" ")[0]: [] for k in labels}
+    order_printer_map: Dict = {}
+    all_printer_candidates: set = set()
+
+    for doc in cursor:
+        try:
+            # 1) discount-code filter (same logic as Total)
+            raw_code = (doc.get("discount_code") or "").strip().upper()
+            if raw_code in exclude_set:
+                # skip this order completely (not counted in Total, Unapproved, or any status)
+                continue
+
+            # 2) processed_at -> date bucket
+            dt = doc.get("processed_at")
+            if isinstance(dt, str):
+                dt = date_parser.isoparse(dt)
+            if not dt:
+                continue
+
+            ist_d = dt.astimezone(IST_TZ).strftime("%Y-%m-%d")
+            if ist_d not in orders_by_date:
+                continue
+
+            oid = doc.get("order_id")
+            doc_printer = (doc.get("printer") or "").strip().lower()
+            order_printer_map[oid] = doc_printer
+
+            # respect top-level printer filter if provided
+            if printer and printer.lower() not in ("all", ""):
+                if doc_printer != printer.lower():
+                    continue
+
+            orders_by_date[ist_d].append(oid)
+
+            # only genesis / yara to be considered for shipment status
+            if doc_printer in ("genesis", "yara"):
+                all_printer_candidates.add(oid)
+        except Exception:
+            continue
+
+    # ---- 3) If no printed orders at all, still return rows with zeros ----
+    if not all_printer_candidates:
+        rows = []
+        for lbl in labels:
+            date_key = lbl.split(" ")[0]
+            order_ids = orders_by_date.get(date_key, [])
+
+            total_orders = len(order_ids)
+            unapproved_count = sum(
+                1
+                for oid in order_ids
+                if not (order_printer_map.get(oid) or "").strip()
+            )
+
+            rows.append(
+                {
+                    "date": date_key,
+                    "total": total_orders,
+                    "unapproved": unapproved_count,
+                    "sent_to_print": 0,
+                    "new": 0,
+                    "out_for_pickup": 0,
+                    "pickup_exception": 0,
+                    "in_transit": 0,
+                    "delivered": 0,
+                    "issue": 0,
+                }
+            )
+
+        return {
+            "labels": labels,
+            "activities": [
+                "Unapproved",
+                "Sent to Print",
+                "New",
+                "Out for pickup",
+                "Pickup Exception",
+                "In Transit",
+                "Delivered",
+                "Issue",
+            ],
+            "rows": rows,
+            "printer": printer or "all",
+        }
+
+    # ---- 4) Fetch shiprocket scans for all candidate orders ----
+    shipping_docs = list(
+        shipping_collection.find(
+            {"order_id": {"$in": list(all_printer_candidates)}},
+            {"order_id": 1, "shiprocket_data.scans": 1},
+        )
+    )
+    sh_map = {s.get("order_id"): s for s in shipping_docs}
+
+    rows = []
+
+    # ---- 5) Build per-day rows with fixed buckets ----
+    for lbl in labels:
+        date_key = lbl.split(" ")[0]
+        order_ids = orders_by_date.get(date_key, [])
+
+        total_orders = len(order_ids)
+
+        if not order_ids:
+            rows.append(
+                {
+                    "date": date_key,
+                    "total": total_orders,
+                    "unapproved": 0,
+                    "sent_to_print": 0,
+                    "new": 0,
+                    "out_for_pickup": 0,
+                    "pickup_exception": 0,
+                    "in_transit": 0,
+                    "delivered": 0,
+                    "issue": 0,
+                }
+            )
+            continue
+
+        # orders whose printer is genesis or yara
+        printer_candidates = [
+            oid
+            for oid in order_ids
+            if (order_printer_map.get(oid) or "").lower() in ("genesis", "yara")
+        ]
+
+        sent_to_print_count = len(printer_candidates)
+
+        # Unapproved: printer missing/empty, on this date, AND discount code already filtered out
+        unapproved_count = sum(
+            1
+            for oid in order_ids
+            if not (order_printer_map.get(oid) or "").strip()
+        )
+
+        new_count = 0
+        out_for_pickup_count = 0
+        pickup_exception_count = 0
+        in_transit_count = 0
+        delivered_count = 0
+        issue_count = 0
+
+        if printer_candidates:
+            for oid in printer_candidates:
+                s = sh_map.get(oid)
+                last_activity_str = None
+
+                if s:
+                    sr_data = s.get("shiprocket_data")
+                    scans = sr_data.get("scans") if isinstance(sr_data, dict) else None
+
+                    if isinstance(scans, list) and scans:
+                        last = scans[-1]
+                        # same field as earlier endpoint
+                        last_activity_str = (
+                            last.get("sr-status-label")
+                            or last.get("activity")
+                        )
+
+                label = (str(last_activity_str or "")).strip()
+
+                if not label:
+                    # printer = genesis/yara but no shiprocket data
+                    new_count += 1
+                    continue
+
+                lower = label.lower()
+
+                # fixed mapping to buckets
+                if "pickup exception" in lower:
+                    pickup_exception_count += 1
+                elif "out for pickup" in lower:
+                    out_for_pickup_count += 1
+                elif "delivered" in lower:
+                    delivered_count += 1
+                elif "issue" in lower or (
+                    "exception" in lower and "pickup exception" not in lower
+                ) or "rto" in lower or "undelivered" in lower:
+                    issue_count += 1
+                elif "in transit" in lower or "transit" in lower:
+                    in_transit_count += 1
+                else:
+                    # unknown status → treat as in transit to not lose it
+                    in_transit_count += 1
+
+        rows.append(
+            {
+                "date": date_key,
+                "total": total_orders,
+                "unapproved": unapproved_count,
+                "sent_to_print": sent_to_print_count,
+                "new": new_count,
+                "out_for_pickup": out_for_pickup_count,
+                "pickup_exception": pickup_exception_count,
+                "in_transit": in_transit_count,
+                "delivered": delivered_count,
+                "issue": issue_count,
+            }
+        )
+
+    activities = [
+        "Unapproved",
+        "Sent to Print",
+        "New",
+        "Out for pickup",
+        "Pickup Exception",
+        "In Transit",
+        "Delivered",
+        "Issue",
+    ]
 
     return {
         "labels": labels,

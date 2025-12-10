@@ -59,6 +59,9 @@ export default function RootLayout({
                 <li>
                   <Link href="/razorpay_analysis" className="block px-3 py-2 rounded hover:bg-gray-800 hover:text-blue-300 font-medium">Razorpay Analysis</Link>
                 </li>
+                <li>
+                  <Link href="/Shipment_status" className="block px-3 py-2 rounded hover:bg-gray-800 hover:text-blue-300 font-medium">Shipment Status</Link>
+                </li>
               </ul>
             </nav>
           </aside>
