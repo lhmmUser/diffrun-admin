@@ -141,7 +141,7 @@ async def lifespan(app: FastAPI):
 
         scheduler.add_job(
             run_feedback_emails_job,
-            trigger=CronTrigger(hour="10", minute="0", timezone=IST_TZ),
+            trigger=CronTrigger(hour="14", minute="0", timezone=IST_TZ),
             id="feedback_emails_job",
             replace_existing=True,
             coalesce=True,
@@ -648,30 +648,9 @@ def _fetch_counts(
     return {r["_id"]: int(r["count"]) for r in rows}
 
 
-def _align_prev_to_curr_by_index(curr_len: int, prev_series: List[int]) -> List[int]:
-    """
-    Make prev series the same length as current labels:
-    - if prev shorter (e.g., 30 vs 31), pad with 0 at the end
-    - if prev longer, truncate
-    """
-    if len(prev_series) == curr_len:
-        return prev_series
-    if len(prev_series) > curr_len:
-        return prev_series[:curr_len]
-    return prev_series + [0] * (curr_len - len(prev_series))
 
 # --- Country / LOC filter helper --------------------------------------------
-
-
 def _build_loc_match(loc: str) -> dict:
-    """
-    loc values:
-      - 'ALL' or 'IN' (default) → current behaviour:
-            India + empty/missing locale
-      - 'IN_ONLY' or 'INDIA'    → ONLY India (locale/LOC == 'IN')
-      - 'US', 'GB', ...         → ONLY that country code
-    """
-    # default – keep backwards-compat
     loc = (loc or "IN").upper()
 
     # CURRENT BEHAVIOUR (your existing India behaviour) → use this for "ALL"
@@ -2709,188 +2688,6 @@ def personalize_pronoun(gender: str) -> str:
         return "their"  # fallback to original if gender is unknown
 
 
-@app.post("/send-feedback-email/{job_id}")
-def send_feedback_email(job_id: str, background_tasks: BackgroundTasks):
-    order = orders_collection.find_one({"job_id": job_id})
-    if not order:
-        raise HTTPException(status_code=404, detail="Order not found")
-
-    recipient_email = order.get("email", "")
-    if not recipient_email:
-        raise HTTPException(
-            status_code=400, detail="No email found for this order")
-
-    try:
-        html_content = f"""
-        <html>
-        <head>
-        <meta charset="UTF-8">
-        <meta name="color-scheme" content="light">
-        <meta name="supported-color-schemes" content="light">
-        <title>We'd love your feedback</title>
-        <style>
-        @keyframes shine-sweep {{
-          0%   {{ transform: translateX(-100%) rotate(45deg); }}
-          50%  {{ transform: translateX(100%)  rotate(45deg); }}
-          100% {{ transform: translateX(100%)  rotate(45deg); }}
-        }}
-        .review-btn {{
-          position: relative;
-          display: inline-block;
-          border-radius: 20px;
-          font-family: Arial, Helvetica, sans-serif;
-          font-weight: bold;
-          text-decoration: none;
-          color: #ffffff !important;
-          background-color: #5784ba;
-          overflow: hidden;
-          padding: 12px 24px;
-          font-size: 16px;
-        }}
-        .review-btn::before {{
-          content: "";
-          position: absolute;
-          top: 0;
-          left: -50%;
-          height: 100%;
-          width: 200%;
-          background: linear-gradient(120deg, transparent 0%, rgba(255,255,255,0.6) 50%, transparent 100%);
-          animation: shine-sweep 4s infinite;
-        }}
-        @media only screen and (max-width: 480px) {{
-            h2 {{ font-size: 15px !important; }}
-            p {{ font-size: 15px !important; }}
-            a {{ font-size: 15px !important; }}
-            .title-text {{ font-size: 18px !important; }}
-            .small-text {{ font-size: 12px !important; }}
-            .logo-img {{ width: 300px !important; }}
-            .review-btn {{ font-size: 13px !important; padding: 10px 16px !important; width: 100% !important; text-align: center !important; }}
-            .browse-now-btn {{
-              font-size: 12px !important;
-              padding: 8px 12px !important;
-            }}
-        }}
-        </style>
-
-        </head>
-        <body style="font-family: Arial, sans-serif; background-color: #f7f7f7; padding: 20px; margin: 0;">
-        <table width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#ffffff" style="max-width: 600px; margin: 0 auto; border-radius: 8px; box-shadow: 0 0 10px rgba(0,0,0,0.1);">
-            <tr>
-            <td style="padding: 20px;">
-                <div style="text-align: left; margin-bottom: 20px;">
-                <img src="https://diffrungenerations.s3.ap-south-1.amazonaws.com/Diffrun_logo+(1).png" alt="Diffrun" class="logo-img" style="max-width: 100px;">
-                </div>
-
-                <h2 style="color: #333; font-size: 15px;">Hey {order.get("user_name")},</h2>
-
-                <p style="font-size: 14px; color: #555;">
-                We truly hope {order.get("name", "")} is enjoying {personalize_pronoun(order.get("gender", "   "))} magical storybook, <strong>{generate_book_title(order.get("book_id"), order.get("name"))}</strong>! 
-                At Diffrun, we are dedicated to crafting personalized storybooks that inspire joy, imagination, and lasting memories for every child. 
-                Your feedback means the world to us. We'd be grateful if you could share your experience.
-                </p>
-
-                <p style="font-size: 14px; color: #555;">Please share your feedback with us:</p>
-
-                <p style="text-align: left; margin: 30px 0;">
-                <a href="https://search.google.com/local/writereview?placeid=ChIJn5mGENoTrjsRPHxH86vgui0"
-                    class="review-btn"
-                    style="background-color: #5784ba; color: #ffffff; text-decoration: none; border-radius: 20px;">
-                    Leave a Google Review
-                </a>
-                </p>
-
-                <p style="font-size: 14px; color: #555; text-align: left;">
-                Thanks,<br>Team Diffrun
-                </p>
-
-                <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
-
-                <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top: 30px;">
-                <tr>
-                    <td colspan="2" style="padding: 10px 0; text-align: left;">
-                    <p class="title-text" style="font-size: 18px; margin: 0; font-weight: bold; color: #000;">
-                            {generate_book_title(order.get("book_id"), order.get("name"))}
-                            </p>
-                    </td>
-                </tr>
-
-                <tr>
-                    <td style="padding: 0; vertical-align: top; font-size: 12px; color: #333; font-weight: 500;">
-                    Order reference ID: <span>{order.get("order_id", "N/A")}</span>
-                    </td>
-                    <td style="padding: 0; text-align: right; font-size: 12px; color: #333; font-weight: 500;">
-                    Ordered: <span>{format_date(order.get("approved_at", ""))}</span>
-                    </td>
-                </tr>
-
-                <tr>
-                    <td colspan="2" style="padding: 0; margin: 0; background-color: #f7f6cf;">
-                    <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse: collapse; padding: 0; margin: 0;">
-                        <tr>
-                        <td style="padding: 20px; vertical-align: middle; margin: 0;">
-                            
-                            <p style="font-size: 15px; margin: 0;">
-                        Explore more magical books in our growing collection &nbsp;
-                        <button class="browse-now-btn" style="background-color:#5784ba; margin-top: 20px; border-radius: 30px;border: none;padding:10px 15px"><a href="https://diffrun.com" style="color:white; font-weight: bold; text-decoration: none;">
-                        Browse Now
-                        </a></button>
-                    </p>
-                        </td>
-
-                        <td width="300" style="padding: 0; margin: 0; vertical-align: middle;">
-                            <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse: collapse;">
-                            <tr>
-                                <td align="right" style="padding: 0; margin: 0;">
-                                <img src="https://diffrungenerations.s3.ap-south-1.amazonaws.com/email_image+(2).jpg" 
-                                    alt="Cover Image" 
-                                    width="300" 
-                                    style="display: block; border-radius: 0; margin: 0; padding: 0;">
-                                </td>
-                            </tr>
-                            </table>
-                        </td>
-                        </tr>
-                    </table>
-                    </td>
-                </tr>
-
-                </table>
-
-            </td>
-            </tr>
-        </table>
-        </body>
-        </html>
-        """
-
-        msg = EmailMessage()
-        msg["Subject"] = f"We'd love your feedback on {order.get('name', '')}'s Storybook!"
-        msg["From"] = f"Diffrun Team <{os.getenv('EMAIL_ADDRESS')}>"
-        msg["To"] = order.get("email", "")
-        msg.set_content("This email contains HTML content.")
-        msg.add_alternative(html_content, subtype="html")
-
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
-            EMAIL_USER = os.getenv("EMAIL_ADDRESS")
-            EMAIL_PASS = os.getenv("EMAIL_PASSWORD")
-            print(f"email, password: {EMAIL_USER}, {EMAIL_PASS}")
-            smtp.login(EMAIL_USER, EMAIL_PASS)
-            smtp.send_message(msg)
-
-        logger.info(f"✅ Feedback email sent to {order.get("email", "")}")
-
-        orders_collection.update_one(
-            {"job_id": job_id},
-            {"$set": {"feedback_email": True}}
-        )
-
-    except Exception as e:
-        logger.error(f"❌ Failed to send feedback email: {e}")
-        raise HTTPException(status_code=500, detail="Failed to send email.")
-
-    return {"message": "Feedback email queued"}
-
-
 def send_email(to_email: str, subject: str, body: str):
     msg = EmailMessage()
     msg["Subject"] = subject
@@ -4408,91 +4205,435 @@ def debug_email_ping():
         return {"ok": False, "error": str(e)}
 
 
-def _utc_bounds_for_ist_day(days_ago: int = 6):
-    now_ist = datetime.now(IST)
-    target_date = (now_ist - timedelta(days=days_ago)).date()
-    start_ist = datetime.combine(target_date, datetime.min.time(), tzinfo=IST)
-    end_ist = start_ist + timedelta(days=1)
-    return start_ist.astimezone(timezone.utc), end_ist.astimezone(timezone.utc)
+@app.post("/send-feedback-email/{job_id}")
+def send_feedback_email(job_id: str, background_tasks: BackgroundTasks):
+    # 1) Find the order
+    order = orders_collection.find_one({"job_id": job_id})
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
 
+    recipient_email = order.get("email", "")
+    if not recipient_email:
+        raise HTTPException(
+            status_code=400, detail="No email found for this order"
+        )
+    # 2) Check if feedback email was already sent for this email
+    already_sent_for_email = orders_collection.find_one(
+        {"email": recipient_email, "feedback_email_sent": True}
+    )
+    if already_sent_for_email:
+        logger.info(
+            f"⚠️ Feedback email already sent earlier for {recipient_email}, skipping."
+        )
+        return {
+            "status": "already_sent",
+            "message": "Feedback email already sent for this customer",
+            "email": recipient_email,
+        }
 
-@app.get("/debug/feedback-candidates")
-def feedback_eligible(days_ago: int = 6, limit: int = 500):
-    start_utc, end_utc = _utc_bounds_for_ist_day(days_ago)
+    try:
+        # 3) Build HTML (unchanged)
+        html_content = f"""
+        <html>
+        <head>
+        <meta charset="UTF-8">
+        <meta name="color-scheme" content="light">
+        <meta name="supported-color-schemes" content="light">
+        <title>We'd love your feedback</title>
+        <style>
+        @keyframes shine-sweep {{
+          0%   {{ transform: translateX(-100%) rotate(45deg); }}
+          50%  {{ transform: translateX(100%)  rotate(45deg); }}
+          100% {{ transform: translateX(100%)  rotate(45deg); }}
+        }}
+        .review-btn {{
+          position: relative;
+          display: inline-block;
+          border-radius: 20px;
+          font-family: Arial, Helvetica, sans-serif;
+          font-weight: bold;
+          text-decoration: none;
+          color: #ffffff !important;
+          background-color: #5784ba;
+          overflow: hidden;
+          padding: 12px 24px;
+          font-size: 16px;
+        }}
+        .review-btn::before {{
+          content: "";
+          position: absolute;
+          top: 0;
+          left: -50%;
+          height: 100%;
+          width: 200%;
+          background: linear-gradient(120deg, transparent 0%, rgba(255,255,255,0.6) 50%, transparent 100%);
+          animation: shine-sweep 4s infinite;
+        }}
+        @media only screen and (max-width: 480px) {{
+            h2 {{ font-size: 15px !important; }}
+            p {{ font-size: 15px !important; }}
+            a {{ font-size: 15px !important; }}
+            .title-text {{ font-size: 18px !important; }}
+            .small-text {{ font-size: 12px !important; }}
+            .logo-img {{ width: 300px !important; }}
+            .review-btn {{ font-size: 13px !important; padding: 10px 16px !important; width: 100% !important; text-align: center !important; }}
+            .browse-now-btn {{
+              font-size: 12px !important;
+              padding: 8px 12px !important;
+            }}
+        }}
+        </style>
 
-    pipeline = [
-        {"$match": {
-            "feedback_email": {"$ne": True},
-            "shipping_option": "bluedart_in_domestic",
-            "shipped_at": {"$exists": True, "$ne": None},
-        }},
-        {"$addFields": {"shipped_dt": {"$toDate": "$shipped_at"}}},
-        {"$match": {"shipped_dt": {"$gte": start_utc, "$lt": end_utc}}},
-        {"$project": {
-            "_id": 0,
-            "order_id": 1, "job_id": 1, "email": 1,
-            "name": 1, "user_name": 1, "gender": 1, "book_id": 1,
-            "shipping_option": 1, "shipped_at": 1, "shipped_dt": 1
-        }},
-        {"$sort": {"shipped_dt": 1, "order_id": 1}},
-        {"$limit": int(limit)}
-    ]
+        </head>
+        <body style="font-family: Arial, sans-serif; background-color: #f7f7f7; padding: 20px; margin: 0;">
+        <table width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#ffffff" style="max-width: 600px; margin: 0 auto; border-radius: 8px; box-shadow: 0 0 10px rgba(0,0,0,0.1);">
+            <tr>
+            <td style="padding: 20px;">
+                <div style="text-align: left; margin-bottom: 20px;">
+                <img src="https://diffrungenerations.s3.ap-south-1.amazonaws.com/Diffrun_logo+(1).png" alt="Diffrun" class="logo-img" style="max-width: 100px;">
+                </div>
 
-    items = list(orders_collection.aggregate(pipeline))
+                <h2 style="color: #333; font-size: 15px;">Hey {order.get("user_name")},</h2>
+
+                <p style="font-size: 14px; color: #555;">
+                We truly hope {order.get("name", "")} is enjoying {personalize_pronoun(order.get("gender", "   "))} magical storybook, <strong>{generate_book_title(order.get("book_id"), order.get("name"))}</strong>! 
+                At Diffrun, we are dedicated to crafting personalized storybooks that inspire joy, imagination, and lasting memories for every child. 
+                Your feedback means the world to us. We'd be grateful if you could share your experience.
+                </p>
+
+                <p style="font-size: 14px; color: #555;">Please share your feedback with us:</p>
+
+                <p style="text-align: left; margin: 30px 0;">
+                <a href="https://search.google.com/local/writereview?placeid=ChIJn5mGENoTrjsRPHxH86vgui0"
+                    class="review-btn"
+                    style="background-color: #5784ba; color: #ffffff; text-decoration: none; border-radius: 20px;">
+                    Leave a Google Review
+                </a>
+                </p>
+
+                <p style="font-size: 14px; color: #555; text-align: left;">
+                Thanks,<br>Team Diffrun
+                </p>
+
+                <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
+
+                <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top: 30px;">
+                <tr>
+                    <td colspan="2" style="padding: 10px 0; text-align: left;">
+                    <p class="title-text" style="font-size: 18px; margin: 0; font-weight: bold; color: #000;">
+                            {generate_book_title(order.get("book_id"), order.get("name"))}
+                            </p>
+                    </td>
+                </tr>
+
+                <tr>
+                    <td style="padding: 0; vertical-align: top; font-size: 12px; color: #333; font-weight: 500;">
+                    Order reference ID: <span>{order.get("order_id", "N/A")}</span>
+                    </td>
+                    <td style="padding: 0; text-align: right; font-size: 12px; color: #333; font-weight: 500;">
+                    Ordered: <span>{format_date(order.get("approved_at", ""))}</span>
+                    </td>
+                </tr>
+
+                <tr>
+                    <td colspan="2" style="padding: 0; margin: 0; background-color: #f7f6cf;">
+                    <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse: collapse; padding: 0; margin: 0;">
+                        <tr>
+                        <td style="padding: 20px; vertical-align: middle; margin: 0;">
+                            
+                            <p style="font-size: 15px; margin: 0;">
+                        Explore more magical books in our growing collection &nbsp;
+                        <button class="browse-now-btn" style="background-color:#5784ba; margin-top: 20px; border-radius: 30px;border: none;padding:10px 15px"><a href="https://diffrun.com" style="color:white; font-weight: bold; text-decoration: none;">
+                        Browse Now
+                        </a></button>
+                    </p>
+                        </td>
+
+                        <td width="300" style="padding: 0; margin: 0; vertical-align: middle;">
+                            <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse: collapse;">
+                            <tr>
+                                <td align="right" style="padding: 0; margin: 0;">
+                                <img src="https://diffrungenerations.s3.ap-south-1.amazonaws.com/email_image+(2).jpg" 
+                                    alt="Cover Image" 
+                                    width="300" 
+                                    style="display: block; border-radius: 0; margin: 0; padding: 0;">
+                                </td>
+                            </tr>
+                            </table>
+                        </td>
+                        </tr>
+                    </table>
+                    </td>
+                </tr>
+
+                </table>
+
+            </td>
+            </tr>
+        </table>
+        </body>
+        </html>
+        """
+
+        msg = EmailMessage()
+        msg["Subject"] = f"We'd love your feedback on {order.get('name', '')}'s Storybook!"
+        msg["From"] = f"Diffrun Team <{os.getenv('EMAIL_ADDRESS')}>"
+        msg["To"] = recipient_email
+        msg.set_content("This email contains HTML content.")
+        msg.add_alternative(html_content, subtype="html")
+
+        # 4) Actually send
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+            EMAIL_USER = os.getenv("EMAIL_ADDRESS")
+            EMAIL_PASS = os.getenv("EMAIL_PASSWORD")
+            print(f"email, password: {EMAIL_USER}, {EMAIL_PASS}")
+            smtp.login(EMAIL_USER, EMAIL_PASS)
+            smtp.send_message(msg)
+
+        logger.info(f"✅ Feedback email sent to {recipient_email}")
+
+        # 5) Mark ALL orders for this email as feedback_email_sent
+        orders_collection.update_many(
+            {"email": recipient_email},
+            {"$set": {"feedback_email_sent": True}},
+        )
+
+    except Exception as e:
+        logger.error(f"❌ Failed to send feedback email: {e}")
+        raise HTTPException(status_code=500, detail="Failed to send email.")
+
+    # 6) Consistent response for both cron and manual call
     return {
-        "ist_target_day": str((datetime.now(IST) - timedelta(days=days_ago)).date()),
-        "utc_bounds": [start_utc.isoformat(), end_utc.isoformat()],
-        "count": len(items),
-        "candidates": items
+        "status": "sent",
+        "message": "Feedback email sent",
+        "email": recipient_email,
     }
 
+
+@app.get("/debug/feedback-email-candidates")
+def debug_feedback_email_candidates():
+    pipeline = [
+        {
+            "$match": {
+                # 1) Only orders where feedback email not already sent
+                "feedback_email_sent": {"$ne": True},
+
+                # 2) We need processed_at present (UTC value)
+                "processed_at": {"$exists": True, "$ne": None},
+
+                # 3) Keep your existing discount/test rules (example)
+                "$or": [
+                    {"discount_code": {"$exists": False}},
+                    {"discount_code": {"$ne": "TEST"}},
+                ],
+            }
+        },
+        # 4) Join with shipping_details by order_id
+        {
+            "$lookup": {
+                "from": "shipping_details",
+                "localField": "order_id",
+                "foreignField": "order_id",
+                "as": "shipping_docs",
+            }
+        },
+        # 5) Only keep orders that actually have shipping data
+        {"$unwind": "$shipping_docs"},
+        # 6) Filter for Delivered status via Shiprocket
+        {
+            "$match": {
+                "$or": [
+                    {"shipping_docs.shiprocket_data.current_status": "DELIVERED"},
+                    {"shipping_docs.shiprocket_data.shipment_status": "DELIVERED"},
+                ],
+                "shipping_docs.shiprocket_data.current_timestamp_iso": {
+                    "$exists": True,
+                    "$ne": None,
+                },
+            }
+        },
+        # 7) Exclude wigu + paperback from BOTH user_details and shipping_details
+        {
+            "$match": {
+                "$expr": {
+                    "$and": [
+                        # Exclude when user_details says wigu + paperback
+                        {
+                            "$not": [
+                                {
+                                    "$and": [
+                                        {"$eq": ["$book_id", "wigu"]},
+                                        {"$eq": ["$book_style", "paperback"]},
+                                    ]
+                                }
+                            ]
+                        },
+                        # Exclude when shipping_details says wigu + paperback
+                        {
+                            "$not": [
+                                {
+                                    "$and": [
+                                        {"$eq": ["$shipping_docs.book_id", "wigu"]},
+                                        {"$eq": ["$shipping_docs.book_style", "paperback"]},
+                                    ]
+                                }
+                            ]
+                        },
+                    ]
+                }
+            }
+        },
+        # 8) Convert processed_at + delivery timestamp to Date
+        {
+            "$addFields": {
+                "processed_dt": {"$toDate": "$processed_at"},
+                "delivered_dt": {
+                    "$toDate": "$shipping_docs.shiprocket_data.current_timestamp_iso"
+                },
+            }
+        },
+        # 9) Compute diff in days (IST) between processed_at and delivery
+        {
+            "$addFields": {
+                "processing_to_delivery_days": {
+                    "$dateDiff": {
+                        "startDate": "$processed_dt",
+                        "endDate": "$delivered_dt",
+                        "unit": "day",
+                        "timezone": "Asia/Kolkata",
+                    }
+                }
+            }
+        },
+        # 10) Only keep orders where diff is between 0 and 8 days
+        {
+            "$match": {
+                "$expr": {
+                    "$and": [
+                        {"$gte": ["$processing_to_delivery_days", 0]},
+                        {"$lte": ["$processing_to_delivery_days", 8]},
+                    ]
+                }
+            }
+        },
+        # 11) Select fields you need for inspection
+        {
+            "$project": {
+                "_id": 0,
+                "order_id": 1,
+                "job_id": 1,
+                "email": 1,
+                "name": 1,
+                "user_name": 1,
+                "gender": 1,
+                "book_id": 1,
+                "book_style": 1,
+                "discount_code": 1,
+                "processed_at": 1,
+                "processed_dt": 1,
+                "delivered_dt": 1,
+                "processing_to_delivery_days": 1,
+                "feedback_email_sent": 1,
+                # some shipping fields for debugging
+                "shipping_docs.shiprocket_data.current_status": 1,
+                "shipping_docs.shiprocket_data.shipment_status": 1,
+                "shipping_docs.shiprocket_data.current_timestamp_iso": 1,
+            }
+        },
+        {"$sort": {"delivered_dt": 1, "order_id": 1}},
+    ]
+
+    candidates = list(orders_collection.aggregate(pipeline))
+
+    return {
+        "total": len(candidates),
+        "candidates": candidates,
+    }
 
 @app.post("/cron/feedback-emails")
 def cron_feedback_emails(limit: int = 200):
     pipeline = [
         {
             "$match": {
-                "feedback_email": {"$ne": True},
-                "shipping_option": "bluedart_in_domestic",
-                "shipped_at": {"$exists": True, "$ne": None},
-                "book_style": {"$ne": "paperback"},  # Add this line to skip paperback books
-                "$or": [
-                    {"discount_code": {"$exists": False}},
-                    {"discount_code": {"$ne": "TEST"}}
-                ],
+                "feedback_email_sent": {"$ne": True},
+                "processed_at": {"$exists": True, "$ne": None},
             }
         },
-        {"$addFields": {"shipped_dt": {"$toDate": "$shipped_at"}}},
+        {
+            "$lookup": {
+                "from": "shipping_details",
+                "localField": "order_id",
+                "foreignField": "order_id",
+                "as": "shipping_docs",
+            }
+        },
+        {"$unwind": "$shipping_docs"},
+        {
+            "$match": {
+                "$or": [
+                    {"shipping_docs.shiprocket_data.current_status": "DELIVERED"},
+                    {"shipping_docs.shiprocket_data.shipment_status": "DELIVERED"},
+                ],
+                "shipping_docs.shiprocket_data.current_timestamp_iso": {
+                    "$exists": True,
+                    "$ne": None,
+                },
+            }
+        },
         {
             "$match": {
                 "$expr": {
                     "$and": [
                         {
-                            "$gte": [
+                            "$not": [
                                 {
-                                    "$dateDiff": {
-                                        "startDate": "$shipped_dt",
-                                        "endDate": "$$NOW",
-                                        "unit": "day",
-                                        "timezone": "Asia/Kolkata",
-                                    }
-                                },
-                                10,
+                                    "$and": [
+                                        {"$eq": ["$book_id", "wigu"]},
+                                        {"$eq": ["$book_style", "paperback"]},
+                                    ]
+                                }
                             ]
                         },
                         {
-                            "$lt": [
+                            "$not": [
                                 {
-                                    "$dateDiff": {
-                                        "startDate": "$shipped_dt",
-                                        "endDate": "$$NOW",
-                                        "unit": "day",
-                                        "timezone": "Asia/Kolkata",
-                                    }
-                                },
-                                11,
+                                    "$and": [
+                                        {"$eq": ["$shipping_docs.book_id", "wigu"]},
+                                        {"$eq": ["$shipping_docs.book_style", "paperback"]},
+                                    ]
+                                }
                             ]
                         },
+                    ]
+                }
+            }
+        },
+        {
+            "$addFields": {
+                "processed_dt": {"$toDate": "$processed_at"},
+                "delivered_dt": {
+                    "$toDate": "$shipping_docs.shiprocket_data.current_timestamp_iso"
+                },
+            }
+        },
+        {
+            "$addFields": {
+                "processing_to_delivery_days": {
+                    "$dateDiff": {
+                        "startDate": "$processed_dt",
+                        "endDate": "$delivered_dt",
+                        "unit": "day",
+                        "timezone": "Asia/Kolkata",
+                    }
+                }
+            }
+        },
+        {
+            "$match": {
+                "$expr": {
+                    "$and": [
+                        {"$gte": ["$processing_to_delivery_days", 0]},
+                        {"$lte": ["$processing_to_delivery_days", 8]},
                     ]
                 }
             }
@@ -4507,29 +4648,42 @@ def cron_feedback_emails(limit: int = 200):
                 "user_name": 1,
                 "gender": 1,
                 "book_id": 1,
-                "shipping_option": 1,
+                "book_style": 1,
                 "discount_code": 1,
-                "shipped_at": 1,
-                "shipped_dt": 1,
+                "processed_at": 1,
+                "processed_dt": 1,
+                "delivered_dt": 1,
+                "processing_to_delivery_days": 1,
+                "shipping_docs.shiprocket_data.current_status": 1,
+                "shipping_docs.shiprocket_data.shipment_status": 1,
+                "shipping_docs.shiprocket_data.current_timestamp_iso": 1,
             }
         },
-        {"$sort": {"shipped_dt": 1, "order_id": 1}},
+        {"$sort": {"delivered_dt": 1, "order_id": 1}},
         {"$limit": int(limit)},
     ]
 
     candidates = list(orders_collection.aggregate(pipeline))
 
-    results = {"total": len(candidates), "sent": 0,
-               "skipped": 0, "errors": 0, "details": []}
+    results = {
+        "total": len(candidates),
+        "sent": 0,
+        "skipped": 0,
+        "errors": 0,
+        "details": [],
+    }
+
     for c in candidates:
         job_id = c.get("job_id")
         email = c.get("email")
+        order_id = c.get("order_id")
+
         if not job_id or not email:
             results["skipped"] += 1
             results["details"].append(
                 {
                     "job_id": job_id,
-                    "order_id": c.get("order_id"),
+                    "order_id": order_id,
                     "status": "skipped",
                     "reason": "missing job_id or email",
                 }
@@ -4537,14 +4691,53 @@ def cron_feedback_emails(limit: int = 200):
             continue
 
         try:
-            send_feedback_email(job_id, BackgroundTasks())
-            results["sent"] += 1
+            # Call the centralized function
+            res = send_feedback_email(job_id, BackgroundTasks())
+            status = res.get("status")
+
+            if status == "sent":
+                results["sent"] += 1
+                results["details"].append(
+                    {
+                        "job_id": job_id,
+                        "order_id": order_id,
+                        "status": "sent",
+                        "email": email,
+                    }
+                )
+            elif status == "already_sent":
+                results["skipped"] += 1
+                results["details"].append(
+                    {
+                        "job_id": job_id,
+                        "order_id": order_id,
+                        "status": "skipped",
+                        "reason": "already sent for this email",
+                        "email": email,
+                    }
+                )
+            else:
+                # Unknown status, but no exception raised
+                results["skipped"] += 1
+                results["details"].append(
+                    {
+                        "job_id": job_id,
+                        "order_id": order_id,
+                        "status": "skipped",
+                        "reason": f"unexpected status from send_feedback_email: {status}",
+                        "email": email,
+                    }
+                )
+
+        except HTTPException as e:
+            # Your send_feedback_email threw an HTTP error
+            results["errors"] += 1
             results["details"].append(
                 {
                     "job_id": job_id,
-                    "order_id": c.get("order_id"),
-                    "status": "sent",
-                    "email": email,
+                    "order_id": order_id,
+                    "status": "error",
+                    "error": f"HTTPException: {e.status_code} {e.detail}",
                 }
             )
         except Exception as e:
@@ -4552,7 +4745,7 @@ def cron_feedback_emails(limit: int = 200):
             results["details"].append(
                 {
                     "job_id": job_id,
-                    "order_id": c.get("order_id"),
+                    "order_id": order_id,
                     "status": "error",
                     "error": str(e),
                 }
@@ -4560,10 +4753,14 @@ def cron_feedback_emails(limit: int = 200):
 
     return results
 
+
 def run_feedback_emails_job():
     try:
+        print("Starting cron_feedback_emails job")
         cron_feedback_emails(limit=200)
-    except Exception:
+        print("Finished cron_feedback_emails job")
+    except Exception as e:
+        print(f"Error running cron_feedback_emails job: {e}")
         logger.exception("Error running feedback emails job")
 
 
