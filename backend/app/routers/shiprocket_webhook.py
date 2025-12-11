@@ -1,7 +1,7 @@
 # app/routers/shiprocket_webhook.py
 import os
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional, Union
 from .cloudprinter_webhook import _send_tracking_email
 import requests
@@ -56,7 +56,7 @@ def _parse_ts(ts: Optional[str]) -> Optional[str]:
     if not ts:
         return None
     try:
-        from datetime import datetime
+        # example format: "11 12 2025 10:16:55"
         return datetime.strptime(ts, "%d %m %Y %H:%M:%S").isoformat()
     except Exception:
         try:
@@ -71,7 +71,6 @@ def _dedupe_key(ev: ShiprocketEvent) -> str:
 
 _seen: set[str] = set()
 
-from datetime import datetime, timezone
 def _upsert_tracking(e: ShiprocketEvent, raw: dict) -> None:
     q = {"order_id": e.order_id} if e.order_id else {"awb_code": e.awb}
     update = {
@@ -102,6 +101,47 @@ def _upsert_tracking(e: ShiprocketEvent, raw: dict) -> None:
     orders_collection.update_one(q, update, upsert=False)
 
 
+def _latest_scan(scans: List[dict]) -> Optional[dict]:
+    """Return the most recent scan object from scans.
+    Attempts to use 'date' when possible; falls back to last element.
+    """
+    if not scans:
+        return None
+
+    # If any scan has a parsable datetime, use the max by parsed time
+    parsed = []
+    for s in scans:
+        date_str = s.get("date") or ""
+        parsed_dt = None
+        if date_str:
+            # try multiple possible formats, keep None on failure
+            for fmt in ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S", "%d-%m-%Y %H:%M:%S", "%d %m %Y %H:%M:%S"):
+                try:
+                    # handle naive ISO without tz
+                    parsed_dt = datetime.strptime(date_str, fmt)
+                    break
+                except Exception:
+                    continue
+            # try fromisoformat as a last resort
+            if parsed_dt is None:
+                try:
+                    parsed_dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+                except Exception:
+                    parsed_dt = None
+        parsed.append((parsed_dt, s))
+
+    # If at least one parsed datetime found, pick the max
+    parsed_with_dt = [p for p in parsed if p[0] is not None]
+    if parsed_with_dt:
+        parsed_with_dt.sort(key=lambda x: x[0])
+        return parsed_with_dt[-1][1]
+
+    # Otherwise, fallback to last element in list
+    try:
+        return scans[-1]
+    except Exception:
+        return None
+
 
 @router.post("/api/webhook/Genesis")
 @router.post("/api/webhook/Genesis/")
@@ -126,8 +166,10 @@ async def shiprocket_tracking(request: Request, background: BackgroundTasks) -> 
             return Response(status_code=200)
         _seen.add(key)
 
+        # persist tracking payload into DB
         _upsert_tracking(event, raw)
 
+        # best-effort: trigger internal page update
         try:
             internal_id = event.order_id  # same order_id you stored in DB
             if internal_id:
@@ -140,43 +182,75 @@ async def shiprocket_tracking(request: Request, background: BackgroundTasks) -> 
                 logging.info(f"[SR WH] Triggered /shiprocket/order/show for {internal_id}")
         except Exception as exc:
             logging.exception(f"[SR WH] Failed to trigger order/show for {event.order_id}: {exc}")
-        
+
+        # -------------------------
+        # NEW: trigger shipped email only when latest scan shows pickup
+        # -------------------------
         query_base = {"order_id": event.order_id} if event.order_id else {"awb_code": event.awb}
-        should_attempt = bool(event.awb or (raw.get("tracking")))
-        if should_attempt:
-            filter_once = {
-                **query_base,
-                "$or": [
-                    {"shiprocket_shipped_email_sent": {"$exists": False}},
-                    {"shiprocket_shipped_email_sent": False},
-                ],
-            }
-            set_once = {"$set": {"shiprocket_shipped_email_sent": True}}
-            once = orders_collection.update_one(filter_once, set_once, upsert=False)
-            if once.modified_count == 1:
-                doc = orders_collection.find_one(
-                    query_base,
-                    {"email": 1, "user_name": 1, "child_name": 1, "order_id": 1, "tracking_number": 1, "_id": 0},
-                ) or {}
-                to_email = (doc.get("email") or "").strip()
-                if to_email:
-                    order_ref = (doc.get("order_id") or event.order_id or "").strip()
-                    shipping_option = "shiprocket"
-                    tracking = (doc.get("tracking_number") or event.awb or "").strip()
-                    user_name = doc.get("user_name")
-                    name = doc.get("child_name")
-                    background.add_task(
-                        _send_tracking_email,
-                        to_email,
-                        order_ref,
-                        shipping_option,
-                        tracking,
-                        user_name,
-                        name,
-                        SHIPROCKET_TRACKING_URL_TEMPLATE,
-                        None
-                    )
-                    logging.info(f"[SR WH] queued shipped-email to {to_email} for {order_ref}")
+        # fetch the updated document after our upsert
+        order_doc = orders_collection.find_one(query_base) or {}
+
+        shiprocket_data = order_doc.get("shiprocket_data") or {}
+        scans = shiprocket_data.get("scans") or []
+
+        latest = _latest_scan(scans)
+        activity = (latest.get("activity") if latest else None) or ""
+        activity_norm = activity.strip().lower()
+
+        # Consider pickup detected only when activity exactly equals 'pickup done'
+        is_pickup = False
+        if activity_norm:
+            if activity_norm == "pickup done":
+                is_pickup = True
+
+        if not is_pickup:
+            logging.info("[SR WH] Pickup not detected in latest scan for %s (activity=%r). Skipping shipped email.", query_base, activity)
+            return Response(status_code=200)
+
+        # require a tracking number to include in email CTA
+        tracking = (order_doc.get("tracking_number") or event.awb or raw.get("tracking") or "").strip()
+        if not tracking:
+            logging.info("[SR WH] Pickup detected but no tracking number present for %s. Skipping shipped email.", query_base)
+            return Response(status_code=200)
+
+        # idempotent flag specifically for pickup-triggered emails
+        filter_once = {
+            **query_base,
+            "$or": [
+                {"shiprocket_pickup_done_email_sent": {"$exists": False}},
+                {"shiprocket_pickup_done_email_sent": False},
+            ],
+        }
+        set_once = {"$set": {"shiprocket_pickup_done_email_sent": True}}
+        once = orders_collection.update_one(filter_once, set_once, upsert=False)
+        if once.modified_count == 1:
+            doc = orders_collection.find_one(
+                query_base,
+                {"email": 1, "user_name": 1, "child_name": 1, "order_id": 1, "tracking_number": 1, "_id": 0},
+            ) or {}
+            to_email = (doc.get("email") or "").strip()
+            if to_email:
+                order_ref = (doc.get("order_id") or event.order_id or "").strip()
+                shipping_option = "shiprocket"
+                # use the tracking we resolved above
+                user_name = doc.get("user_name")
+                name = doc.get("child_name")
+                background.add_task(
+                    _send_tracking_email,
+                    to_email,
+                    order_ref,
+                    shipping_option,
+                    tracking,
+                    user_name,
+                    name,
+                    SHIPROCKET_TRACKING_URL_TEMPLATE,
+                    None
+                )
+                logging.info(f"[SR WH] queued pickup-shipped-email to {to_email} for {order_ref}")
+            else:
+                logging.info("[SR WH] pickup-shipped-email: no recipient email for %s", query_base)
+        else:
+            logging.info("[SR WH] pickup-shipped-email already sent earlier for %s", query_base)
 
         return Response(status_code=200)
     except Exception as exc:
