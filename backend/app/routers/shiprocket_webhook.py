@@ -20,6 +20,7 @@ MONGO_URI = os.getenv("MONGO_URI")
 client = MongoClient(MONGO_URI, tz_aware=True)
 db = client["candyman"]
 orders_collection = db["shipping_details"]
+users_collection = db["user_details"]   
 
 class Scan(BaseModel):
     model_config = ConfigDict(extra="allow")
@@ -99,6 +100,21 @@ def _upsert_tracking(e: ShiprocketEvent, raw: dict) -> None:
     if update["$set"]["delivery_status"] is None:
         update["$set"].pop("delivery_status", None)
     orders_collection.update_one(q, update, upsert=False)
+
+    try:
+        if e.order_id:
+            users_collection.update_one(
+                {"order_id": e.order_id},
+                {
+                    "$set": {
+                        "current_status": e.current_status,
+                        "current_timestamp_iso": _parse_ts(e.current_timestamp),
+                    }
+                },
+                upsert=False,  # keep default behaviour: do NOT create new user_documents
+            )
+    except Exception as sync_exc:
+        logging.exception(f"[SR WH] Failed to sync to user_details for order {e.order_id}: {sync_exc}")
 
 
 def _latest_scan(scans: List[dict]) -> Optional[dict]:

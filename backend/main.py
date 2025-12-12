@@ -6102,3 +6102,72 @@ def shiprocket_order_show(internal_order_id: str):
         "courier_name": courier_name,
         "shipping_charges": shipping_charges
     }
+
+
+'''
+@app.post("/admin/sync-shipping-fields-once")
+def sync_shipping_fields_once(limit: int = None):
+    """
+    One-time sync:
+    Copy these from shipping_details.shiprocket_data → user_details:
+        - current_status
+        - current_timestamp_iso
+
+    Matched by order_id.
+    """
+    total = 0
+    updated = 0
+    skipped_no_order = 0
+    skipped_missing_fields = 0
+    errors = 0
+    sample_errors = {}
+
+    cursor = shipping_collection.find({})
+    if limit and limit > 0:
+        cursor = cursor.limit(limit)
+
+    for doc in cursor:
+        total += 1
+        try:
+            order_id = doc.get("order_id")
+            if not order_id:
+                skipped_no_order += 1
+                continue
+
+            ship_data = doc.get("shiprocket_data", {}) or {}
+
+            current_status = ship_data.get("current_status")
+            current_timestamp_iso = ship_data.get("current_timestamp_iso")
+
+            if current_status is None or current_timestamp_iso is None:
+                skipped_missing_fields += 1
+                continue
+
+            res = orders_collection.update_one(
+                {"order_id": order_id},
+                {
+                    "$set": {
+                        "current_status": current_status,
+                        "current_timestamp_iso": current_timestamp_iso
+                    }
+                }
+            )
+
+            if res.modified_count > 0:
+                updated += 1
+
+        except Exception as e:
+            errors += 1
+            if len(sample_errors) < 5:
+                sample_errors[str(order_id)] = str(e)
+
+    return {
+        "total_shipping_docs": total,
+        "updated_user_details": updated,
+        "skipped_no_order_id": skipped_no_order,
+        "skipped_missing_fields": skipped_missing_fields,
+        "errors": errors,
+        "sample_errors": sample_errors,
+    }
+'''
+
