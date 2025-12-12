@@ -216,7 +216,7 @@ async def shiprocket_tracking(request: Request, background: BackgroundTasks) -> 
         # Consider pickup detected only when activity exactly equals 'pickup done'
         is_pickup = False
         if activity_norm:
-            if activity_norm == "pickup done":
+            if activity_norm == "pickup done" or activity_norm == "picked up":
                 is_pickup = True
 
         if not is_pickup:
