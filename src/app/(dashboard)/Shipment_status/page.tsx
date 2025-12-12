@@ -261,8 +261,8 @@ export default function ShipmentStatusPage() {
                   <th className="p-2">Out for pickup</th>
                   <th className="p-2">Pickup Exception</th>
                   <th className="p-2">In Transit</th>
-                  <th className="p-2">Delivered</th>
                   <th className="p-2">Issue</th>
+                  <th className="p-2">Delivered</th>
                   <th className="p-2">Total</th>
                 </tr>
               </thead>
@@ -276,8 +276,8 @@ export default function ShipmentStatusPage() {
                     <td className="p-2">{r.out_for_pickup}</td>
                     <td className="p-2">{r.pickup_exception}</td>
                     <td className="p-2">{r.in_transit}</td>
-                    <td className="p-2">{r.delivered}</td>
                     <td className="p-2">{r.issue}</td>
+                    <td className="p-2">{r.delivered}</td>
                     <td className="p-2 font-medium">{r.total}</td>
                   </tr>
                 ))}

@@ -819,8 +819,14 @@ export default function OrderDetailPage() {
                       />
                       <TimelineItem
                         label="Sent for Printing"
-                        date={prettyDate(order.timeline?.print_sent_at)}
+                        date={
+                          order.timeline?.print_sent_at
+                            ? `${prettyDate(order.timeline.print_sent_at)} ${order.printer ? `(${order.printer})` : ""
+                            }`
+                            : "-"
+                        }
                       />
+
                       <TimelineItem
                         label="Order Shipped"
                         date={formatIso(order.timeline?.shipped_at)}
@@ -917,7 +923,27 @@ export default function OrderDetailPage() {
                   <div>
                     <div className="flex flex-col gap-2">
                       <InfoField
-                        label="Landmark"
+                        label="Name"
+                        value={form.user_name}
+                        editable={isEditing}
+                        onChange={(v) => updateForm("user_name", v)}
+                      />
+                      <InfoField
+                        label="Email"
+                        value={form.email}
+                        editable={isEditing}
+                        onChange={(v) => updateForm("email", v)}
+                        type="email"
+                      />
+                      <InfoField
+                        label="Phone"
+                        value={form.phone}
+                        editable={isEditing}
+                        onChange={(v) => updateForm("phone", v)}
+                        type="tel"
+                      />
+                      <InfoField
+                        label="Address Line 1"
                         value={form.shipping_address.address1}
                         editable={isEditing}
                         onChange={(v) =>
@@ -925,7 +951,7 @@ export default function OrderDetailPage() {
                         }
                       />
                       <InfoField
-                        label="Area"
+                        label="Address Line 2"
                         value={form.shipping_address.address2}
                         editable={isEditing}
                         onChange={(v) =>
@@ -962,39 +988,14 @@ export default function OrderDetailPage() {
                           updateForm("shipping_address.postal_code", v)
                         }
                       />
+
                     </div>
                   </div>
                 </div>
               </div>
 
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-                <div className="bg-white rounded border border-gray-200 p-3 shadow-sm">
-                  <h3 className="text-base font-semibold text-gray-900 mb-3 pb-1 border-b border-gray-100">
-                    Customer Detail
-                  </h3>
-                  <div className="space-y-2">
-                    <InfoField
-                      label="Name"
-                      value={form.user_name}
-                      editable={isEditing}
-                      onChange={(v) => updateForm("user_name", v)}
-                    />
-                    <InfoField
-                      label="Email"
-                      value={form.email}
-                      editable={isEditing}
-                      onChange={(v) => updateForm("email", v)}
-                      type="email"
-                    />
-                    <InfoField
-                      label="Phone"
-                      value={form.phone}
-                      editable={isEditing}
-                      onChange={(v) => updateForm("phone", v)}
-                      type="tel"
-                    />
-                  </div>
-                </div>
+
 
                 <div className="bg-white rounded border border-gray-200 p-3 shadow-sm">
                   <h3 className="text-base font-semibold text-gray-900 mb-3 pb-1 border-b border-gray-100">
