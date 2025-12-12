@@ -30,7 +30,7 @@ const Export = () => {
   // --- NEW filtered download function ---
   const handleDownloadFiltered = async () => {
     try {
-      // Choose which fields you want
+      // Choose which fields you want (kept the same as before, plus shipping_status and time_taken)
       const fields = [
         'email',
         'order_id',
@@ -67,9 +67,12 @@ const Export = () => {
         'partial_preview',
         'final_preview',
         'cust_status',
-        'printer'
-      ].join(',');
+        'printer',
 
+        // NEW fields from backend
+        'shipping_status',
+        'time_taken'
+      ].join(',');
 
       const params = new URLSearchParams({
         paid: 'true',       // your required filter
