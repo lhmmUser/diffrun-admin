@@ -1,3 +1,10 @@
+from typing import Dict, Any
+from fastapi import Body
+from typing import Optional, Dict
+from collections import Counter
+from datetime import datetime, timezone, timedelta
+from dateutil import parser as date_parser
+from typing import Optional
 from fastapi import Query
 from typing import Optional, List
 from app.routers.cloudprinter_produce_webhook import router as cp_produce_router
@@ -63,8 +70,6 @@ from datetime import datetime, timezone
 from pydantic import BaseModel, EmailStr
 
 
-
-
 IST_TZ = pytz.timezone("Asia/Kolkata")
 API_BASE = os.getenv("NEXT_PUBLIC_API_BASE_URL", "http://127.0.0.1:5000")
 # Setup logger
@@ -117,7 +122,8 @@ async def lifespan(app: FastAPI):
 
         def _kick_auto_reconcile():
             # schedule the coroutine on the FastAPI event loop
-            asyncio.run_coroutine_threadsafe(_auto_reconcile_and_sign_once(), loop)
+            asyncio.run_coroutine_threadsafe(
+                _auto_reconcile_and_sign_once(), loop)
 
         # every 5 minutes
         scheduler.add_job(
@@ -132,7 +138,8 @@ async def lifespan(app: FastAPI):
         # your existing jobs stay unchanged
         scheduler.add_job(
             _run_export_and_email,
-            trigger=CronTrigger(hour="0,3,6,9,12,15,18,21", minute="0", timezone=IST_TZ),
+            trigger=CronTrigger(hour="0,3,6,9,12,15,18,21",
+                                minute="0", timezone=IST_TZ),
             id="xlsx_export_fixed_ist_times",
             replace_existing=True,
             coalesce=True,
@@ -143,6 +150,20 @@ async def lifespan(app: FastAPI):
             run_feedback_emails_job,
             trigger=CronTrigger(hour="14", minute="0", timezone=IST_TZ),
             id="feedback_emails_job",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
+
+        def _kick_send_nudges():
+            asyncio.run_coroutine_threadsafe(
+                send_nudge_batches(batch_size=200, days_window=7), loop
+            )
+
+        scheduler.add_job(
+            _kick_send_nudges,
+            trigger=CronTrigger(hour="17", minute="0", timezone=IST_TZ),
+            id="send_nudges_job",
             replace_existing=True,
             coalesce=True,
             max_instances=1,
@@ -648,7 +669,6 @@ def _fetch_counts(
     return {r["_id"]: int(r["count"]) for r in rows}
 
 
-
 # --- Country / LOC filter helper --------------------------------------------
 def _build_loc_match(loc: str) -> dict:
     loc = (loc or "IN").upper()
@@ -674,7 +694,6 @@ def _build_loc_match(loc: str) -> dict:
 
     # everything else – simple exact match
     return {"$or": [{"locale": loc}, {"LOC": loc}]}
-
 
 
 @app.get("/stats/orders")
@@ -932,17 +951,13 @@ def stats_revenue(
     }
 
 
-
 # --- START: dynamic-activity ship-status endpoint (ONLY shiprocket_data.scans[*].activity) ---
-from fastapi import Query
-from typing import Optional
-from dateutil import parser as date_parser
-from datetime import datetime, timezone, timedelta
-from collections import Counter
+
 
 @app.get("/stats/ship-status")
 def stats_ship_status(
-    range: str = Query("1w", description="range key like 1d, 1w, 1m, 6m, this_month, custom"),
+    range: str = Query(
+        "1w", description="range key like 1d, 1w, 1m, 6m, this_month, custom"),
     start_date: Optional[str] = Query(None),
     end_date: Optional[str] = Query(None),
     printer: Optional[str] = Query("all", description="genesis | yara | all"),
@@ -983,7 +998,7 @@ def stats_ship_status(
             # gran from _periods may be "hour" for 1d, but we have already
             # normalised 1d -> 1w above, so this is always day-level here.
             labels = _labels_for(effective_range, cs, ce)
-        
+
         exclude_codes = ["TEST", "COLLAB", "REJECTED"]
         if cs and ce:
             order_totals_by_date = _fetch_counts(
@@ -1007,7 +1022,6 @@ def stats_ship_status(
     base_match = {"paid": True, "processed_at": {"$exists": True, "$ne": None}}
     if loc_match:
         base_match = {"$and": [base_match, loc_match]}
-
 
     projection = {"order_id": 1, "processed_at": 1, "printer": 1, "_id": 0}
     cursor = orders_collection.find(base_match, projection)
@@ -1054,7 +1068,8 @@ def stats_ship_status(
             total_orders = int(order_totals_by_date.get(date_key, 0))
             rows.append({
                 "date": date_key,
-                "total": total_orders,   # NEW: total orders for the day (loc-filtered)
+                # NEW: total orders for the day (loc-filtered)
+                "total": total_orders,
                 "sent_to_print": 0,      # no genesis/yara orders
                 "counts": {},
             })
@@ -1064,7 +1079,6 @@ def stats_ship_status(
             "rows": rows,
             "printer": printer or "all",
         }
-
 
     # ---- 3) Fetch shiprocket scans for all candidate orders ----
     shipping_docs = list(
@@ -1112,7 +1126,8 @@ def stats_ship_status(
 
                 if s:
                     sr_data = s.get("shiprocket_data")
-                    scans = sr_data.get("scans") if isinstance(sr_data, dict) else None
+                    scans = sr_data.get("scans") if isinstance(
+                        sr_data, dict) else None
 
                     if isinstance(scans, list) and scans:
                         last = scans[-1]
@@ -1120,7 +1135,8 @@ def stats_ship_status(
                         last_activity_str = last.get("sr-status-label")
 
                 # if no activity or no scans/doc → mark as NEW
-                act_label = str(last_activity_str).strip() if last_activity_str else "NEW"
+                act_label = str(last_activity_str).strip(
+                ) if last_activity_str else "NEW"
 
                 counts[act_label] += 1
                 global_activity_set.add(act_label)
@@ -1132,9 +1148,9 @@ def stats_ship_status(
             "counts": dict(counts),
         })
 
-
     # sorted list of activity labels (NO_SCAN last)
-    activities = sorted(global_activity_set, key=lambda s: (s == "NEW", s.lower()))
+    activities = sorted(global_activity_set,
+                        key=lambda s: (s == "NEW", s.lower()))
 
     return {
         "labels": labels,
@@ -1144,16 +1160,15 @@ def stats_ship_status(
     }
 
 
-###################################Shipment Status Endpoint V2####################################
+################################### Shipment Status Endpoint V2####################################
 # --- START: dynamic-activity ship-status endpoint (ONLY shiprocket_data.scans[*].activity) ---
-###################################Shipment Status Endpoint V2####################################
-from typing import Optional, Dict
-from fastapi import Query
-from datetime import datetime, timezone, timedelta
+################################### Shipment Status Endpoint V2####################################
+
 
 @app.get("/stats/ship-status-v2")
 def stats_ship_status_v2(
-    range: str = Query("1w", description="range key like 1d, 1w, 1m, 6m, this_month, custom"),
+    range: str = Query(
+        "1w", description="range key like 1d, 1w, 1m, 6m, this_month, custom"),
     start_date: Optional[str] = Query(None),
     end_date: Optional[str] = Query(None),
     printer: Optional[str] = Query("all", description="genesis | yara"),
@@ -1206,7 +1221,8 @@ def stats_ship_status_v2(
         cs = ce = None  # just to avoid "undefined" later
 
     # ---- 2) Base order query ----
-    base_match: Dict = {"paid": True, "processed_at": {"$exists": True, "$ne": None}}
+    base_match: Dict = {"paid": True, "processed_at": {
+        "$exists": True, "$ne": None}}
     if loc_match:
         base_match = {"$and": [base_match, loc_match]}
 
@@ -1380,7 +1396,8 @@ def stats_ship_status_v2(
 
                 if s:
                     sr_data = s.get("shiprocket_data")
-                    scans = sr_data.get("scans") if isinstance(sr_data, dict) else None
+                    scans = sr_data.get("scans") if isinstance(
+                        sr_data, dict) else None
 
                     if isinstance(scans, list) and scans:
                         last = scans[-1]
@@ -1572,7 +1589,7 @@ def generate_book_title(book_id, child_name):
     elif book_id == "hero":
         return f"{child_name}, the Little Hero"
     elif book_id == "bloom":
-        return f"{child_name}' is Growing Up Fast" 
+        return f"{child_name}' is Growing Up Fast"
     else:
         return f"{child_name}'s Storybook"
 
@@ -1589,9 +1606,9 @@ def get_orders(
     q: Optional[str] = Query(
         None, description="Search by job_id, order_id, email, name, discount_code, city, locale, book_id"),
     page: int = Query(1, ge=1),
-    limit: int = Query(50, ge=1, le=1000), 
+    limit: int = Query(50, ge=1, le=1000),
 ):
-    # Base query    
+    # Base query
     query = {"paid": True}
     ex_values: List[str] = []
 
@@ -1695,11 +1712,12 @@ def get_orders(
         "printer": 1,
         "locked": 1,
         "locked_by": 1,
-        "unlock_by": 1, 
+        "unlock_by": 1,
         "print_sent_by": 1,
     }
 
-    cursor = orders_collection.find(query, projection).sort(sort_field, sort_order).skip(skip).limit(limit)
+    cursor = orders_collection.find(query, projection).sort(
+        sort_field, sort_order).skip(skip).limit(limit)
     records = list(cursor)
     result = []
 
@@ -1732,7 +1750,7 @@ def get_orders(
             "locked_by": doc.get("locked_by", ""),
             "unlock_by": doc.get("unlock_by", ""),
             "print_sent_by": doc.get("print_sent_by", ""),
-            
+
         })
 
     return {
@@ -1772,6 +1790,7 @@ async def set_cust_status(
         "modified_count": result.modified_count,
         "upserted_id": str(result.upserted_id) if result.upserted_id else None,
     }
+
 
 class LockRequest(BaseModel):
     # Who is locking/unlocking – you can use admin email here
@@ -1818,6 +1837,7 @@ async def lock_order(payload: LockRequest):
         "locked": True,
         "locked_by": payload.user_email,
     }
+
 
 @app.post("/orders/unlock")
 async def unlock_order(payload: LockRequest):
@@ -2091,6 +2111,7 @@ def _send_production_email(
         smtp.login(EMAIL_USER, EMAIL_PASS)
         smtp.send_message(msg)
 
+
 class BulkPrintRequest(BaseModel):
     order_ids: List[str]
     print_sent_by: Optional[EmailStr] = None
@@ -2312,7 +2333,7 @@ async def approve_printing(payload: BulkPrintRequest, background_tasks: Backgrou
     return results
 
 
-## Genesis SHEETS INTEGRATION BLOCK STARTS HERE
+# Genesis SHEETS INTEGRATION BLOCK STARTS HERE
 SPREADSHEET_ID = os.getenv("GOOGLE_SHEET_ID")
 WORKSHEET_NAME = os.getenv("GOOGLE_SHEET_WORKSHEET", "Order Placement")
 VALUE_INPUT_OPTION = os.getenv("GOOGLE_VALUE_INPUT_OPTION", "USER_ENTERED")
@@ -2344,6 +2365,7 @@ def get_gspread_client():
 
     return gspread.authorize(creds)
 
+
 def _to_safe_value(v):
     """Convert values that are not JSON-serializable to safe string representations."""
     if v is None:
@@ -2359,6 +2381,7 @@ def _to_safe_value(v):
         return str(v)
     # fallback: cast to string
     return str(v)
+
 
 def order_to_sheet_row(order: dict) -> list:
     """
@@ -2395,7 +2418,7 @@ def order_to_sheet_row(order: dict) -> list:
 
     phone = _to_safe_value(shipping.get("phone") or order.get(
         "phone_number") or order.get("customer_phone") or "")
-    
+
     quantity = int(order.get("quantity", 1) or 1)
 
     cover_url = order.get("cover_url") or order.get("coverpage_url") or ""
@@ -2418,12 +2441,13 @@ def order_to_sheet_row(order: dict) -> list:
         phone,                     # I
         cover_link_formula,        # J
         interior_link_formula,      # K
-        quantity,            # L        
+        quantity,            # L
     ]
 
     # ensure every element is a primitive (str/int/float/bool)
     row = [_to_safe_value(x) for x in row]
     return row
+
 
 def _ensure_quantity_header(worksheet):
     """Ensure the header 'Quantity' exists in column L (index 12)."""
@@ -2435,7 +2459,6 @@ def _ensure_quantity_header(worksheet):
     except Exception as e:
         print(f"[SHEETS][WARN] Could not verify Quantity header: {e}")
 
-from datetime import datetime, timezone
 
 def _extract_url_from_formula(formula: str) -> str:
     """
@@ -2450,6 +2473,7 @@ def _extract_url_from_formula(formula: str) -> str:
     if match:
         return match.group(1)
     return formula
+
 
 def append_shipping_details(row: list, order: dict, printer: str):
     """
@@ -2475,20 +2499,19 @@ def append_shipping_details(row: list, order: dict, printer: str):
             or (order.get("shipping_address") or {}).get("email")
             or ""
         )
-        age=(order.get("age") or "")
-        total_price=(order.get("total_price") or "")
-        gender=(order.get("gender") or "")
-        paid=(order.get("paid") or "")
-        approved=(order.get("approved") or "")
-        created_at_=(order.get("created_at") or "")
-        updated_at=(order.get("updated_at") or "")
-        discount_code=(order.get("discount_code") or "")
-        payment_at=(order.get("payment_at") or "")
-        shipping_address=(order.get("shipping_address") or "")
-        transaction_id=(order.get("transaction_id") or "")
-        partial_preview=(order.get("partial_preview") or "")
-        final_preview=(order.get("final_preview") or "")
-
+        age = (order.get("age") or "")
+        total_price = (order.get("total_price") or "")
+        gender = (order.get("gender") or "")
+        paid = (order.get("paid") or "")
+        approved = (order.get("approved") or "")
+        created_at_ = (order.get("created_at") or "")
+        updated_at = (order.get("updated_at") or "")
+        discount_code = (order.get("discount_code") or "")
+        payment_at = (order.get("payment_at") or "")
+        shipping_address = (order.get("shipping_address") or "")
+        transaction_id = (order.get("transaction_id") or "")
+        partial_preview = (order.get("partial_preview") or "")
+        final_preview = (order.get("final_preview") or "")
 
         doc = {
             "order_id": row[1],
@@ -2507,7 +2530,7 @@ def append_shipping_details(row: list, order: dict, printer: str):
             "user_name": user_name,
             "email": email,
             "age": age,
-            "total_price": total_price, 
+            "total_price": total_price,
             "gender": gender,
             "paid": paid,
             "approved": approved,
@@ -2526,17 +2549,19 @@ def append_shipping_details(row: list, order: dict, printer: str):
 
         shipping_collection.update_one(
             {"order_id": doc["order_id"]},
-            {"$set": doc, "$setOnInsert": {"created_at": datetime.now(timezone.utc).isoformat()}},
+            {"$set": doc, "$setOnInsert": {
+                "created_at": datetime.now(timezone.utc).isoformat()}},
             upsert=True,
         )
 
         print(f"[MONGO] upserted shipping_details for order {row[1]}")
     except Exception as exc:
-        print(f"[MONGO][ERROR] failed to upsert shipping_details for order {row[1]}: {exc}")
+        print(
+            f"[MONGO][ERROR] failed to upsert shipping_details for order {row[1]}: {exc}")
 
 
 def append_row_to_google_sheet(row: list):
-   
+
     try:
         client = get_gspread_client()
         sh = client.open_by_key(SPREADSHEET_ID)
@@ -2547,16 +2572,18 @@ def append_row_to_google_sheet(row: list):
         worksheet.insert_row(row, index=2, value_input_option="USER_ENTERED")
         print(f"[SHEETS] appended row for order {row[1]}")
     except Exception as exc:
-        print(f"[SHEETS][ERROR] failed to append row for order {row[1]}: {exc}")
+        print(
+            f"[SHEETS][ERROR] failed to append row for order {row[1]}: {exc}")
 
 
 @app.post("/orders/send-to-google-sheet")
 async def send_to_google_sheet(payload: BulkPrintRequest, background_tasks: BackgroundTasks):
     order_ids = payload.order_ids
     print_sent_by = payload.print_sent_by
-  
+
     if not SPREADSHEET_ID:
-        raise HTTPException(status_code=500, detail="GOOGLE_SHEET_ID is not configured")
+        raise HTTPException(
+            status_code=500, detail="GOOGLE_SHEET_ID is not configured")
 
     # 1) De-duplicate IDs within this request (preserve order)
     seen = set()
@@ -2605,13 +2632,12 @@ async def send_to_google_sheet(payload: BulkPrintRequest, background_tasks: Back
 
         # 3) Only now build the row and enqueue appends
         row = order_to_sheet_row(order)
-        background_tasks.add_task(append_shipping_details, row, order, "Genesis")
+        background_tasks.add_task(
+            append_shipping_details, row, order, "Genesis")
         quantity = int(order.get("quantity", 1) or 1)
         quantity = max(1, quantity)
         for _ in range(quantity):
             background_tasks.add_task(append_row_to_google_sheet, row)
-
-        
 
         results.append({
             "order_id": order_id,
@@ -2627,8 +2653,10 @@ async def send_to_google_sheet(payload: BulkPrintRequest, background_tasks: Back
 
 ## YARA SHEET INTEGRATION BLOCK STARTS HERE ##
 SPREADSHEET_ID_YARA = os.getenv("GOOGLE_SHEET_ID_YARA")
-WORKSHEET_NAME_YARA = os.getenv("GOOGLE_SHEET_WORKSHEET_YARA", "Order Placement Yara")
-VALUE_INPUT_OPTION_YARA = os.getenv("GOOGLE_VALUE_INPUT_OPTION_YARA", "USER_ENTERED")
+WORKSHEET_NAME_YARA = os.getenv(
+    "GOOGLE_SHEET_WORKSHEET_YARA", "Order Placement Yara")
+VALUE_INPUT_OPTION_YARA = os.getenv(
+    "GOOGLE_VALUE_INPUT_OPTION_YARA", "USER_ENTERED")
 SERVICE_ACCOUNT_FILE_YARA = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE_YARA")
 SERVICE_ACCOUNT_JSON = os.getenv(
     "GOOGLE_SERVICE_ACCOUNT_JSON")  # optional fallback
@@ -2656,6 +2684,7 @@ def get_gspread_client_yara():
             "Google service account credentials not configured. Set GOOGLE_SERVICE_ACCOUNT_FILE or GOOGLE_SERVICE_ACCOUNT_JSON")
 
     return gspread.authorize(creds)
+
 
 def order_to_sheet_row_yara(order: dict) -> list:
     """
@@ -2692,7 +2721,7 @@ def order_to_sheet_row_yara(order: dict) -> list:
 
     phone = _to_safe_value(shipping.get("phone") or order.get(
         "phone_number") or order.get("customer_phone") or "")
-    
+
     quantity = int(order.get("quantity", 1) or 1)
 
     cover_url = order.get("cover_url") or order.get("coverpage_url") or ""
@@ -2715,7 +2744,7 @@ def order_to_sheet_row_yara(order: dict) -> list:
         phone,                     # I
         cover_link_formula,        # J
         interior_link_formula,      # K
-        quantity,            # L        
+        quantity,            # L
     ]
 
     # ensure every element is a primitive (str/int/float/bool)
@@ -2768,13 +2797,15 @@ def order_to_sheet_row_yara(order: dict) -> list:
 
         shipping_collection.update_one(
             {"order_id": doc["order_id"]},
-            {"$set": doc, "$setOnInsert": {"created_at": datetime.now(timezone.utc).isoformat()}},
+            {"$set": doc, "$setOnInsert": {
+                "created_at": datetime.now(timezone.utc).isoformat()}},
             upsert=True,
         )
 
         print(f"[MONGO] upserted shipping_details for order {row[1]}")
     except Exception as exc:
-        print(f"[MONGO][ERROR] failed to upsert shipping_details for order {row[1]}: {exc}")
+        print(
+            f"[MONGO][ERROR] failed to upsert shipping_details for order {row[1]}: {exc}")
 
 
 def append_row_to_google_sheet_yara(row: list):
@@ -2788,9 +2819,11 @@ def append_row_to_google_sheet_yara(row: list):
         # use configured option (fallback to USER_ENTERED)
         option = VALUE_INPUT_OPTION_YARA or "USER_ENTERED"
         worksheet.insert_row(row, index=2, value_input_option=option)
-        print(f"[SHEETS][YARA] appended row for order {row[1]} to worksheet {WORKSHEET_NAME_YARA}")
+        print(
+            f"[SHEETS][YARA] appended row for order {row[1]} to worksheet {WORKSHEET_NAME_YARA}")
     except Exception as exc:
-        print(f"[SHEETS][YARA][ERROR] failed to append row for order {row[1]}: {exc}")
+        print(
+            f"[SHEETS][YARA][ERROR] failed to append row for order {row[1]}: {exc}")
 
 
 @app.post("/orders/send-to-yara")
@@ -2800,7 +2833,8 @@ async def send_to_yara(payload: BulkPrintRequest, background_tasks: BackgroundTa
 
     # Ensure the Yara spreadsheet id is configured
     if not SPREADSHEET_ID_YARA:
-        raise HTTPException(status_code=500, detail="GOOGLE_SHEET_ID_YARA is not configured")
+        raise HTTPException(
+            status_code=500, detail="GOOGLE_SHEET_ID_YARA is not configured")
 
     # 1) De-duplicate IDs within this request (preserve order)
     seen = set()
@@ -2865,15 +2899,17 @@ async def send_to_yara(payload: BulkPrintRequest, background_tasks: BackgroundTa
 
 ## YARA SHEET INTEGRATION BLOCK ENDS HERE ##
 
+
 @app.get("/jobs")
 def get_jobs(
     sort_by: Optional[str] = Query(None, description="Field to sort by"),
     sort_dir: Optional[str] = Query("asc", description="asc or desc"),
     filter_status: Optional[str] = Query(None),
     filter_book_style: Optional[str] = Query(None),
-    q: Optional[str] = Query(None, description="Search by job_id, order_id, name"),  
-    page: int = Query(1, ge=1), 
-    limit: int = Query(50, ge=1, le=1000), 
+    q: Optional[str] = Query(
+        None, description="Search by job_id, order_id, name"),
+    page: int = Query(1, ge=1),
+    limit: int = Query(50, ge=1, le=1000),
 ):
 
     query = {}
@@ -2931,10 +2967,10 @@ def get_jobs(
 
     skip = (page - 1) * limit
     total_count = orders_collection.count_documents(query)
-    
+
     records = list(orders_collection.find(
         query, projection).sort(sort_field, sort_order).skip(skip).limit(limit))
-    
+
     result = []
 
     for doc in records:
@@ -2974,6 +3010,7 @@ def get_jobs(
             "pages": (total_count + limit - 1) // limit
         }
     }
+
 
 @app.get("/stats/jobs-timeline")
 def jobs_timeline(interval: str = Query("day", enum=["day", "week", "month"])):
@@ -3042,17 +3079,263 @@ def send_email(to_email: str, subject: str, body: str):
         print(f"❌ Error sending email to {to_email}: {e}")
 
 
+def chunked_iterable(items: List, size: int):
+    for i in range(0, len(items), size):
+        yield items[i:i + size]
+
+
+def _fetch_nudge_candidates_compact(days_window: int = 7) -> List[Dict]:
+
+    ist = ZoneInfo("Asia/Kolkata")
+    now_ist = datetime.now(ist)
+    cutoff_ist = now_ist - timedelta(days=days_window)
+    cutoff_utc = cutoff_ist.astimezone(timezone.utc)
+
+    pipeline = [
+        {"$match": {
+            "created_at": {"$gte": cutoff_utc},
+            "email": {"$exists": True, "$ne": None, "$not": {"$regex": "@lhmm\\.in$", "$options": "i"}},
+            "workflows": {"$exists": True}
+        }},
+        {"$group": {
+            "_id": "$email",
+            "docs": {"$push": "$$ROOT"},
+            "has_paid_order": {"$max": {"$cond": [{"$eq": ["$paid", True]}, 1, 0]}},
+            "latest_created_at": {"$max": "$created_at"}
+        }},
+        {"$match": {"has_paid_order": 0}},
+        {"$project": {
+            "email": "$_id",
+            "latest_doc": {
+                "$arrayElemAt": [
+                    {"$filter": {"input": "$docs", "as": "doc", "cond": {
+                        "$eq": ["$$doc.created_at", "$latest_created_at"]}}}, 0
+                ]
+            }
+        }},
+        {"$replaceRoot": {"newRoot": "$latest_doc"}},
+        {"$match": {
+            "paid": False,
+            "$or": [{"nudge_stage": {"$exists": False}}, {"nudge_stage": {"$in": [0, 1]}}]
+        }},
+        {"$addFields": {
+            "wf_array": {"$objectToArray": "$workflows"},
+            "wf_count": {"$size": {"$objectToArray": "$workflows"}}
+        }},
+        {"$match": {"wf_count": 13}},
+        {"$match": {
+            "$expr": {
+                "$allElementsTrue": {
+                    "$map": {"input": "$wf_array", "as": "w", "in": {"$eq": ["$$w.v.status", "completed"]}}
+                }
+            }
+        }},
+        {"$project": {
+            "_id": 0,
+            "email": 1,
+            "name": 1,
+            "user_name": 1,
+            "job_id": 1,
+            "created_at": 1,
+            "nudge_stage": {"$ifNull": ["$nudge_stage", 0]},
+            "nudge_history": {"$ifNull": ["$nudge_history", []]}
+        }}
+    ]
+
+    results = list(orders_collection.aggregate(pipeline))
+
+    filtered = []
+    for r in results:
+        ca = r.get("created_at")
+        if isinstance(ca, datetime):
+            days = (now_ist.date() - ca.astimezone(ist).date()).days
+            r["days_since_created"] = days
+        else:
+            r["days_since_created"] = None
+
+        # skip same day
+        if r["days_since_created"] is None or r["days_since_created"] == 0:
+            continue
+
+        filtered.append(r)
+    return filtered
+
+
+def _select_template_for_stage(stage: int, user_name: str | None, child_name: str | None, preview_link: str) -> tuple[str, str]:
+    user_name = ((user_name or "").strip().title()) or "there"
+    child_name = ((child_name or "").strip().title()) or "your child"
+    preview_link = preview_link or "https://diffrun.com/preview"
+
+    if stage == 1:
+        subject = f"{child_name}'s Diffrun Storybook is waiting!"
+        html = f"""
+        <html>
+          <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+            <p>Hi <strong>{user_name}</strong>,</p>
+            <p>We noticed you began crafting a personalized storybook for <strong>{child_name}</strong> — and it’s already looking magical!</p>
+            <p>Just one more step to bring it to life: preview the story and place your order whenever you’re ready.</p>
+            <p style="margin: 32px 0;">
+              <a href="{preview_link}" 
+                 style="background-color: #5784ba; color: white; padding: 14px 28px; border-radius: 6px; text-decoration: none; font-weight: bold;">
+                Preview & Continue
+              </a>
+            </p>
+            <p>Your story is safe and waiting. We’d love for <strong>{child_name}</strong> to see themselves in a story made just for them. 💫</p>
+            <p>Warm wishes,<br><strong>The Diffrun Team</strong></p>
+          </body>
+        </html>
+        """
+        return subject, html
+
+    subject = f"Final reminder — {child_name}'s storybook is still waiting"
+    html = f"""
+    <html>
+      <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #222;">
+        <p>Hi <strong>{user_name}</strong>,</p>
+
+        <p>{child_name}’s personalised story is ready — over 300 parents completed their orders within 48 hours and loved the results.</p>
+
+        <p style="margin-top:8px">Complete the order now for faster dispatch and a keepsake that {child_name} will treasure.</p>
+
+        <p style="margin: 22px 0;">
+          <a href="{preview_link}"
+             style="display: inline-block; padding: 12px 20px; border-radius: 6px; text-decoration: none; font-weight: 600;">
+            Finish & Order Now
+          </a>
+        </p>
+
+        <p style="margin-top:8px">Use code <strong>FAST10</strong> for 10% off — valid for the next 24 hours only.</p>
+
+        <p style="margin-top:12px">Need help finishing up? Reply to this email and we’ll take care of the last steps for you.</p>
+
+        <p style="margin-top:18px">Warmly,<br><strong>The Diffrun Team</strong></p>
+      </body>
+    </html>
+    """
+    return subject, html
+
+
+async def send_nudge_batches(batch_size: int = 200, days_window: int = 7):
+    ist = ZoneInfo("Asia/Kolkata")
+    now_ist = datetime.now(ist)
+    logger.info(f"Starting nudge batch job (snapshot {now_ist.isoformat()})")
+
+    try:
+        candidates = await asyncio.to_thread(_fetch_nudge_candidates_compact, days_window)
+    except Exception as e:
+        logger.exception("Failed to fetch nudge candidates: %s", e)
+        return
+
+    total = len(candidates)
+    if total == 0:
+        logger.info("No nudge candidates found (last %d days).", days_window)
+        return
+
+    logger.info(
+        f"Found {total} eligible nudge candidates — batching {batch_size} per run.")
+
+    for batch in chunked_iterable(candidates, batch_size):
+        for user in batch:
+            email = user.get("email")
+            user_name = user.get("user_name")
+            child_name = user.get("name")
+            job_id = user.get("job_id")
+            book_id = user.get("book_id")
+            days = user.get("days_since_created")
+            current_stage = int(user.get("nudge_stage", 0))
+
+            # Decide which stage (if any) to send
+            desired_stage = None
+            if days == 1 and current_stage == 0:
+                desired_stage = 1
+            elif days == 2 and current_stage == 1:
+                desired_stage = 2
+
+            if desired_stage is None:
+                logger.debug(
+                    f"Skipping {email} (job_id={job_id}) days={days} stage={current_stage}")
+                continue
+
+            preview_link = user.get(
+                "preview_url") or f"https://diffrun.com/preview?job_id={job_id}&name={child_name}&book_id={book_id}"
+
+            def _send_and_record():
+                try:
+                    subject, html = _select_template_for_stage(
+                        desired_stage, user_name, child_name, preview_link)
+
+                    msg = EmailMessage()
+                    msg["Subject"] = subject
+                    msg["From"] = f"Diffrun Team <{os.getenv('EMAIL_ADDRESS')}>"
+                    msg["To"] = email
+                    msg.add_alternative(html, subtype="html")
+
+                    EMAIL_USER = (os.getenv("EMAIL_ADDRESS") or "").strip()
+                    EMAIL_PASS = (os.getenv("EMAIL_PASSWORD") or "").strip()
+                    if not EMAIL_USER or not EMAIL_PASS:
+                        raise RuntimeError(
+                            "EMAIL_ADDRESS/EMAIL_PASSWORD not configured")
+
+                    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+                        smtp.login(EMAIL_USER, EMAIL_PASS)
+                        smtp.send_message(msg)
+
+                    # Update nudge_stage
+                    res = orders_collection.update_one(
+                        {"job_id": job_id, "nudge_stage": current_stage},  # ensures no concurrent change
+                        {
+                            "$set": {
+                                "nudge_stage": desired_stage,
+                                "nudge_last_sent_at": datetime.now(timezone.utc)
+                            },
+                            "$push": {
+                                "nudge_history": {"stage": desired_stage, "at": datetime.now(timezone.utc), "via": "email"}
+                            }
+                        }
+                    )
+                    if res.matched_count == 0:
+                        # another worker updated this doc, log and skip
+                        logger.warning("Race: order %s was not updated because nudge_stage != %s", job_id, current_stage)
+
+
+                    logger.info(
+                        f"✅ Sent nudge stage {desired_stage} to {email} (job_id={job_id})")
+                except Exception as exc:
+                    # record failure for debugging/metrics
+                    try:
+                        orders_collection.update_one(
+                            {"job_id": job_id},
+                            {"$push": {
+                                "nudge_history": {
+                                    "stage": desired_stage,
+                                    "at": datetime.now(timezone.utc),
+                                    "via": "email",
+                                    "status": "failed",
+                                    "error": str(exc)[:1000]
+                                }
+                            }}
+                        )
+                    except Exception:
+                        logger.exception("Failed to write nudge failure to DB for job_id=%s", job_id)
+
+                    logger.exception(f"❌ Error sending nudge to {email} (job_id={job_id}): {exc}")
+
+            await asyncio.to_thread(_send_and_record)
+
+    logger.info("Completed all nudge batches.")
+
+
 def send_nudge_email_to_user(email: str, user_name: str | None, child_name: str | None, job_id: str):
     order = orders_collection.find_one({"job_id": job_id})
     if not order:
         logger.warning(f"⚠️ Could not find order for job_id={job_id}")
         return
 
-    preview_link = order.get(
-        "preview_url", f"https://diffrun.com/preview/{job_id}")
-
     user_name = ((user_name or "").strip().title()) or "there"
     child_name = ((child_name or "").strip().title()) or "your child"
+    book_id = ((order.get("book_id") or "").strip().title()) or "book"
+    preview_link = order.get(
+        "preview_url", f"https://diffrun.com/preview?job_id={job_id}&name={child_name}&book_id={book_id}")
 
     html_content = f"""
     <html>
@@ -3153,68 +3436,38 @@ def send_nudge_email():
 
 @app.get("/debug/nudge-candidates")
 def debug_nudge_candidates():
+    # timezone objects
     ist = ZoneInfo("Asia/Kolkata")
     now_ist = datetime.now(ist)
-
-    # Yesterday in IST (00:00 to 23:59)
-    yesterday_ist = now_ist.date() - timedelta(days=1)
-    start_yesterday_ist = datetime(
-        yesterday_ist.year, yesterday_ist.month, yesterday_ist.day, 0, 0, 0, tzinfo=ist)
-    end_yesterday_ist = datetime(
-        yesterday_ist.year, yesterday_ist.month, yesterday_ist.day, 23, 59, 59, tzinfo=ist)
-
-    # Today in IST (00:00 to current time)
-    today_ist = now_ist.date()
-    start_today_ist = datetime(
-        today_ist.year, today_ist.month, today_ist.day, 0, 0, 0, tzinfo=ist)
-    end_today_ist = now_ist  # current time
-
-    # Convert to UTC for Mongo
-    start_yesterday_utc = start_yesterday_ist.astimezone(timezone.utc)
-    end_yesterday_utc = end_yesterday_ist.astimezone(timezone.utc)
-    start_today_utc = start_today_ist.astimezone(timezone.utc)
-    end_today_utc = end_today_ist.astimezone(timezone.utc)
+    # sliding 7 day window (from now)
+    cutoff_ist = now_ist - timedelta(days=7)
+    cutoff_utc = cutoff_ist.astimezone(timezone.utc)
 
     pipeline = [
-        # First, match documents from both yesterday AND today with basic filters
         {"$match": {
-            "$or": [
-                {"created_at": {"$gte": start_yesterday_utc, "$lt": end_yesterday_utc}},
-                {"created_at": {"$gte": start_today_utc, "$lt": end_today_utc}}
-            ],
+            "created_at": {"$gte": cutoff_utc},
             "email": {
-                "$exists": True, "$ne": None,
+                "$exists": True,
+                "$ne": None,
                 "$not": {"$regex": "@lhmm\\.in$", "$options": "i"}
             },
             "workflows": {"$exists": True}
         }},
-
-        # Filter for exactly 13 workflows
-        {"$match": {
-            "$expr": {
-                "$eq": [
-                    {"$size": {"$objectToArray": "$workflows"}},
-                    13
-                ]
-            }
-        }},
-
-        # Group by email to check payment status
         {"$group": {
             "_id": "$email",
             "docs": {"$push": "$$ROOT"},
-            # If any order has paid=true, this becomes true
-            "has_paid_order": {"$max": "$paid"},
-            # Find the most recent order
+            "has_paid_order": {
+                "$max": {
+                    "$cond": [
+                        {"$eq": ["$paid", True]},
+                        1,
+                        0
+                    ]
+                }
+            },
             "latest_created_at": {"$max": "$created_at"}
         }},
-
-        # Only include emails where ALL orders are unpaid (has_paid_order is false)
-        {"$match": {
-            "has_paid_order": False
-        }},
-
-        # Find the most recent document for each email
+        {"$match": {"has_paid_order": 0}},
         {"$project": {
             "email": "$_id",
             "latest_doc": {
@@ -3228,75 +3481,106 @@ def debug_nudge_candidates():
                 ]
             }
         }},
-
-        # Replace root with the latest document
         {"$replaceRoot": {"newRoot": "$latest_doc"}},
-
-        # Filter for nudge_sent: false or missing
         {"$match": {
-            "$or": [{"nudge_sent": False}, {"nudge_sent": {"$exists": False}}]
+            "paid": False,
+            "$or": [
+                {"nudge_stage": {"$exists": False}},  # no stage yet
+                {"nudge_stage": {"$in": [0, 1]}}       # we allow 0 or 1
+            ]
         }},
-
-        # Project only needed fields
+        {"$addFields": {
+            "wf_array": {"$objectToArray": "$workflows"},
+            "wf_count": {"$size": {"$objectToArray": "$workflows"}}
+        }},
+        {"$match": {"wf_count": 13}},
+        {"$match": {
+            "$expr": {
+                "$allElementsTrue": {
+                    "$map": {
+                        "input": "$wf_array",
+                        "as": "w",
+                        "in": {"$eq": ["$$w.v.status", "completed"]}
+                    }
+                }
+            }
+        }},
         {"$project": {
             "_id": 0,
             "email": 1,
-            "user_name": 1,
             "name": 1,
+            "user_name": 1,
             "job_id": 1,
             "created_at": 1,
-            "paid": 1,
-            "nudge_sent": 1,
-            "workflows_count": {"$size": {"$objectToArray": "$workflows"}}
+            "nudge_stage": {"$ifNull": ["$nudge_stage", 0]},
+            "nudge_history": {"$ifNull": ["$nudge_history", []]}
         }}
     ]
 
-    results = list(orders_collection.aggregate(pipeline))
+    mongo_results = list(orders_collection.aggregate(pipeline))
 
-    # Add debug info to see what time ranges we're querying
-    debug_info = {
-        "yesterday_ist_range": {
-            "start": start_yesterday_ist.isoformat(),
-            "end": end_yesterday_ist.isoformat()
-        },
-        "today_ist_range": {
-            "start": start_today_ist.isoformat(),
-            "end": end_today_ist.isoformat()
-        },
-        "yesterday_utc_range": {
-            "start": start_yesterday_utc.isoformat(),
-            "end": end_yesterday_utc.isoformat()
-        },
-        "today_utc_range": {
-            "start": start_today_utc.isoformat(),
-            "end": end_today_utc.isoformat()
-        },
+    # Build compact output and format created_at into ISO + human-readable IST form
+    output = []
+    for row in mongo_results:
+        created_at = row.get("created_at")
+        if isinstance(created_at, datetime):
+            created_iso = created_at.isoformat()
+            created_human = created_at.astimezone(
+                ist).strftime("%d %b %Y %I:%M:%S %p %Z")
+            # compute days since created (IST date arithmetic)
+            created_date_ist = created_at.astimezone(ist).date()
+            days_since_created = (now_ist.date() - created_date_ist).days
+        else:
+            created_iso = None
+            created_human = None
+            days_since_created = None
+
+        # IMPORTANT: skip same-day creations (days_since_created == 0)
+        if days_since_created is None or days_since_created == 0:
+            continue
+
+        output.append({
+            "email": row.get("email"),
+            "name": row.get("name"),
+            "user_name": row.get("user_name"),
+            "job_id": row.get("job_id"),
+            "created_at_iso": created_iso,
+            "created_at_human_ist": created_human,
+            "days_since_created": days_since_created,
+            "nudge_stage": row.get("nudge_stage"),
+            "nudge_history": row.get("nudge_history"),
+        })
+
+    return {
         "current_ist_time": now_ist.isoformat(),
-        "candidates_found": len(results),
-        "candidates": results
+        "candidates_found": len(output),
+        "candidates": output
     }
-
-    return debug_info
 
 
 @app.post("/orders/unapprove")
 async def unapprove_orders(req: UnapproveRequest):
+    print(f"Unapprove request: {req}")
     for job_id in req.job_ids:
+        print(f"Unapproving order with job_id: {job_id}")
         result = orders_collection.update_one(
             {"job_id": job_id},
             {"$set": {"approved": False}}
         )
-    if result.modified_count == 0:
-        raise HTTPException(
-            status_code=404, detail=f"No order found with job_id {job_id}")
+        print(f"Update result: {result}")
+        if result.modified_count == 0:
+            raise HTTPException(
+                status_code=404, detail=f"No order found with job_id {job_id}")
 
     prefix = f"output/{job_id}/"
     folders_to_move = ["final_coverpage/", "approved_output/"]
     for folder in folders_to_move:
+        print(f"Moving folder: {folder}")
         old_prefix = prefix + folder
         new_prefix = prefix + "previous/" + folder
 
         response = s3.list_objects_v2(Bucket=BUCKET_NAME, Prefix=old_prefix)
+        print(f"List objects response: {response}")
 
         if "Contents" not in response:
             continue
@@ -3304,11 +3588,13 @@ async def unapprove_orders(req: UnapproveRequest):
         for obj in response["Contents"]:
             src_key = obj["Key"]
             dst_key = src_key.replace(old_prefix, new_prefix, 1)
+            print(f"Moving from: {src_key} to: {dst_key}")
 
             s3.copy_object(Bucket=BUCKET_NAME, CopySource={
                            "Bucket": BUCKET_NAME, "Key": src_key}, Key=dst_key)
             s3.delete_object(Bucket=BUCKET_NAME, Key=src_key)
 
+    print(f"Unapproved {len(req.job_ids)} orders successfully")
     return {"message": f"Unapproved {len(req.job_ids)} orders successfully"}
 
 
@@ -3319,14 +3605,14 @@ def export_orders_csv():
         "approved", "created_date", "created_time", "creation_hour",
         "payment_date", "payment_time", "payment_hour",
         "locale", "name", "user_name", "shipping_address.city", "shipping_address.province",
-        "order_id", "discount_code", "paypal_capture_id", "transaction_id", "tracking_code", "partial_preview", "final_preview","cust_status", "printer",
+        "order_id", "discount_code", "paypal_capture_id", "transaction_id", "tracking_code", "partial_preview", "final_preview", "cust_status", "printer",
     ]
 
     projection = {
         "email": 1, "phone_number": 1, "age": 1, "book_id": 1, "book_style": 1, "total_price": 1,
         "gender": 1, "paid": 1, "approved": 1, "created_at": 1, "processed_at": 1,
         "locale": 1, "name": 1, "user_name": 1, "shipping_address": 1, "order_id": 1,
-        "discount_code": 1, "paypal_capture_id": 1, "transaction_id": 1, "tracking_code": 1, "partial_preview": 1, "final_preview": 1,"cust_status": 1, "printer": 1,
+        "discount_code": 1, "paypal_capture_id": 1, "transaction_id": 1, "tracking_code": 1, "partial_preview": 1, "final_preview": 1, "cust_status": 1, "printer": 1,
     }
 
     cursor = orders_collection.find({}, projection).sort("created_at", -1)
@@ -3406,13 +3692,19 @@ def export_orders_csv():
 IST = pytz.timezone("Asia/Kolkata")
 
 # New endpoint: export filtered CSV
+
+
 @app.get("/export-orders-filtered-csv")
 def export_orders_filtered_csv(
-    paid: Optional[bool] = Query(None, description="Filter by paid (true/false)"),
-    approved: Optional[bool] = Query(None, description="Filter by approved (true/false)"),
+    paid: Optional[bool] = Query(
+        None, description="Filter by paid (true/false)"),
+    approved: Optional[bool] = Query(
+        None, description="Filter by approved (true/false)"),
     locale: Optional[str] = Query(None, description="Filter by locale"),
-    start: Optional[str] = Query(None, description="Start created_at ISO datetime (inclusive)"),
-    end: Optional[str] = Query(None, description="End created_at ISO datetime (inclusive)"),
+    start: Optional[str] = Query(
+        None, description="Start created_at ISO datetime (inclusive)"),
+    end: Optional[str] = Query(
+        None, description="End created_at ISO datetime (inclusive)"),
     fields: Optional[str] = Query(
         None,
         description="Comma-separated fields to include (nested fields with dot notation). "
@@ -3530,8 +3822,10 @@ def export_orders_filtered_csv(
 
         # Rows
         for doc in cursor:
-            created_date, created_time, creation_hour = format_datetime_parts(doc.get("created_at"))
-            payment_date, payment_time, payment_hour = format_datetime_parts(doc.get("processed_at"))
+            created_date, created_time, creation_hour = format_datetime_parts(
+                doc.get("created_at"))
+            payment_date, payment_time, payment_hour = format_datetime_parts(
+                doc.get("processed_at"))
 
             row = []
 
@@ -3539,17 +3833,23 @@ def export_orders_filtered_csv(
 
                 # Date/time fields
                 if field == "created_date":
-                    row.append(created_date); continue
+                    row.append(created_date)
+                    continue
                 if field == "created_time":
-                    row.append(created_time); continue
+                    row.append(created_time)
+                    continue
                 if field == "creation_hour":
-                    row.append(creation_hour); continue
+                    row.append(creation_hour)
+                    continue
                 if field == "payment_date":
-                    row.append(payment_date); continue
+                    row.append(payment_date)
+                    continue
                 if field == "payment_time":
-                    row.append(payment_time); continue
+                    row.append(payment_time)
+                    continue
                 if field == "payment_hour":
-                    row.append(payment_hour); continue
+                    row.append(payment_hour)
+                    continue
 
                 # Shipping status
                 if field == "shipping_status":
@@ -3581,9 +3881,11 @@ def export_orders_filtered_csv(
                             if proc_dt and end_dt:
 
                                 if proc_dt.tzinfo is None:
-                                    proc_dt = proc_dt.replace(tzinfo=timezone.utc)
+                                    proc_dt = proc_dt.replace(
+                                        tzinfo=timezone.utc)
                                 if end_dt.tzinfo is None:
-                                    end_dt = end_dt.replace(tzinfo=timezone.utc)
+                                    end_dt = end_dt.replace(
+                                        tzinfo=timezone.utc)
 
                                 delta = end_dt - proc_dt
                                 days = delta.days
@@ -3603,7 +3905,8 @@ def export_orders_filtered_csv(
                 if "." in field:
                     value = doc
                     for part in field.split('.'):
-                        value = value.get(part, "") if isinstance(value, dict) else ""
+                        value = value.get(part, "") if isinstance(
+                            value, dict) else ""
                 else:
                     value = doc.get(field, "")
 
@@ -4852,8 +5155,10 @@ def debug_feedback_email_candidates():
                             "$not": [
                                 {
                                     "$and": [
-                                        {"$eq": ["$shipping_docs.book_id", "wigu"]},
-                                        {"$eq": ["$shipping_docs.book_style", "paperback"]},
+                                        {"$eq": [
+                                            "$shipping_docs.book_id", "wigu"]},
+                                        {"$eq": [
+                                            "$shipping_docs.book_style", "paperback"]},
                                     ]
                                 }
                             ]
@@ -4929,6 +5234,7 @@ def debug_feedback_email_candidates():
         "candidates": candidates,
     }
 
+
 @app.post("/cron/feedback-emails")
 def cron_feedback_emails(limit: int = 200):
     pipeline = [
@@ -4977,8 +5283,10 @@ def cron_feedback_emails(limit: int = 200):
                             "$not": [
                                 {
                                     "$and": [
-                                        {"$eq": ["$shipping_docs.book_id", "wigu"]},
-                                        {"$eq": ["$shipping_docs.book_style", "paperback"]},
+                                        {"$eq": [
+                                            "$shipping_docs.book_id", "wigu"]},
+                                        {"$eq": [
+                                            "$shipping_docs.book_style", "paperback"]},
                                     ]
                                 }
                             ]
@@ -5193,8 +5501,6 @@ def debug_run_reconcile_now():
     return {"ok": True}
 
 
-
-
 def _iso(dt: Any) -> Optional[str]:
     if dt is None:
         return None
@@ -5398,6 +5704,7 @@ def get_order_detail(order_id: str):
         raise HTTPException(status_code=404, detail="Order not found")
     return _build_order_response(order)
 
+
 @app.get("/shipping/{order_id}")
 def get_shipping_detail(order_id: str):
     # debug
@@ -5405,15 +5712,16 @@ def get_shipping_detail(order_id: str):
     shipping = shipping_collection.find_one({"order_id": order_id})
     print("DEBUG db find result:", shipping is not None)
     if not shipping:
-        raise HTTPException(status_code=404, detail="Shipping details not found")
+        raise HTTPException(
+            status_code=404, detail="Shipping details not found")
     shipping["_id"] = str(shipping.get("_id")) if shipping.get("_id") else None
     return shipping
 
 
 class ShippingAddressUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    address1: Optional[str] = None        
-    address2: Optional[str] = None       
+    address1: Optional[str] = None
+    address2: Optional[str] = None
     city:   Optional[str] = None
     state:  Optional[str] = None
     country: Optional[str] = None
@@ -5800,36 +6108,42 @@ def get_job_mini(job_id: str) -> Dict[str, Any]:
 
 # ===================== Shiprocket: create from order collection =====================
 
-from fastapi import Body
-from typing import Dict, Any
 
-SHIPROCKET_BASE = os.getenv("SHIPROCKET_BASE", "https://apiv2.shiprocket.in").rstrip("/")
+SHIPROCKET_BASE = os.getenv(
+    "SHIPROCKET_BASE", "https://apiv2.shiprocket.in").rstrip("/")
 SHIPROCKET_EMAIL = os.getenv("SHIPROCKET_EMAIL")
 SHIPROCKET_PASSWORD = os.getenv("SHIPROCKET_PASSWORD")
 SHIPROCKET_DEFAULT_PICKUP = os.getenv("SHIPROCKET_DEFAULT_PICKUP", "warehouse")
 
+
 def _sr_login_token() -> str:
     if not SHIPROCKET_EMAIL or not SHIPROCKET_PASSWORD:
-        raise HTTPException(status_code=500, detail="Shiprocket API creds missing")
+        raise HTTPException(
+            status_code=500, detail="Shiprocket API creds missing")
     r = requests.post(
         f"{SHIPROCKET_BASE}/v1/external/auth/login",
         json={"email": SHIPROCKET_EMAIL, "password": SHIPROCKET_PASSWORD},
         timeout=30,
     )
     if r.status_code != 200:
-        raise HTTPException(status_code=502, detail=f"Shiprocket auth failed: {r.text}")
+        raise HTTPException(
+            status_code=502, detail=f"Shiprocket auth failed: {r.text}")
     token = (r.json() or {}).get("token")
     if not token:
-        raise HTTPException(status_code=502, detail="Shiprocket auth returned no token")
+        raise HTTPException(
+            status_code=502, detail="Shiprocket auth returned no token")
     return token
+
 
 def _sr_headers(tok: str) -> Dict[str, str]:
     return {"Authorization": f"Bearer {tok}", "Content-Type": "application/json"}
 
+
 def _sr_order_payload_from_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
     ship = doc.get("shipping_address") or {}
     # name split (helper exists earlier in this file)
-    first, last = split_full_name(ship.get("name", "") or (doc.get("user_name") or doc.get("name") or ""))
+    first, last = split_full_name(ship.get("name", "") or (
+        doc.get("user_name") or doc.get("name") or ""))
 
     # price/qty
     qty = int(doc.get("quantity", 1) or 1)
@@ -5841,7 +6155,7 @@ def _sr_order_payload_from_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
         or 0.0
     )
 
-        # package: apply dimensions by book_id
+    # package: apply dimensions by book_id
     book_id = (doc.get("book_id") or "").lower().strip()
 
     if book_id == "wigu":
@@ -5851,14 +6165,13 @@ def _sr_order_payload_from_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
 
     weight = float(doc.get("weight_kg", 0.5))
 
-
     # book identity for item line
-    order_id=(doc.get("order_id"))
+    order_id = (doc.get("order_id"))
     book_id = (doc.get("book_id") or "BOOK").upper()
     book_style = (doc.get("book_style") or "HARDCOVER").upper()
-    order_id_long=(doc.get("order_id_long"))
-    name=(doc.get("name"))
-    product_name=generate_book_title(book_id, name)
+    order_id_long = (doc.get("order_id_long"))
+    name = (doc.get("name"))
+    product_name = generate_book_title(book_id, name)
 
     # order date "YYYY-MM-DD HH:MM" (IST)
     dt = doc.get("processed_at") or doc.get("created_at")
@@ -5867,7 +6180,8 @@ def _sr_order_payload_from_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
             dt = parser.isoparse(dt)
         if isinstance(dt, datetime) and dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-        order_date = (dt or datetime.now(timezone.utc)).astimezone(IST_TZ).strftime("%Y-%m-%d %H:%M")
+        order_date = (dt or datetime.now(timezone.utc)).astimezone(
+            IST_TZ).strftime("%Y-%m-%d %H:%M")
     except Exception:
         order_date = datetime.now(IST_TZ).strftime("%Y-%m-%d %H:%M")
 
@@ -5882,13 +6196,15 @@ def _sr_order_payload_from_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
         pickup_name = "warehouse-1"
 
     if not pickup_name:
-        raise HTTPException(status_code=400, detail="Shiprocket pickup_location not configured")
+        raise HTTPException(
+            status_code=400, detail="Shiprocket pickup_location not configured")
 
     # payment
     cod = bool(doc.get("payment_method") == "COD")
 
     return {
-        "order_id": str(doc.get("order_id") or ""),                           # your reference
+        # your reference
+        "order_id": str(doc.get("order_id") or ""),
         "order_date": order_date,
         "pickup_location": pickup_name,
         "comment": doc.get("comment", ""),
@@ -5940,11 +6256,15 @@ def _sr_order_payload_from_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
         "weight": weight,
     }
 
+
 @app.post("/shiprocket/create-from-orders", tags=["shiprocket"])
 def shiprocket_create_from_orders(
-    order_ids: List[str] = Body(..., embed=True, description="Diffrun order_ids like ['#123', '#124']"),
-    assign_awb: bool = Body(False, embed=True, description="If true, assign AWB after creating order"),
-    request_pickup: bool = Body(False, embed=True, description="If true, generate pickup after AWB assignment"),
+    order_ids: List[str] = Body(..., embed=True,
+                                description="Diffrun order_ids like ['#123', '#124']"),
+    assign_awb: bool = Body(
+        False, embed=True, description="If true, assign AWB after creating order"),
+    request_pickup: bool = Body(
+        False, embed=True, description="If true, generate pickup after AWB assignment"),
 ):
     """
     Creates Shiprocket orders for the provided order_ids (reads delivery details from Mongo),
@@ -5999,7 +6319,8 @@ def shiprocket_create_from_orders(
                 }}
             )
 
-            created_refs.append({"order_id": oid, "sr_order_id": sr_order_id, "shipment_id": shipment_id})
+            created_refs.append(
+                {"order_id": oid, "sr_order_id": sr_order_id, "shipment_id": shipment_id})
             if shipment_id:
                 # keep shipment ids for later steps only if user asked for AWB/pickup
                 shipment_ids.append(int(shipment_id))
@@ -6024,9 +6345,11 @@ def shiprocket_create_from_orders(
             j = rr.json() or {}
             awb_code = j.get("awb_code")
             courier_id = j.get("courier_company_id")
-            awb_results.append({"shipment_id": sid, "awb_code": awb_code, "courier_company_id": courier_id})
+            awb_results.append(
+                {"shipment_id": sid, "awb_code": awb_code, "courier_company_id": courier_id})
 
-            orders_collection.update_one({"sr_shipment_id": sid}, {"$set": {"awb_code": awb_code, "courier_company_id": courier_id}})
+            orders_collection.update_one({"sr_shipment_id": sid}, {
+                                         "$set": {"awb_code": awb_code, "courier_company_id": courier_id}})
         except Exception as e:
             errors.append(f"awb({sid}): exception {e}")
 
@@ -6043,8 +6366,10 @@ def shiprocket_create_from_orders(
             if rr.status_code == 200:
                 pickup_res = rr.json()
                 orders_collection.update_many(
-                    {"sr_shipment_id": {"$in": [x["shipment_id"] for x in awb_results]}},
-                    {"$set": {"pickup_requested": True, "pickup_requested_at": datetime.utcnow().isoformat()}}
+                    {"sr_shipment_id": {
+                        "$in": [x["shipment_id"] for x in awb_results]}},
+                    {"$set": {"pickup_requested": True,
+                              "pickup_requested_at": datetime.utcnow().isoformat()}}
                 )
             else:
                 errors.append(f"pickup failed {rr.status_code}: {rr.text}")
@@ -6052,7 +6377,6 @@ def shiprocket_create_from_orders(
             errors.append(f"pickup: exception {e}")
 
     return {"created": created_refs, "awbs": awb_results, "pickup": pickup_res, "errors": errors}
-
 
 
 def _to_number(value):
@@ -6073,12 +6397,14 @@ def _to_number(value):
 def shiprocket_order_show(internal_order_id: str):
 
     if not internal_order_id:
-        raise HTTPException(status_code=400, detail="internal_order_id required")
+        raise HTTPException(
+            status_code=400, detail="internal_order_id required")
 
     # 1️⃣ Lookup internal order in orders collection (UNCHANGED)
     doc = orders_collection.find_one({"order_id": internal_order_id})
     if not doc:
-        raise HTTPException(status_code=404, detail=f"{internal_order_id} not found in database")
+        raise HTTPException(
+            status_code=404, detail=f"{internal_order_id} not found in database")
 
     sr_order_id = (
         doc.get("sr_order_id")
@@ -6099,7 +6425,8 @@ def shiprocket_order_show(internal_order_id: str):
         r = requests.get(url, headers=headers, timeout=30)
         r.raise_for_status()
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Shiprocket API error: {str(e)}")
+        raise HTTPException(
+            status_code=502, detail=f"Shiprocket API error: {str(e)}")
 
     data = r.json().get("data", {}) or {}
 
@@ -6115,13 +6442,14 @@ def shiprocket_order_show(internal_order_id: str):
 
     shipping_charges = _to_number(raw_shipping)
 
-
     # 4️⃣ Extract courier_name (UNCHANGED)
     shipments = data.get("shipments") or {}
     if isinstance(shipments, dict):
-        courier_name = shipments.get("courier") or shipments.get("courier_name") or ""
+        courier_name = shipments.get(
+            "courier") or shipments.get("courier_name") or ""
     elif isinstance(shipments, list) and shipments:
-        courier_name = shipments[0].get("courier") or shipments[0].get("courier_name") or ""
+        courier_name = shipments[0].get(
+            "courier") or shipments[0].get("courier_name") or ""
     else:
         courier_name = ""
 
@@ -6141,7 +6469,8 @@ def shiprocket_order_show(internal_order_id: str):
             upsert=True
         )
     except Exception as e:
-        logging.exception(f"[SR] Failed to update shipping_collection for {internal_order_id}: {e}")
+        logging.exception(
+            f"[SR] Failed to update shipping_collection for {internal_order_id}: {e}")
 
     return {
         "order_id": internal_order_id,
@@ -6216,4 +6545,3 @@ def sync_shipping_fields_once(limit: int = None):
         "sample_errors": sample_errors,
     }
 '''
-
