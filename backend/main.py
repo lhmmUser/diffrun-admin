@@ -2475,6 +2475,20 @@ def append_shipping_details(row: list, order: dict, printer: str):
             or (order.get("shipping_address") or {}).get("email")
             or ""
         )
+        age=(order.get("age") or "")
+        total_price=(order.get("total_price") or "")
+        gender=(order.get("gender") or "")
+        paid=(order.get("paid") or "")
+        approved=(order.get("approved") or "")
+        created_at_=(order.get("created_at") or "")
+        updated_at=(order.get("updated_at") or "")
+        discount_code=(order.get("discount_code") or "")
+        payment_at=(order.get("payment_at") or "")
+        shipping_address=(order.get("shipping_address") or "")
+        transaction_id=(order.get("transaction_id") or "")
+        partial_preview=(order.get("partial_preview") or "")
+        final_preview=(order.get("final_preview") or "")
+
 
         doc = {
             "order_id": row[1],
@@ -2492,6 +2506,19 @@ def append_shipping_details(row: list, order: dict, printer: str):
             # Mongo-only additions:
             "user_name": user_name,
             "email": email,
+            "age": age,
+            "total_price": total_price, 
+            "gender": gender,
+            "paid": paid,
+            "approved": approved,
+            "created_at_": created_at_,
+            "updated_at": updated_at,
+            "discount_code": discount_code,
+            "payment_at": payment_at,
+            "shipping_address": shipping_address,
+            "transaction_id": transaction_id,
+            "partial_preview": partial_preview,
+            "final_preview": final_preview,
             "printer": printer,
 
             "updated_at": datetime.now(timezone.utc).isoformat(),
