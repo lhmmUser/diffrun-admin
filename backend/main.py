@@ -1360,13 +1360,13 @@ def stats_ship_status_v2(
             s = sh_map.get(oid)
             last_activity_str = None
 
-                if s:
-                    sr_data = s.get("shiprocket_data")
-                    scans = sr_data.get("scans") if isinstance(sr_data, dict) else None
+            if s:
+                sr_data = s.get("shiprocket_data")
+                scans = sr_data.get("scans") if isinstance(sr_data, dict) else None
 
-                if isinstance(scans, list) and scans:
-                    last = scans[-1]
-                    last_activity_str = last.get("sr-status-label") or last.get("activity")
+            if isinstance(scans, list) and scans:
+                last = scans[-1]
+                last_activity_str = last.get("sr-status-label") or last.get("activity")
 
             label = (str(last_activity_str or "")).strip().lower()
 
