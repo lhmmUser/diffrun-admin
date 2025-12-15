@@ -8,14 +8,30 @@ type CountryCode = "IN" | "AE" | "CA" | "US" | "GB" | "IN_ONLY";
 type ShipRow = {
   date: string;
   total: number;
+
   unapproved: number;
+  unapproved_ids?: string[];
+
   sent_to_print: number;
+  sent_to_print_ids?: string[];
+
   new_count: number;
+  new_ids?: string[];
+
   out_for_pickup: number;
+  out_for_pickup_ids?: string[];
+
   pickup_exception: number;
+  pickup_exception_ids?: string[];
+
   in_transit: number;
+  in_transit_ids?: string[];
+
   delivered: number;
+  delivered_ids?: string[];
+
   issue: number;
+  issue_ids?: string[];
 };
 
 export default function ShipmentStatusPage() {
@@ -32,12 +48,16 @@ export default function ShipmentStatusPage() {
   const [endDate, setEndDate] = useState<string>(todayISO);
   const [customApplied, setCustomApplied] = useState(false);
 
-  // only India
   const [country] = useState<CountryCode>("IN_ONLY");
 
   const [shipRows, setShipRows] = useState<ShipRow[]>([]);
   const [shipError, setShipError] = useState<string>("");
   const [shipLoading, setShipLoading] = useState<boolean>(false);
+
+  const [modalOpen, setModalOpen] = useState(false);
+  const [modalDate, setModalDate] = useState("");
+  const [modalStatus, setModalStatus] = useState("");
+  const [modalIds, setModalIds] = useState<string[]>([]);
 
   const isCustomInvalid =
     range === "custom" && !!startDate && !!endDate && startDate > endDate;
@@ -62,43 +82,42 @@ export default function ShipmentStatusPage() {
   };
 
   const parseRows = (json: any): ShipRow[] => {
-    let rows: any[] = Array.isArray(json?.rows) ? json.rows : [];
+    const rows: any[] = Array.isArray(json?.rows) ? json.rows : [];
 
     return rows
       .map((r) => {
-        const dateStr = (r.date ?? r.label ?? "").toString();
+        const dateStr = (r.date ?? "").toString();
+
         return {
           date: dateStr,
-          total: Number.isFinite(r.total) ? Number(r.total) : 0,
-          unapproved: Number.isFinite(r.unapproved) ? Number(r.unapproved) : 0,
-          sent_to_print: Number.isFinite(r.sent_to_print)
-            ? Number(r.sent_to_print)
-            : 0,
-          new_count: Number.isFinite(r.new ?? r.new_count)
-            ? Number(r.new ?? r.new_count)
-            : 0,
-          out_for_pickup: Number.isFinite(r.out_for_pickup)
-            ? Number(r.out_for_pickup)
-            : 0,
-          pickup_exception: Number.isFinite(r.pickup_exception)
-            ? Number(r.pickup_exception)
-            : 0,
-          in_transit: Number.isFinite(r.in_transit) ? Number(r.in_transit) : 0,
-          delivered: Number.isFinite(r.delivered) ? Number(r.delivered) : 0,
-          issue: Number.isFinite(r.issue) ? Number(r.issue) : 0,
+          total: r.total ?? 0,
+
+          unapproved: r.unapproved ?? 0,
+          unapproved_ids: r.unapproved_ids ?? [],
+
+          sent_to_print: r.sent_to_print ?? 0,
+          sent_to_print_ids: r.sent_to_print_ids ?? [],
+
+          new_count: r.new ?? 0,
+          new_ids: r.new_ids ?? [],
+
+          out_for_pickup: r.out_for_pickup ?? 0,
+          out_for_pickup_ids: r.out_for_pickup_ids ?? [],
+
+          pickup_exception: r.pickup_exception ?? 0,
+          pickup_exception_ids: r.pickup_exception_ids ?? [],
+
+          in_transit: r.in_transit ?? 0,
+          in_transit_ids: r.in_transit_ids ?? [],
+
+          delivered: r.delivered ?? 0,
+          delivered_ids: r.delivered_ids ?? [],
+
+          issue: r.issue ?? 0,
+          issue_ids: r.issue_ids ?? [],
         } as ShipRow;
       })
-      .sort((a, b) => {
-        const da =
-          a.date.length === 10
-            ? new Date(a.date + "T00:00:00Z")
-            : new Date(a.date);
-        const db =
-          b.date.length === 10
-            ? new Date(b.date + "T00:00:00Z")
-            : new Date(b.date);
-        return db.getTime() - da.getTime(); // newest first
-      });
+      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
   };
 
   useEffect(() => {
@@ -113,10 +132,7 @@ export default function ShipmentStatusPage() {
           return r.text().then((txt) => Promise.reject(txt || r.status));
         return r.json();
       })
-      .then((json) => {
-        const rows = parseRows(json);
-        setShipRows(rows);
-      })
+      .then((json) => setShipRows(parseRows(json)))
       .catch((err) => {
         console.error("ship-status-v2 fetch error:", err);
         setShipError(String(err));
@@ -126,18 +142,24 @@ export default function ShipmentStatusPage() {
 
   const handleRefresh = () => {
     if (!canFetch) return;
+
     setShipLoading(true);
     setShipError("");
+
     fetch(buildShipStatusUrl(range), { cache: "no-store" })
       .then((r) =>
         r.ok ? r.json() : Promise.reject(r.statusText || r.status)
       )
-      .then((json) => {
-        const rows = parseRows(json);
-        setShipRows(rows);
-      })
+      .then((json) => setShipRows(parseRows(json)))
       .catch((err) => setShipError(String(err)))
       .finally(() => setShipLoading(false));
+  };
+
+  const openModal = (date: string, status: string, ids: string[]) => {
+    setModalDate(date);
+    setModalStatus(status);
+    setModalIds(ids);
+    setModalOpen(true);
   };
 
   return (
@@ -146,7 +168,7 @@ export default function ShipmentStatusPage() {
         Shipment Status
       </h1>
 
-      {/* Range + Custom Controls */}
+      {/* Range Selector */}
       <div className="flex flex-col md:flex-row items-start md:items-end gap-3 mb-4">
         <div>
           <label className="block text-sm text-slate-600 mb-1">Range</label>
@@ -202,11 +224,10 @@ export default function ShipmentStatusPage() {
             <button
               onClick={() => setCustomApplied(true)}
               disabled={isCustomInvalid}
-              className={`h-10 px-4 rounded-lg text-white ${
-                isCustomInvalid
+              className={`h-10 px-4 rounded-lg text-white ${isCustomInvalid
                   ? "bg-slate-400 cursor-not-allowed"
                   : "bg-slate-800 hover:bg-slate-700"
-              }`}
+                }`}
             >
               Apply
             </button>
@@ -214,45 +235,29 @@ export default function ShipmentStatusPage() {
         )}
       </div>
 
-      {range === "custom" && isCustomInvalid && (
-        <p className="mb-2 text-red-600 text-sm">
-          Start date must be before or equal to End date.
-        </p>
+      {/* Error */}
+      {shipError && (
+        <p className="text-red-600 mb-2 text-sm">Error: {shipError}</p>
       )}
 
-      {/* Shipment table */}
-      <section className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4 sm:p-6">
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="text-lg font-medium text-slate-800">
-            Shipment Status India
-          </h3>
-          <button
-            onClick={handleRefresh}
-            className="text-sm px-3 py-1 rounded bg-slate-100 hover:bg-slate-200"
-          >
-            Refresh
-          </button>
-        </div>
-
-        {shipLoading && (
-          <div className="text-sm text-slate-500">
-            Loading shipment data…
+      {!shipLoading && shipRows.length > 0 && (
+        <section className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4 sm:p-6">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-lg font-medium text-slate-800">
+              Shipment Status India
+            </h3>
+            <button
+              onClick={handleRefresh}
+              className="text-sm px-3 py-1 rounded bg-slate-100 hover:bg-slate-200"
+            >
+              Refresh
+            </button>
           </div>
-        )}
-        {shipError && (
-          <div className="text-sm text-red-600">Error: {shipError}</div>
-        )}
 
-        {!shipLoading && shipRows.length === 0 && !shipError && (
-          <div className="text-sm text-slate-500">
-            No data for selected range.
-          </div>
-        )}
-
-        {!shipLoading && shipRows.length > 0 && (
-          <div className="overflow-auto">
+          {/* Scrollable table with sticky header */}
+          <div className="overflow-y-auto max-h-[600px] border rounded-lg">
             <table className="w-full text-sm">
-              <thead>
+              <thead className="sticky top-0 bg-white z-10 shadow-sm">
                 <tr className="text-left text-slate-600 border-b">
                   <th className="p-2">Date</th>
                   <th className="p-2">Unapproved</th>
@@ -266,26 +271,138 @@ export default function ShipmentStatusPage() {
                   <th className="p-2">Total</th>
                 </tr>
               </thead>
+
               <tbody>
                 {shipRows.map((r) => (
                   <tr key={r.date} className="border-t hover:bg-slate-50">
                     <td className="p-2">{r.date}</td>
-                    <td className="p-2">{r.unapproved}</td>
-                    <td className="p-2">{r.sent_to_print}</td>
-                    <td className="p-2">{r.new_count}</td>
-                    <td className="p-2">{r.out_for_pickup}</td>
-                    <td className="p-2">{r.pickup_exception}</td>
-                    <td className="p-2">{r.in_transit}</td>
-                    <td className="p-2">{r.issue}</td>
-                    <td className="p-2">{r.delivered}</td>
+
+                    {/* Unapproved */}
+                    <td
+                      className="p-2 text-blue-600 cursor-pointer"
+                      onClick={() =>
+                        openModal(r.date, "Unapproved", r.unapproved_ids || [])
+                      }
+                    >
+                      {r.unapproved}
+                    </td>
+
+                    {/* Sent to Print */}
+                    <td
+                      className="p-2 text-blue-600 cursor-pointer"
+                      onClick={() =>
+                        openModal(r.date, "Sent to Print", r.sent_to_print_ids || [])
+                      }
+                    >
+                      {r.sent_to_print}
+                    </td>
+
+                    {/* New */}
+                    <td
+                      className="p-2 text-blue-600 cursor-pointer"
+                      onClick={() => openModal(r.date, "New", r.new_ids || [])}
+                    >
+                      {r.new_count}
+                    </td>
+
+                    {/* Out for Pickup */}
+                    <td
+                      className="p-2 text-blue-600 cursor-pointer"
+                      onClick={() =>
+                        openModal(
+                          r.date,
+                          "Out for Pickup",
+                          r.out_for_pickup_ids || []
+                        )
+                      }
+                    >
+                      {r.out_for_pickup}
+                    </td>
+
+                    {/* Pickup Exception */}
+                    <td
+                      className="p-2 text-blue-600 cursor-pointer"
+                      onClick={() =>
+                        openModal(
+                          r.date,
+                          "Pickup Exception",
+                          r.pickup_exception_ids || []
+                        )
+                      }
+                    >
+                      {r.pickup_exception}
+                    </td>
+
+                    {/* In Transit */}
+                    <td
+                      className="p-2 text-blue-600 cursor-pointer"
+                      onClick={() =>
+                        openModal(r.date, "In Transit", r.in_transit_ids || [])
+                      }
+                    >
+                      {r.in_transit}
+                    </td>
+
+                    {/* Issue */}
+                    <td
+                      className="p-2 text-blue-600 cursor-pointer"
+                      onClick={() =>
+                        openModal(r.date, "Issue", r.issue_ids || [])
+                      }
+                    >
+                      {r.issue}
+                    </td>
+
+                    {/* Delivered */}
+                    <td
+                      className="p-2 text-blue-600 cursor-pointer"
+                      onClick={() =>
+                        openModal(r.date, "Delivered", r.delivered_ids || [])
+                      }
+                    >
+                      {r.delivered}
+                    </td>
+
                     <td className="p-2 font-medium">{r.total}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
-        )}
-      </section>
+        </section>
+      )}
+
+
+      {/* Loading */}
+      {shipLoading && <p className="text-sm text-slate-500">Loading…</p>}
+
+      {/* Modal */}
+      {modalOpen && (
+        <div className="fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center p-4 z-[9999]">
+          <div className="bg-white rounded-xl p-6 w-full max-w-md shadow-xl">
+            <h2 className="text-lg font-semibold mb-3">
+              {modalStatus} Orders on {modalDate}
+            </h2>
+
+            {modalIds.length === 0 ? (
+              <p className="text-sm text-slate-500">No orders.</p>
+            ) : (
+              <ul className="list-disc ml-6 text-sm">
+                {modalIds.map((id) => (
+                  <li key={id}>{id}</li>
+                ))}
+              </ul>
+            )}
+
+            <button
+              className="mt-4 px-4 py-2 bg-slate-800 text-white rounded"
+              onClick={() => setModalOpen(false)}
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      )}
     </main>
   );
 }
