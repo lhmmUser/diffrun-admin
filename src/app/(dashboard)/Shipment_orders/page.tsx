@@ -74,14 +74,13 @@ type PrinterResponse = {
     cloudprinter_reference?: string;
 };
 
-export default function OrdersView({
-    defaultDiscountCode = "all",
-    hideDiscountFilter = false,
-    title = "Shipment Orders",
-}) {
+export default function OrdersView() {
     const router = useRouter();
     const searchParams = useSearchParams();
     const orderIdsFromURL = searchParams.getAll("order_ids");
+    const defaultDiscountCode = "all";
+    const hideDiscountFilter = false;
+    const title = "Shipment Orders";
 
 
     const [orders, setOrders] = useState<Order[]>([]);
@@ -334,7 +333,7 @@ export default function OrdersView({
                 params.append("filter_print_approval", filterPrintApproval);
             if (filterDiscountCode !== "all")
                 params.append("filter_discount_code", filterDiscountCode);
-            
+
             params.append("page", currentPage.toString());
             params.append("limit", ordersPerPage.toString());
             params.append("sort_by", sortBy);
@@ -1585,7 +1584,7 @@ export default function OrdersView({
                     <option value="OUT FOR PICKUP">Out for pickup</option>
                     <option value="IN TRANSIT">In transit</option>
                     <option value="PICKED UP">Picked up</option>
-                    
+
                     <option value="OUT FOR DELIVERY">Out for delivery</option>
                     <option value="DELIVERED">Delivered</option>
                     <option value="PICKUP EXCEPTION">Pickup exception</option>
