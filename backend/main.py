@@ -3055,10 +3055,15 @@ def chunked_iterable(items: List, size: int):
         yield items[i:i + size]
 
 
-def upsert_nudge_history(job_id: str, stage: int, status: str, error: str | None = None):
+def upsert_nudge_history(
+    job_id: str,
+    stage: int,
+    status: str,
+    error: str | None = None,
+):
     now = datetime.now(timezone.utc)
 
-    # 1. Try updating existing stage entry
+    # Try updating existing stage entry
     res = orders_collection.update_one(
         {"job_id": job_id, "nudge_history.stage": stage},
         {
@@ -3066,11 +3071,14 @@ def upsert_nudge_history(job_id: str, stage: int, status: str, error: str | None
                 "nudge_history.$.status": status,
                 "nudge_history.$.at": now,
                 "nudge_history.$.error": error[:1000] if error else None,
-            }
+            },
+            "$inc": {
+                "nudge_history.$.attempts": 1
+            },
         }
     )
 
-    # 2. If no entry exists, insert once
+    # If stage entry does not exist, insert once
     if res.matched_count == 0:
         orders_collection.update_one(
             {"job_id": job_id},
@@ -3080,12 +3088,14 @@ def upsert_nudge_history(job_id: str, stage: int, status: str, error: str | None
                         "stage": stage,
                         "status": status,
                         "via": "email",
+                        "attempts": 1,
                         "at": now,
                         "error": error[:1000] if error else None,
                     }
                 }
             }
         )
+
 
 def _fetch_nudge_candidates_compact(days_window: int = 7) -> List[Dict]:
 
@@ -3281,7 +3291,9 @@ async def send_nudge_batches(batch_size: int = 200, days_window: int = 7):
     logger.info(f"Starting nudge batch job (snapshot {now_ist.isoformat()})")
 
     try:
-        candidates = await asyncio.to_thread(_fetch_nudge_candidates_compact, days_window)
+        candidates = await asyncio.to_thread(
+            _fetch_nudge_candidates_compact, days_window
+        )
     except Exception as e:
         logger.exception("Failed to fetch nudge candidates: %s", e)
         return
@@ -3292,7 +3304,8 @@ async def send_nudge_batches(batch_size: int = 200, days_window: int = 7):
         return
 
     logger.info(
-        f"Found {total} eligible nudge candidates — batching {batch_size} per run.")
+        f"Found {total} eligible nudge candidates — batching {batch_size} per run."
+    )
 
     for batch in chunked_iterable(candidates, batch_size):
         for user in batch:
@@ -3304,7 +3317,7 @@ async def send_nudge_batches(batch_size: int = 200, days_window: int = 7):
             days = user.get("days_since_created")
             current_stage = int(user.get("nudge_stage", 0))
 
-            # Decide which stage (if any) to send
+            # Decide which stage to send
             desired_stage = None
             if days == 1 and current_stage == 0:
                 desired_stage = 1
@@ -3313,14 +3326,33 @@ async def send_nudge_batches(batch_size: int = 200, days_window: int = 7):
 
             if desired_stage is None:
                 logger.debug(
-                    f"Skipping {email} (job_id={job_id}) days={days} stage={current_stage}")
+                    f"Skipping {email} (job_id={job_id}) days={days} stage={current_stage}"
+                )
                 continue
 
-            preview_link = user.get(
-                "preview_url") or f"https://diffrun.com/preview?job_id={job_id}&name={child_name}&book_id={book_id}"
+            preview_link = (
+                user.get("preview_url")
+                or f"https://diffrun.com/preview?job_id={job_id}&name={child_name}&book_id={book_id}"
+            )
+
+            # ---- retry cap check ----
+            history = user.get("nudge_history", [])
+            stage_entry = next(
+                (h for h in history if h.get("stage") == desired_stage),
+                None
+            )
+
+            if stage_entry and stage_entry.get("status") == "failed":
+                attempts = stage_entry.get("attempts", 0)
+                if attempts >= 5:
+                    logger.warning(
+                        f"Skipping job_id={job_id} stage={desired_stage} after {attempts} failures"
+                    )
+                    continue
 
             def _send_and_record():
                 try:
+                    # ---- send mail ----
                     if desired_stage == 1:
                         send_stage1_nudge_email(
                             email=email,
@@ -3338,40 +3370,43 @@ async def send_nudge_batches(batch_size: int = 200, days_window: int = 7):
                     else:
                         return
 
+                    # ---- advance stage atomically ----
                     res = orders_collection.update_one(
                         {"job_id": job_id, "nudge_stage": current_stage},
                         {
                             "$set": {
                                 "nudge_stage": desired_stage,
-                                "nudge_last_sent_at": datetime.now(timezone.utc)
-                            },
+                                "nudge_last_sent_at": datetime.now(timezone.utc),
+                            }
                         }
                     )
 
                     if res.matched_count == 0:
                         logger.warning(
                             "Race condition: order %s stage changed, skipping update",
-                            job_id
+                            job_id,
                         )
+                        return
 
+                    # ---- mark history as sent ----
                     upsert_nudge_history(
                         job_id=job_id,
                         stage=desired_stage,
                         status="sent",
-                        error=None
+                        error=None,
                     )
-
 
                     logger.info(
                         f"✅ Sent stage {desired_stage} nudge to {email} (job_id={job_id})"
                     )
 
                 except Exception as exc:
+                    # ---- overwrite failure state ----
                     upsert_nudge_history(
                         job_id=job_id,
                         stage=desired_stage,
                         status="failed",
-                        error=str(exc)
+                        error=str(exc),
                     )
 
                     logger.exception(
