@@ -6,13 +6,6 @@ import PrintProgress from "../components/PrintProgress";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useUser, useAuth } from "@clerk/nextjs"; // add this import
 
-type OrdersViewProps = {
-    defaultDiscountCode?: string;
-    hideDiscountFilter?: boolean;
-    title?: string;
-    excludeTestDiscount?: boolean;
-};
-
 type RawOrder = {
     order_id: string;
     job_id: string;
@@ -85,8 +78,7 @@ export default function OrdersView({
     defaultDiscountCode = "all",
     hideDiscountFilter = false,
     title = "Shipment Orders",
-    excludeTestDiscount,
-}: OrdersViewProps) {
+}) {
     const router = useRouter();
     const searchParams = useSearchParams();
     const orderIdsFromURL = searchParams.getAll("order_ids");
@@ -342,10 +334,7 @@ export default function OrdersView({
                 params.append("filter_print_approval", filterPrintApproval);
             if (filterDiscountCode !== "all")
                 params.append("filter_discount_code", filterDiscountCode);
-            if (excludeTestDiscount) {
-                params.append("exclude_discount_code", "TEST");
-                params.append("exclude_discount_code", "REJECTED");
-            }
+            
             params.append("page", currentPage.toString());
             params.append("limit", ordersPerPage.toString());
             params.append("sort_by", sortBy);
