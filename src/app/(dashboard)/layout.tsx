@@ -62,6 +62,9 @@ export default function RootLayout({
                 <li>
                   <Link href="/Shipment_status" className="block px-3 py-2 rounded hover:bg-gray-800 hover:text-blue-300 font-medium">Shipment Status</Link>
                 </li>
+                <li>
+                  <Link href="/Shipment_orders" className="block px-3 py-2 rounded hover:bg-gray-800 hover:text-blue-300 font-medium">Shipment Orders</Link>
+                </li>
               </ul>
             </nav>
           </aside>

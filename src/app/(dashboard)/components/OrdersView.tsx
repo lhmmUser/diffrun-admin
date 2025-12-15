@@ -2000,8 +2000,8 @@ export default function OrdersView({
                 </td>
                 <td className="px-2 text-xs">
                   {order.printSentBy
-                    ? order.printSentBy.split("@")[0].slice(0, 3).charAt(0).toUpperCase() +
-                    order.printSentBy.split("@")[0].slice(1, 3).toLowerCase()
+                    ? order.printSentBy.split("@")[0].slice(0, 4).charAt(0).toUpperCase() +
+                    order.printSentBy.split("@")[0].slice(1, 4).toLowerCase()
                     : "-"}
                 </td>
                 <td className="px-2 text-xs text-center">

@@ -15,7 +15,7 @@ type ShipRow = {
   sent_to_print: number;
   sent_to_print_ids?: string[];
 
-  new_count: number;
+  new: number;
   new_ids?: string[];
 
   out_for_pickup: number;
@@ -24,8 +24,8 @@ type ShipRow = {
   pickup_exception: number;
   pickup_exception_ids?: string[];
 
-  in_transit: number;
-  in_transit_ids?: string[];
+  shipped: number;
+  shipped_ids?: string[];
 
   delivered: number;
   delivered_ids?: string[];
@@ -39,12 +39,13 @@ export default function ShipmentStatusPage() {
     process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
 
   const todayISO = new Date().toISOString().slice(0, 10);
-  const weekAgoISO = new Date(Date.now() - 6 * 86400000)
-    .toISOString()
-    .slice(0, 10);
+  const monthAgoISO = new Date(Date.now() - 30 * 86400000)
+  .toISOString()
+  .slice(0, 10);
 
-  const [range, setRange] = useState<RangeKey>("1w");
-  const [startDate, setStartDate] = useState<string>(weekAgoISO);
+
+  const [range, setRange] = useState<RangeKey>("1m");
+  const [startDate, setStartDate] = useState<string>(monthAgoISO);
   const [endDate, setEndDate] = useState<string>(todayISO);
   const [customApplied, setCustomApplied] = useState(false);
 
@@ -86,10 +87,8 @@ export default function ShipmentStatusPage() {
 
     return rows
       .map((r) => {
-        const dateStr = (r.date ?? "").toString();
-
         return {
-          date: dateStr,
+          date: r.date,
           total: r.total ?? 0,
 
           unapproved: r.unapproved ?? 0,
@@ -98,7 +97,7 @@ export default function ShipmentStatusPage() {
           sent_to_print: r.sent_to_print ?? 0,
           sent_to_print_ids: r.sent_to_print_ids ?? [],
 
-          new_count: r.new ?? 0,
+          new: r.new ?? 0,
           new_ids: r.new_ids ?? [],
 
           out_for_pickup: r.out_for_pickup ?? 0,
@@ -107,8 +106,8 @@ export default function ShipmentStatusPage() {
           pickup_exception: r.pickup_exception ?? 0,
           pickup_exception_ids: r.pickup_exception_ids ?? [],
 
-          in_transit: r.in_transit ?? 0,
-          in_transit_ids: r.in_transit_ids ?? [],
+          shipped: r.shipped ?? 0,
+          shipped_ids: r.shipped_ids ?? [],
 
           delivered: r.delivered ?? 0,
           delivered_ids: r.delivered_ids ?? [],
@@ -142,7 +141,6 @@ export default function ShipmentStatusPage() {
 
   const handleRefresh = () => {
     if (!canFetch) return;
-
     setShipLoading(true);
     setShipError("");
 
@@ -162,13 +160,26 @@ export default function ShipmentStatusPage() {
     setModalOpen(true);
   };
 
+  const goToShipmentOrders = (ids: string[]) => {
+    if (!ids || ids.length === 0) return;
+
+    const params = new URLSearchParams();
+    ids.forEach(id => params.append("order_ids", id));
+
+    window.location.href = `/Shipment_orders?${params.toString()}`;
+
+
+
+  };
+
+
   return (
     <main className="min-h-screen p-6 sm:p-8 bg-slate-50">
       <h1 className="text-2xl sm:text-3xl font-semibold text-slate-800 mb-4">
         Shipment Status
       </h1>
 
-      {/* Range Selector */}
+      {/* Range Controls */}
       <div className="flex flex-col md:flex-row items-start md:items-end gap-3 mb-4">
         <div>
           <label className="block text-sm text-slate-600 mb-1">Range</label>
@@ -235,11 +246,11 @@ export default function ShipmentStatusPage() {
         )}
       </div>
 
-      {/* Error */}
       {shipError && (
         <p className="text-red-600 mb-2 text-sm">Error: {shipError}</p>
       )}
 
+      {/* TABLE */}
       {!shipLoading && shipRows.length > 0 && (
         <section className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4 sm:p-6">
           <div className="flex items-center justify-between mb-4">
@@ -254,18 +265,16 @@ export default function ShipmentStatusPage() {
             </button>
           </div>
 
-          {/* Scrollable table with sticky header */}
           <div className="overflow-y-auto max-h-[600px] border rounded-lg">
             <table className="w-full text-sm">
               <thead className="sticky top-0 bg-white z-10 shadow-sm">
                 <tr className="text-left text-slate-600 border-b">
                   <th className="p-2">Date</th>
-                  <th className="p-2">Unapproved</th>
-                  <th className="p-2">Sent to Print</th>
                   <th className="p-2">New</th>
-                  <th className="p-2">Out for pickup</th>
+                  <th className="p-2">Sent to Print</th>
+                  <th className="p-2">Out for Pickup</th>
                   <th className="p-2">Pickup Exception</th>
-                  <th className="p-2">In Transit</th>
+                  <th className="p-2">Shipped</th>
                   <th className="p-2">Issue</th>
                   <th className="p-2">Delivered</th>
                   <th className="p-2">Total</th>
@@ -280,9 +289,7 @@ export default function ShipmentStatusPage() {
                     {/* Unapproved */}
                     <td
                       className="p-2 text-blue-600 cursor-pointer"
-                      onClick={() =>
-                        openModal(r.date, "Unapproved", r.unapproved_ids || [])
-                      }
+                      onClick={() => goToShipmentOrders(r.unapproved_ids || [])}
                     >
                       {r.unapproved}
                     </td>
@@ -290,31 +297,17 @@ export default function ShipmentStatusPage() {
                     {/* Sent to Print */}
                     <td
                       className="p-2 text-blue-600 cursor-pointer"
-                      onClick={() =>
-                        openModal(r.date, "Sent to Print", r.sent_to_print_ids || [])
-                      }
+                      onClick={() => goToShipmentOrders(r.sent_to_print_ids || [])}
                     >
                       {r.sent_to_print}
                     </td>
 
-                    {/* New */}
-                    <td
-                      className="p-2 text-blue-600 cursor-pointer"
-                      onClick={() => openModal(r.date, "New", r.new_ids || [])}
-                    >
-                      {r.new_count}
-                    </td>
+
 
                     {/* Out for Pickup */}
                     <td
                       className="p-2 text-blue-600 cursor-pointer"
-                      onClick={() =>
-                        openModal(
-                          r.date,
-                          "Out for Pickup",
-                          r.out_for_pickup_ids || []
-                        )
-                      }
+                      onClick={() => goToShipmentOrders(r.out_for_pickup_ids || [])}
                     >
                       {r.out_for_pickup}
                     </td>
@@ -322,33 +315,23 @@ export default function ShipmentStatusPage() {
                     {/* Pickup Exception */}
                     <td
                       className="p-2 text-blue-600 cursor-pointer"
-                      onClick={() =>
-                        openModal(
-                          r.date,
-                          "Pickup Exception",
-                          r.pickup_exception_ids || []
-                        )
-                      }
+                      onClick={() => goToShipmentOrders(r.pickup_exception_ids || [])}
                     >
                       {r.pickup_exception}
                     </td>
 
-                    {/* In Transit */}
+                    {/* Shipped */}
                     <td
                       className="p-2 text-blue-600 cursor-pointer"
-                      onClick={() =>
-                        openModal(r.date, "In Transit", r.in_transit_ids || [])
-                      }
+                      onClick={() => goToShipmentOrders(r.shipped_ids || [])}
                     >
-                      {r.in_transit}
+                      {r.shipped}
                     </td>
 
                     {/* Issue */}
                     <td
                       className="p-2 text-blue-600 cursor-pointer"
-                      onClick={() =>
-                        openModal(r.date, "Issue", r.issue_ids || [])
-                      }
+                      onClick={() => goToShipmentOrders(r.issue_ids || [])}
                     >
                       {r.issue}
                     </td>
@@ -356,9 +339,7 @@ export default function ShipmentStatusPage() {
                     {/* Delivered */}
                     <td
                       className="p-2 text-blue-600 cursor-pointer"
-                      onClick={() =>
-                        openModal(r.date, "Delivered", r.delivered_ids || [])
-                      }
+                      onClick={() => goToShipmentOrders(r.delivered_ids || [])}
                     >
                       {r.delivered}
                     </td>
@@ -372,9 +353,10 @@ export default function ShipmentStatusPage() {
         </section>
       )}
 
-
       {/* Loading */}
-      {shipLoading && <p className="text-sm text-slate-500">Loading…</p>}
+      {shipLoading && (
+        <p className="text-sm text-slate-500">Loading…</p>
+      )}
 
       {/* Modal */}
       {modalOpen && (

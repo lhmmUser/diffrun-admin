@@ -1163,41 +1163,38 @@ def stats_ship_status(
 ################################### Shipment Status Endpoint V2 ####################################
 # --- START: dynamic-activity ship-status endpoint (ONLY shiprocket_data.scans[*].activity) -------
 ################################### Shipment Status Endpoint V2 ####################################
+################################### Shipment Status Endpoint V2 ####################################
 
 
 @app.get("/stats/ship-status-v2")
 def stats_ship_status_v2(
-    range: str = Query(
-        "1w", description="range key like 1d, 1w, 1m, 6m, this_month, custom"),
+    range: str = Query("1w", description="1d, 1w, 1m, 6m, this_month, custom"),
     start_date: Optional[str] = Query(None),
     end_date: Optional[str] = Query(None),
     printer: Optional[str] = Query("all", description="genesis | yara"),
     loc: Optional[str] = Query("IN", description="country code"),
 ):
     """
-    Fixed-column Shipment Status:
-
-    Includes:
-    - counts for each bucket
-    - *_ids list for each bucket (new feature)
+    Shipment Status V2
+    Uses ONLY orders_collection.current_status
     """
 
     exclude_codes = ["TEST", "COLLAB", "REJECTED"]
     exclude_set = {c.upper() for c in exclude_codes}
 
-    # location filter
+    # Location match
     try:
         loc_match = _build_loc_match(loc)
     except Exception:
         loc_match = None
 
-    # ---- 1) Choose the time window ----
+    # --- 1) Determine Period ---
     now_utc = datetime.now(timezone.utc)
     effective_range = "1w" if range == "1d" else range
 
     try:
         if start_date and end_date:
-            cs, ce, ps, pe, _gran = _periods_custom(start_date, end_date)
+            cs, ce, ps, pe, _ = _periods_custom(start_date, end_date)
             labels = _labels_for("custom", cs, ce)
         else:
             cs, ce, ps, pe, gran = _periods(effective_range, now_utc)
@@ -1230,15 +1227,15 @@ def stats_ship_status_v2(
         "processed_at": 1,
         "printer": 1,
         "discount_code": 1,
+        "current_status": 1,
         "_id": 0,
     }
 
     cursor = orders_collection.find(base_match, projection)
 
-    # group orders by date
-    orders_by_date: Dict[str, list] = {k.split(" ")[0]: [] for k in labels}
-    order_printer_map: Dict = {}
-    all_printer_candidates: set = set()
+    # --- 3) Organize orders ---
+    orders_by_date = {k.split(" ")[0]: [] for k in labels}
+    order_printer_map = {}
 
     for doc in cursor:
         try:
@@ -1258,80 +1255,28 @@ def stats_ship_status_v2(
                 continue
 
             oid = doc.get("order_id")
-            doc_printer = (doc.get("printer") or "").strip().lower()
+            printer_val = (doc.get("printer") or "").strip().lower()
 
-            order_printer_map[oid] = doc_printer
+            order_printer_map[oid] = printer_val
 
             if printer and printer.lower() not in ("all", ""):
-                if doc_printer != printer.lower():
+                if printer_val != printer.lower():
                     continue
 
-            orders_by_date[ist_d].append(oid)
-
-            if doc_printer in ("genesis", "yara"):
-                all_printer_candidates.add(oid)
+            orders_by_date[ist_d].append({
+                "order_id": oid,
+                "current_status": (doc.get("current_status") or "").strip().lower(),
+                "printer": printer_val
+            })
 
         except Exception:
             continue
 
-    # ---- 3) No shipping docs case ----
-    if not all_printer_candidates:
-        rows = []
-        for lbl in labels:
-            date_key = lbl.split(" ")[0]
-            order_ids = orders_by_date.get(date_key, [])
-
-            unapproved_count = sum(
-                1 for oid in order_ids if not (order_printer_map.get(oid) or "").strip()
-            )
-
-            rows.append(
-                {
-                    "date": date_key,
-                    "total": len(order_ids),
-                    "unapproved": unapproved_count,
-                    "sent_to_print": 0,
-                    "new": 0,
-                    "out_for_pickup": 0,
-                    "pickup_exception": 0,
-                    "in_transit": 0,
-                    "delivered": 0,
-                    "issue": 0,
-                }
-            )
-
-        return {
-            "labels": labels,
-            "activities": [
-                "Unapproved",
-                "Sent to Print",
-                "New",
-                "Out for pickup",
-                "Pickup Exception",
-                "In Transit",
-                "Delivered",
-                "Issue",
-            ],
-            "rows": rows,
-            "printer": printer or "all",
-        }
-
-    # ---- 4) Shipping scan map ----
-    shipping_docs = list(
-        shipping_collection.find(
-            {"order_id": {"$in": list(all_printer_candidates)}},
-            {"order_id": 1, "shiprocket_data.scans": 1},
-        )
-    )
-    sh_map = {s.get("order_id"): s for s in shipping_docs}
-
+    # --- 4) Build rows per day ---
     rows = []
-
-    # ---- 5) Build per-day rows with IDs ----
     for lbl in labels:
         date_key = lbl.split(" ")[0]
-        order_ids = orders_by_date.get(date_key, [])
-        total_orders = len(order_ids)
+        day_orders = orders_by_date.get(date_key, [])
 
         # buckets
         unapproved_ids = []
@@ -1339,20 +1284,17 @@ def stats_ship_status_v2(
         sent_to_print_ids = []
         out_for_pickup_ids = []
         pickup_exception_ids = []
-        in_transit_ids = []
+        shipped_ids = []     # <-- NEW
         delivered_ids = []
         issue_ids = []
 
-        # classifying
-        printer_candidates = [
-            oid
-            for oid in order_ids
-            if (order_printer_map.get(oid) or "").lower() in ("genesis", "yara")
-        ]
-        sent_to_print_ids = list(printer_candidates)
+        for od in day_orders:
+            oid = od["order_id"]
+            printer_val = od["printer"]
+            status = od["current_status"]
 
-        for oid in order_ids:
-            if not (order_printer_map.get(oid) or "").strip():
+            # 1) Unapproved
+            if not printer_val:
                 unapproved_ids.append(oid)
 
         for oid in printer_candidates:
@@ -1361,13 +1303,11 @@ def stats_ship_status_v2(
 
             if s:
                 sr_data = s.get("shiprocket_data")
-                scans = sr_data.get("scans") if isinstance(
-                    sr_data, dict) else None
+                scans = sr_data.get("scans") if isinstance(sr_data, dict) else None
 
             if isinstance(scans, list) and scans:
                 last = scans[-1]
-                last_activity_str = last.get(
-                    "sr-status-label") or last.get("activity")
+                last_activity_str = last.get("sr-status-label") or last.get("activity")
 
             label = (str(last_activity_str or "")).strip().lower()
 
@@ -1375,64 +1315,70 @@ def stats_ship_status_v2(
                 new_ids.append(oid)
                 continue
 
-            if "pickup exception" in label:
+            # 4) Pickup Exception
+            if "pickup exception" in status:
                 pickup_exception_ids.append(oid)
-            elif "out for pickup" in label:
+                continue
+
+            # 5) Out for Pickup
+            if "out for pickup" in status:
                 out_for_pickup_ids.append(oid)
-            elif "delivered" in label:
+                continue
+
+            # 6) Delivered
+            if "delivered" in status:
                 delivered_ids.append(oid)
-            elif "issue" in label or (
-                "exception" in label and "pickup exception" not in label
-            ) or "rto" in label or "undelivered" in label:
+                continue
+
+            # 7) Issue category
+            if "issue" in status or "rto" in status or "undelivered" in status:
                 issue_ids.append(oid)
-            elif "in transit" in label or "transit" in label:
-                in_transit_ids.append(oid)
-            else:
-                in_transit_ids.append(oid)
+                continue
 
-        rows.append(
-            {
-                "date": date_key,
-                "total": total_orders,
+            # 8) SHIPPED (NEW RULE)
+            if (
+                "picked up" in status
+                or "pickup done" in status
+                or "in transit" in status
+                or "transit" in status
+            ):
+                shipped_ids.append(oid)
+                continue
 
-                "unapproved": len(unapproved_ids),
-                "unapproved_ids": unapproved_ids,
+            # 9) Fallback → treat unknown as shipped
+            shipped_ids.append(oid)
 
-                "sent_to_print": len(sent_to_print_ids),
-                "sent_to_print_ids": sent_to_print_ids,
+        rows.append({
+            "date": date_key,
+            "total": len(day_orders),
 
-                "new": len(new_ids),
-                "new_ids": new_ids,
+            "unapproved": len(unapproved_ids),
+            "unapproved_ids": unapproved_ids,
 
-                "out_for_pickup": len(out_for_pickup_ids),
-                "out_for_pickup_ids": out_for_pickup_ids,
+            "sent_to_print": len(sent_to_print_ids),
+            "sent_to_print_ids": sent_to_print_ids,
 
-                "pickup_exception": len(pickup_exception_ids),
-                "pickup_exception_ids": pickup_exception_ids,
+            "new": len(new_ids),
+            "new_ids": new_ids,
 
-                "in_transit": len(in_transit_ids),
-                "in_transit_ids": in_transit_ids,
+            "out_for_pickup": len(out_for_pickup_ids),
+            "out_for_pickup_ids": out_for_pickup_ids,
 
-                "delivered": len(delivered_ids),
-                "delivered_ids": delivered_ids,
+            "pickup_exception": len(pickup_exception_ids),
+            "pickup_exception_ids": pickup_exception_ids,
 
-                "issue": len(issue_ids),
-                "issue_ids": issue_ids,
-            }
-        )
+            "shipped": len(shipped_ids),                  # <-- NEW COLUMN
+            "shipped_ids": shipped_ids,                  # <-- NEW IDs
+
+            "delivered": len(delivered_ids),
+            "delivered_ids": delivered_ids,
+
+            "issue": len(issue_ids),
+            "issue_ids": issue_ids,
+        })
 
     return {
         "labels": labels,
-        "activities": [
-            "Unapproved",
-            "Sent to Print",
-            "New",
-            "Out for pickup",
-            "Pickup Exception",
-            "In Transit",
-            "Delivered",
-            "Issue",
-        ],
         "rows": rows,
         "printer": printer or "all",
     }
@@ -1733,6 +1679,296 @@ def get_orders(
             "pages": (total_count + limit - 1) // limit
         }
     }
+
+############# SHIPMENT ORDERS ENDPOINT #############
+from typing import Optional, List, Dict
+from fastapi import Query
+from datetime import datetime
+import re
+
+
+@app.get("/shipment-orders")
+def get_shipment_orders(
+    sort_by: Optional[str] = Query(None, description="Field to sort by"),
+    sort_dir: Optional[str] = Query("asc", description="asc or desc"),
+
+    filter_status: Optional[str] = Query(None),
+    filter_book_style: Optional[str] = Query(None),
+    filter_print_approval: Optional[str] = Query(None),
+
+    filter_discount_code: Optional[str] = Query(None),
+    exclude_discount_code: Optional[List[str]] = Query(None),
+
+    q: Optional[str] = Query(
+        None,
+        description="Search job_id, order_id, email, name, discount_code, city, locale, book_id"
+    ),
+
+    # New filters
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    shipping_status: Optional[str] = Query(None, description="current_status filter"),
+    order_ids: Optional[List[str]] = Query(None),
+
+
+    page: int = Query(1, ge=1),
+    limit: int = Query(50, ge=1, le=1000),
+):
+    """
+    Shipment Orders API
+    Supports:
+    - date filtering
+    - shipping status filtering (based on current_status)
+    - search, pagination, sorting
+    """
+
+    # -------------------------
+    # Base Query
+    # -------------------------
+    query: Dict = {"paid": True}
+    # Filter by specific order IDs
+    if order_ids:
+        query["order_id"] = {"$in": order_ids}
+
+    ex_values: List[str] = []
+
+    # -------------------------
+    # Status Filters (Approved / Uploaded)
+    # -------------------------
+    if filter_status == "approved":
+        query["approved"] = True
+    elif filter_status == "uploaded":
+        query["approved"] = False
+
+    if filter_book_style:
+        query["book_style"] = filter_book_style
+
+    if filter_print_approval == "yes":
+        query["print_approval"] = True
+    elif filter_print_approval == "no":
+        query["print_approval"] = False
+    elif filter_print_approval == "not_found":
+        query["print_approval"] = {"$exists": False}
+
+    # -------------------------
+    # Discount Filters
+    # -------------------------
+    if filter_discount_code:
+        if filter_discount_code.lower() == "none":
+            query["discount_amount"] = 0
+            query["paid"] = True
+        else:
+            query["discount_code"] = filter_discount_code.upper()
+
+    if exclude_discount_code:
+        if not isinstance(exclude_discount_code, list):
+            ex_values = [p.strip() for p in str(exclude_discount_code).split(",")]
+        else:
+            ex_values = exclude_discount_code
+
+    ex_values = [v for v in (s.strip() for s in ex_values) if v]
+
+    if ex_values:
+        regexes = [re.compile(rf"^{re.escape(v)}$", re.IGNORECASE) for v in ex_values]
+        existing = query.pop("discount_code", None)
+        exclude_cond = {"discount_code": {"$nin": regexes}}
+
+        if existing is None:
+            query["discount_code"] = exclude_cond["discount_code"]
+        else:
+            query.setdefault("$and", []).append({"discount_code": existing})
+            query["$and"].append(exclude_cond)
+
+    # -------------------------
+    # Search Query
+    # -------------------------
+    if q:
+        term = q.strip()
+        if term:
+            rx = re.compile(re.escape(term), re.IGNORECASE)
+            query.setdefault("$and", []).append({
+                "$or": [
+                    {"order_id": {"$regex": rx}},
+                    {"job_id": {"$regex": rx}},
+                    {"email": {"$regex": rx}},
+                    {"name": {"$regex": rx}},
+                    {"discount_code": {"$regex": rx}},
+                    {"book_id": {"$regex": rx}},
+                    {"locale": {"$regex": rx}},
+                    {"shipping_address.city": {"$regex": rx}},
+                ]
+            })
+    
+    from dateutil import parser as date_parser
+    from datetime import timezone, timedelta
+
+    IST = timezone(timedelta(hours=5, minutes=30))
+
+    # -------------------------
+    # DATE FILTER (processed_at with IST)
+    # -------------------------
+    if start_date or end_date:
+        date_filter = {}
+
+        try:
+            if start_date:
+                # Parse start_date and set IST midnight
+                sd = date_parser.parse(start_date)
+                sd_ist = sd.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=IST)
+
+                # Convert IST to UTC
+                sd_utc = sd_ist.astimezone(timezone.utc)
+                date_filter["$gte"] = sd_utc
+
+            if end_date:
+                # Parse end_date and set IST end of day
+                ed = date_parser.parse(end_date)
+                ed_ist = ed.replace(hour=23, minute=59, second=59, microsecond=999999, tzinfo=IST)
+
+                # Convert IST → UTC
+                ed_utc = ed_ist.astimezone(timezone.utc)
+                date_filter["$lte"] = ed_utc
+
+            query["processed_at"] = date_filter
+
+        except Exception as e:
+            print("DATE PARSE ERROR:", e)
+
+
+
+
+    # -------------------------
+    # SHIPPING STATUS FILTER  (current_status)
+    # -------------------------
+    STATUS_MAP = {
+        "out for pickup": "OUT FOR PICKUP",
+        "in transit": "IN TRANSIT",
+        "picked up": "PICKED UP",
+        "pickup done": "PICKUP DONE",
+        "out for delivery": "OUT FOR DELIVERY",
+        "delivered": "DELIVERED",
+        "pickup exception": "PICKUP EXCEPTION",
+    }
+
+    if shipping_status and shipping_status.lower() != "all":
+        normalized = STATUS_MAP.get(shipping_status.lower())
+        if normalized:
+            query["current_status"] = normalized
+
+    # -------------------------
+    # Pagination + Sorting
+    # -------------------------
+    skip = (page - 1) * limit
+    total_count = orders_collection.count_documents(query)
+
+    sort_field = sort_by if sort_by else "created_at"
+    sort_order = 1 if sort_dir == "asc" else -1
+
+    # -------------------------
+    # Projection
+    # -------------------------
+    projection = {
+        "order_id": 1,
+        "job_id": 1,
+        "cover_url": 1,
+        "book_url": 1,
+        "preview_url": 1,
+        "name": 1,
+        "shipping_address": 1,
+        "created_at": 1,
+        "processed_at": 1,
+        "approved_at": 1,
+        "approved": 1,
+        "book_id": 1,
+        "book_style": 1,
+        "print_status": 1,
+        "price": 1,
+        "total_price": 1,
+        "amount": 1,
+        "total_amount": 1,
+        "feedback_email": 1,
+        "print_approval": 1,
+        "discount_code": 1,
+        "currency": 1,
+        "locale": 1,
+        "quantity": 1,
+        "_id": 0,
+        "shipped_at": 1,
+        "cust_status": 1,
+        "printer": 1,
+        "locked": 1,
+        "locked_by": 1,
+        "unlock_by": 1,
+        "print_sent_by": 1,
+        "current_status": 1,
+    }
+
+    cursor = (
+        orders_collection
+        .find(query, projection)
+        .sort(sort_field, sort_order)
+        .skip(skip)
+        .limit(limit)
+    )
+
+    # -------------------------
+    # Format Output
+    # -------------------------
+    result = []
+    for doc in list(cursor):
+        result.append({
+            "order_id": doc.get("order_id", ""),
+            "job_id": doc.get("job_id", ""),
+            "coverPdf": doc.get("cover_url", ""),
+            "interiorPdf": doc.get("book_url", ""),
+            "previewUrl": doc.get("preview_url", ""),
+
+            "name": doc.get("name", ""),
+            "city": doc.get("shipping_address", {}).get("city", ""),
+
+            "price": doc.get(
+                "price",
+                doc.get("total_price", doc.get("amount", doc.get("total_amount", 0)))
+            ),
+
+            "paymentDate": doc.get("processed_at", ""),
+            "approvalDate": doc.get("approved_at", ""),
+            "status": "Approved" if doc.get("approved") else "Uploaded",
+
+            "bookId": doc.get("book_id", ""),
+            "bookStyle": doc.get("book_style", ""),
+            "printStatus": doc.get("print_status", ""),
+            "print_approval": doc.get("print_approval", None),
+
+            "discount_code": doc.get("discount_code", ""),
+            "currency": doc.get("currency", ""),
+            "locale": doc.get("locale", ""),
+
+            "shippedAt": doc.get("shipped_at"),
+            "quantity": doc.get("quantity", 1),
+            "cust_status": doc.get("cust_status", ""),
+            "printer": doc.get("printer", ""),
+
+            "locked": bool(doc.get("locked", False)),
+            "locked_by": doc.get("locked_by", ""),
+            "unlock_by": doc.get("unlock_by", ""),
+            "print_sent_by": doc.get("print_sent_by", ""),
+
+            # NEW FIELD
+            "shippingStatus": doc.get("current_status", ""),
+        })
+
+    return {
+        "orders": result,
+        "pagination": {
+            "page": page,
+            "limit": limit,
+            "total": total_count,
+            "pages": (total_count + limit - 1) // limit,
+        }
+    }
+
+
 
 
 @app.post("/orders/set-cust-status/{order_id}")
