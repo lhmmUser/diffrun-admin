@@ -297,7 +297,8 @@ export default function OrderDetailPage() {
   const [saving, setSaving] = useState(false);
   const [saveErr, setSaveErr] = useState<string | null>(null);
   const [coverErr, setCoverErr] = useState(false);
-  const [regenName, setRegenName] = useState("");
+  const [regenChild1, setRegenChild1] = useState("");
+  const [regenChild2, setRegenChild2] = useState("");
   const [regenLoading, setRegenLoading] = useState(false);
   const [regenMsg, setRegenMsg] = useState<string | null>(null);
   const [regenErr, setRegenErr] = useState<string | null>(null);
@@ -673,14 +674,35 @@ export default function OrderDetailPage() {
       return;
     }
 
-    if (!regenName.trim()) {
-      setRegenErr("New name is required");
-      return;
+    const c1 = regenChild1.trim();
+    const c2 = regenChild2.trim();
+
+    if (isTwinOrder) {
+      if (!c1 || !c2) {
+        setRegenErr("Both child names are required for twin / siblings books");
+        return;
+      }
+    } else {
+      if (!c1) {
+        setRegenErr("Child name is required");
+        return;
+      }
     }
 
     setRegenLoading(true);
     setRegenErr(null);
     setRegenMsg(null);
+
+    const payload: any = {
+      order_id: order.order_id,
+    };
+
+    if (isTwinOrder) {
+      payload.child1_name = c1;
+      payload.child2_name = c2;
+    } else {
+      payload.child1_name = c1;
+    }
 
     try {
       const res = await fetch(
@@ -688,10 +710,7 @@ export default function OrderDetailPage() {
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            order_id: order.order_id,
-            new_name: regenName.trim(),
-          }),
+          body: JSON.stringify(payload),
         }
       );
 
@@ -700,10 +719,10 @@ export default function OrderDetailPage() {
         throw new Error(err.detail || `HTTP ${res.status}`);
       }
 
-      const data = await res.json();
+      await res.json();
       setRegenMsg("Regeneration triggered successfully.");
     } catch (e: any) {
-      setRegenErr(e.message || "Failed to trigger regeneration");
+      setRegenErr(e?.message || "Failed to trigger regeneration");
     } finally {
       setRegenLoading(false);
     }
@@ -1128,13 +1147,32 @@ export default function OrderDetailPage() {
                     )}
                     {showChangeName && (
                       <div className="mt-2 flex flex-col gap-2">
-                        <input
-                          type="text"
-                          value={regenName}
-                          onChange={(e) => setRegenName(e.target.value)}
-                          placeholder="Enter new child name"
-                          className="border border-gray-300 rounded px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-[#5784ba]"
-                        />
+                        {isTwinOrder ? (
+                          <>
+                            <input
+                              type="text"
+                              value={regenChild1}
+                              onChange={(e) => setRegenChild1(e.target.value)}
+                              placeholder="Child 1 name"
+                              className="border border-gray-300 rounded px-2 py-1 text-xs"
+                            />
+                            <input
+                              type="text"
+                              value={regenChild2}
+                              onChange={(e) => setRegenChild2(e.target.value)}
+                              placeholder="Child 2 name"
+                              className="border border-gray-300 rounded px-2 py-1 text-xs"
+                            />
+                          </>
+                        ) : (
+                          <input
+                            type="text"
+                            value={regenChild1}
+                            onChange={(e) => setRegenChild1(e.target.value)}
+                            placeholder="Enter new child name"
+                            className="border border-gray-300 rounded px-2 py-1 text-xs"
+                          />
+                        )}
 
                         <div className="flex gap-2">
                           <button
@@ -1150,7 +1188,6 @@ export default function OrderDetailPage() {
                           <button
                             onClick={() => {
                               setShowChangeName(false);
-                              setRegenName("");
                               setRegenErr(null);
                               setRegenMsg(null);
                             }}
