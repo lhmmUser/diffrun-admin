@@ -1207,11 +1207,8 @@ def stats_ship_status_v2(
             labels.append(d.strftime("%Y-%m-%d"))
         cs = ce = None
 
-        cs = ce = None  # just to avoid "undefined" later
-
-    # ---- 2) Base order query ----
-    base_match: Dict = {"paid": True, "processed_at": {
-        "$exists": True, "$ne": None}}
+    # --- 2) Base order query ---
+    base_match = {"paid": True, "processed_at": {"$exists": True, "$ne": None}}
     if loc_match:
         base_match = {"$and": [base_match, loc_match]}
 
@@ -1297,21 +1294,12 @@ def stats_ship_status_v2(
             if not printer_val:
                 unapproved_ids.append(oid)
 
-        for oid in printer_candidates:
-            s = sh_map.get(oid)
-            last_activity_str = None
+            # 2) Sent to Print
+            if printer_val in ("genesis", "yara"):
+                sent_to_print_ids.append(oid)
 
-            if s:
-                sr_data = s.get("shiprocket_data")
-                scans = sr_data.get("scans") if isinstance(sr_data, dict) else None
-
-            if isinstance(scans, list) and scans:
-                last = scans[-1]
-                last_activity_str = last.get("sr-status-label") or last.get("activity")
-
-            label = (str(last_activity_str or "")).strip().lower()
-
-            if not label:
+            # 3) NEW (no status)
+            if not status:
                 new_ids.append(oid)
                 continue
 
@@ -1367,8 +1355,8 @@ def stats_ship_status_v2(
             "pickup_exception": len(pickup_exception_ids),
             "pickup_exception_ids": pickup_exception_ids,
 
-            "shipped": len(shipped_ids),                  # <-- NEW COLUMN
-            "shipped_ids": shipped_ids,                  # <-- NEW IDs
+            "shipped": len(shipped_ids),               
+            "shipped_ids": shipped_ids,              
 
             "delivered": len(delivered_ids),
             "delivered_ids": delivered_ids,
@@ -1382,6 +1370,7 @@ def stats_ship_status_v2(
         "rows": rows,
         "printer": printer or "all",
     }
+
 
 
 @app.get("/orders/hash-ids")
