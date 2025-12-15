@@ -10,8 +10,6 @@ const LOCALE_TO_CURRENCY_CODE: Record<string, string> = {
   US: "USD",
   CA: "CAD",
   IN: "INR",
-  AU: "AUD",
-  NZ: "NZD",
   GB: "GBP",
   AE: "AED",
 };
@@ -19,8 +17,6 @@ const LOCALE_TO_NUMBER_LOCALE: Record<string, string> = {
   US: "en-US",
   CA: "en-CA",
   IN: "en-IN",
-  AU: "en-AU",
-  NZ: "en-NZ",
   GB: "en-GB",
   AE: "en-AE",
 };
@@ -301,6 +297,11 @@ export default function OrderDetailPage() {
   const [saving, setSaving] = useState(false);
   const [saveErr, setSaveErr] = useState<string | null>(null);
   const [coverErr, setCoverErr] = useState(false);
+  const [regenName, setRegenName] = useState("");
+  const [regenLoading, setRegenLoading] = useState(false);
+  const [regenMsg, setRegenMsg] = useState<string | null>(null);
+  const [regenErr, setRegenErr] = useState<string | null>(null);
+  const [showChangeName, setShowChangeName] = useState(false);
 
   const toFormState = (o: OrderDetail): FormState => ({
     name: o.name || o.child?.name || "",
@@ -373,7 +374,9 @@ export default function OrderDetailPage() {
           (data as any).printer_type_label ?? null,
           (data.order && (data.order as any).print_status) ?? null,
           (data.order && (data.order as any).printer_type) ?? null,
-        ].filter(Boolean).map(String);
+        ]
+          .filter(Boolean)
+          .map(String);
 
         const printerStr =
           printerCandidates.length > 0
@@ -385,12 +388,15 @@ export default function OrderDetailPage() {
 
         const looksLikeGenesis = printerStr.includes("genesis");
         const looksLikeYara = printerStr.includes("yara");
-        const looksLikeCloud = printerStr.includes("cloudprinter") || printerStr.includes("cloud");
+        const looksLikeCloud =
+          printerStr.includes("cloudprinter") || printerStr.includes("cloud");
 
         // If it's genesis, fetch shipping doc and merge tracking/shipped_at
         if ((looksLikeGenesis || looksLikeYara) && !looksLikeCloud) {
           try {
-            const shipUrl = `${API_BASE}/shipping/${encodeURIComponent(data.order_id)}`;
+            const shipUrl = `${API_BASE}/shipping/${encodeURIComponent(
+              data.order_id
+            )}`;
             // eslint-disable-next-line no-console
             console.info("DEBUG fetching shipping for genesis:", shipUrl);
             const shipRes = await fetch(shipUrl, { cache: "no-store" });
@@ -422,27 +428,35 @@ export default function OrderDetailPage() {
 
                 const deliveredAt = normalizeShiprocketTimestamp(deliveredRaw);
 
-
-
                 data = {
                   ...data,
                   order: {
                     ...(data.order || {}),
                     tracking_code:
-                      (data.order && (data.order as any).tracking_code) || tracking || (data as any).tracking_code || "",
+                      (data.order && (data.order as any).tracking_code) ||
+                      tracking ||
+                      (data as any).tracking_code ||
+                      "",
                   },
                   timeline: {
                     ...(data.timeline || {}),
                     shipped_at:
-                      (data.timeline && data.timeline.shipped_at) || shippedAt || null,
+                      (data.timeline && data.timeline.shipped_at) ||
+                      shippedAt ||
+                      null,
                     delivered_at:
-                      (data.timeline && (data.timeline as any).delivered_at) || deliveredAt || null,
+                      (data.timeline && (data.timeline as any).delivered_at) ||
+                      deliveredAt ||
+                      null,
                   },
                 };
               }
             } else {
               // eslint-disable-next-line no-console
-              console.warn("DEBUG shipping endpoint returned non-ok:", shipRes?.status);
+              console.warn(
+                "DEBUG shipping endpoint returned non-ok:",
+                shipRes?.status
+              );
             }
           } catch (e) {
             // eslint-disable-next-line no-console
@@ -450,7 +464,10 @@ export default function OrderDetailPage() {
           }
         } else {
           // eslint-disable-next-line no-console
-          console.info("DEBUG not fetching shipping: genesis not detected (printerStr):", printerStr);
+          console.info(
+            "DEBUG not fetching shipping: genesis not detected (printerStr):",
+            printerStr
+          );
         }
 
         setOrder(data);
@@ -462,8 +479,6 @@ export default function OrderDetailPage() {
       }
     })();
   }, [rawOrderId]);
-
-
 
   const updateForm = (path: string, value: any) => {
     setForm((prev: any) => {
@@ -587,7 +602,9 @@ export default function OrderDetailPage() {
     }
 
     // 17 11 2025 18:39:16  -> 2025-11-17T18:39:16
-    const m = raw.match(/^(\d{1,2})\s+(\d{1,2})\s+(\d{4})\s+(\d{2}:\d{2}:\d{2})$/);
+    const m = raw.match(
+      /^(\d{1,2})\s+(\d{1,2})\s+(\d{4})\s+(\d{2}:\d{2}:\d{2})$/
+    );
     if (m) {
       const [, dd, mm, yyyy, time] = m;
       const ddP = dd.padStart(2, "0");
@@ -641,6 +658,56 @@ export default function OrderDetailPage() {
 
   const isTwinOrder =
     (order?.book_id || "").toLowerCase() === "twin" || !!order?.child?.is_twin;
+
+  const triggerRegenAll = async () => {
+    if (
+      !window.confirm(
+        "This will delete all generated pages and regenerate the entire book. Continue?"
+      )
+    ) {
+      return;
+    }
+
+    if (!order?.order_id) {
+      setRegenErr("Order ID missing");
+      return;
+    }
+
+    if (!regenName.trim()) {
+      setRegenErr("New name is required");
+      return;
+    }
+
+    setRegenLoading(true);
+    setRegenErr(null);
+    setRegenMsg(null);
+
+    try {
+      const res = await fetch(
+        `https://test-backend.diffrun.com/api/trigger-regen-all`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            order_id: order.order_id,
+            new_name: regenName.trim(),
+          }),
+        }
+      );
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || `HTTP ${res.status}`);
+      }
+
+      const data = await res.json();
+      setRegenMsg("Regeneration triggered successfully.");
+    } catch (e: any) {
+      setRegenErr(e.message || "Failed to trigger regeneration");
+    } finally {
+      setRegenLoading(false);
+    }
+  };
 
   return (
     <main className="min-h-screen bg-gray-50 py-4">
@@ -821,8 +888,9 @@ export default function OrderDetailPage() {
                         label="Sent for Printing"
                         date={
                           order.timeline?.print_sent_at
-                            ? `${prettyDate(order.timeline.print_sent_at)} ${order.printer ? `(${order.printer})` : ""
-                            }`
+                            ? `${prettyDate(order.timeline.print_sent_at)} ${
+                                order.printer ? `(${order.printer})` : ""
+                              }`
                             : "-"
                         }
                       />
@@ -831,7 +899,8 @@ export default function OrderDetailPage() {
                         label="Order Shipped"
                         date={formatIso(order.timeline?.shipped_at)}
                         subtext={
-                          order.timeline?.shipped_at && order.order?.tracking_code ? (
+                          order.timeline?.shipped_at &&
+                          order.order?.tracking_code ? (
                             <>
                               <span>
                                 Tracking ID: {order.order.tracking_code}
@@ -841,13 +910,15 @@ export default function OrderDetailPage() {
                                 Tracking URL:{" "}
                                 <a
                                   href={
-                                    (order.shipping_address?.country || "").toUpperCase() === "INDIA"
+                                    (
+                                      order.shipping_address?.country || ""
+                                    ).toUpperCase() === "INDIA"
                                       ? `https://shiprocket.co/tracking/${encodeURIComponent(
-                                        order.order.tracking_code.trim()
-                                      )}`
+                                          order.order.tracking_code.trim()
+                                        )}`
                                       : `https://parcelsapp.com/en/tracking/${encodeURIComponent(
-                                        order.order.tracking_code.trim()
-                                      )}`
+                                          order.order.tracking_code.trim()
+                                        )}`
                                   }
                                   target="_blank"
                                   rel="noopener noreferrer"
@@ -859,7 +930,6 @@ export default function OrderDetailPage() {
                             </>
                           ) : undefined
                         }
-
                       />
                       {order.timeline?.delivered_at ? (
                         <TimelineItem
@@ -914,7 +984,9 @@ export default function OrderDetailPage() {
                           label="delivered_at"
                           value={form.timeline.delivered_at}
                           editable
-                          onChange={(v) => updateForm("timeline.delivered_at", v)}
+                          onChange={(v) =>
+                            updateForm("timeline.delivered_at", v)
+                          }
                         />
                       </div>
                     )}
@@ -988,15 +1060,12 @@ export default function OrderDetailPage() {
                           updateForm("shipping_address.postal_code", v)
                         }
                       />
-
                     </div>
                   </div>
                 </div>
               </div>
 
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-
-
                 <div className="bg-white rounded border border-gray-200 p-3 shadow-sm">
                   <h3 className="text-base font-semibold text-gray-900 mb-3 pb-1 border-b border-gray-100">
                     Transaction ID
@@ -1043,6 +1112,63 @@ export default function OrderDetailPage() {
                     editable={isEditing}
                     onChange={(v) => updateForm("name", v)}
                   />
+
+                  <div className="mt-4 border-t pt-3">
+                    {!showChangeName && (
+                      <button
+                        onClick={() => {
+                          setShowChangeName(true);
+                          setRegenErr(null);
+                          setRegenMsg(null);
+                        }}
+                        className="px-3 py-1.5 bg-[#5784ba] text-white text-xs rounded hover:bg-[#4a76a8]"
+                      >
+                        Change Name
+                      </button>
+                    )}
+                    {showChangeName && (
+                      <div className="mt-2 flex flex-col gap-2">
+                        <input
+                          type="text"
+                          value={regenName}
+                          onChange={(e) => setRegenName(e.target.value)}
+                          placeholder="Enter new child name"
+                          className="border border-gray-300 rounded px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-[#5784ba]"
+                        />
+
+                        <div className="flex gap-2">
+                          <button
+                            onClick={triggerRegenAll}
+                            disabled={regenLoading}
+                            className="px-3 py-1.5 bg-[#5784ba] text-white text-xs rounded hover:bg-[#4a76a8] disabled:opacity-60"
+                          >
+                            {regenLoading
+                              ? "Triggering..."
+                              : "Submit & Regenerate"}
+                          </button>
+
+                          <button
+                            onClick={() => {
+                              setShowChangeName(false);
+                              setRegenName("");
+                              setRegenErr(null);
+                              setRegenMsg(null);
+                            }}
+                            className="px-3 py-1.5 border border-gray-300 text-gray-700 text-xs rounded hover:bg-gray-100"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+
+                        {regenErr && (
+                          <p className="text-xs text-red-600">{regenErr}</p>
+                        )}
+                        {regenMsg && (
+                          <p className="text-xs text-green-600">{regenMsg}</p>
+                        )}
+                      </div>
+                    )}
+                  </div>
 
                   {isTwinOrder ? (
                     <>
@@ -1098,7 +1224,7 @@ export default function OrderDetailPage() {
                   )}
 
                   {order.child?.child1_input_images?.length ||
-                    order.child?.child2_input_images?.length ? (
+                  order.child?.child2_input_images?.length ? (
                     <div className="mt-2 flex flex-col gap-4">
                       <div>
                         <div className="text-xs font-semibold text-gray-800 mb-1">
@@ -1111,7 +1237,7 @@ export default function OrderDetailPage() {
                         )}
                       </div>
                       {order.child?.is_twin ||
-                        order.child?.child2_input_images?.length ? (
+                      order.child?.child2_input_images?.length ? (
                         <div>
                           <div className="text-xs font-semibold text-gray-800 mb-1">
                             Child 2 Inputs
