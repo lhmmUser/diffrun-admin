@@ -162,7 +162,7 @@ async def lifespan(app: FastAPI):
 
         scheduler.add_job(
             _kick_send_nudges,
-            trigger=CronTrigger(hour="17", minute="0", timezone=IST_TZ),
+            trigger=CronTrigger(hour="14", minute="0", timezone=IST_TZ),
             id="send_nudges_job",
             replace_existing=True,
             coalesce=True,
@@ -1163,9 +1163,7 @@ def stats_ship_status(
 ################################### Shipment Status Endpoint V2 ####################################
 # --- START: dynamic-activity ship-status endpoint (ONLY shiprocket_data.scans[*].activity) -------
 ################################### Shipment Status Endpoint V2 ####################################
-from typing import Optional, Dict
-from fastapi import Query
-from datetime import datetime, timezone, timedelta
+
 
 @app.get("/stats/ship-status-v2")
 def stats_ship_status_v2(
@@ -1215,7 +1213,8 @@ def stats_ship_status_v2(
         cs = ce = None  # just to avoid "undefined" later
 
     # ---- 2) Base order query ----
-    base_match: Dict = {"paid": True, "processed_at": {"$exists": True, "$ne": None}}
+    base_match: Dict = {"paid": True, "processed_at": {
+        "$exists": True, "$ne": None}}
     if loc_match:
         base_match = {"$and": [base_match, loc_match]}
 
@@ -1362,11 +1361,13 @@ def stats_ship_status_v2(
 
             if s:
                 sr_data = s.get("shiprocket_data")
-                scans = sr_data.get("scans") if isinstance(sr_data, dict) else None
+                scans = sr_data.get("scans") if isinstance(
+                    sr_data, dict) else None
 
             if isinstance(scans, list) and scans:
                 last = scans[-1]
-                last_activity_str = last.get("sr-status-label") or last.get("activity")
+                last_activity_str = last.get(
+                    "sr-status-label") or last.get("activity")
 
             label = (str(last_activity_str or "")).strip().lower()
 
@@ -1435,7 +1436,6 @@ def stats_ship_status_v2(
         "rows": rows,
         "printer": printer or "all",
     }
-
 
 
 @app.get("/orders/hash-ids")
@@ -3055,6 +3055,38 @@ def chunked_iterable(items: List, size: int):
         yield items[i:i + size]
 
 
+def upsert_nudge_history(job_id: str, stage: int, status: str, error: str | None = None):
+    now = datetime.now(timezone.utc)
+
+    # 1. Try updating existing stage entry
+    res = orders_collection.update_one(
+        {"job_id": job_id, "nudge_history.stage": stage},
+        {
+            "$set": {
+                "nudge_history.$.status": status,
+                "nudge_history.$.at": now,
+                "nudge_history.$.error": error[:1000] if error else None,
+            }
+        }
+    )
+
+    # 2. If no entry exists, insert once
+    if res.matched_count == 0:
+        orders_collection.update_one(
+            {"job_id": job_id},
+            {
+                "$push": {
+                    "nudge_history": {
+                        "stage": stage,
+                        "status": status,
+                        "via": "email",
+                        "at": now,
+                        "error": error[:1000] if error else None,
+                    }
+                }
+            }
+        )
+
 def _fetch_nudge_candidates_compact(days_window: int = 7) -> List[Dict]:
 
     ist = ZoneInfo("Asia/Kolkata")
@@ -3132,58 +3164,115 @@ def _fetch_nudge_candidates_compact(days_window: int = 7) -> List[Dict]:
     return filtered
 
 
-def _select_template_for_stage(stage: int, user_name: str | None, child_name: str | None, preview_link: str) -> tuple[str, str]:
+def send_stage1_nudge_email(
+    email: str,
+    user_name: str | None,
+    child_name: str | None,
+    preview_link: str
+):
     user_name = ((user_name or "").strip().title()) or "there"
     child_name = ((child_name or "").strip().title()) or "your child"
-    preview_link = preview_link or "https://diffrun.com/preview"
 
-    if stage == 1:
-        subject = f"{child_name}'s Diffrun Storybook is waiting!"
-        html = f"""
-        <html>
-          <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
-            <p>Hi <strong>{user_name}</strong>,</p>
-            <p>We noticed you began crafting a personalized storybook for <strong>{child_name}</strong> — and it’s already looking magical!</p>
-            <p>Just one more step to bring it to life: preview the story and place your order whenever you’re ready.</p>
-            <p style="margin: 32px 0;">
-              <a href="{preview_link}" 
-                 style="background-color: #5784ba; color: white; padding: 14px 28px; border-radius: 6px; text-decoration: none; font-weight: bold;">
-                Preview & Continue
-              </a>
-            </p>
-            <p>Your story is safe and waiting. We’d love for <strong>{child_name}</strong> to see themselves in a story made just for them. 💫</p>
-            <p>Warm wishes,<br><strong>The Diffrun Team</strong></p>
-          </body>
-        </html>
-        """
-        return subject, html
+    subject = f"{child_name}'s Diffrun Storybook is waiting!"
+
+    html = f"""
+    <html>
+      <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+        <p>Hi <strong>{user_name}</strong>,</p>
+
+        <p>
+          We noticed you began crafting a personalized storybook for
+          <strong>{child_name}</strong> — and it’s already looking magical!
+        </p>
+
+        <p>
+          Just one more step to bring it to life:
+          preview the story and place your order whenever you’re ready.
+        </p>
+
+        <p style="margin: 32px 0;">
+          <a href="{preview_link}"
+             style="background-color: #5784ba; color: white;
+                    padding: 14px 28px; border-radius: 6px;
+                    text-decoration: none; font-weight: bold;">
+            Preview & Continue
+          </a>
+        </p>
+
+        <p>
+          Your story is safe and waiting.
+          We’d love for <strong>{child_name}</strong> to see themselves in a story
+          made just for them.
+        </p>
+
+        <p>
+          Warm wishes,<br>
+          <strong>The Diffrun Team</strong>
+        </p>
+      </body>
+    </html>
+    """
+
+    _send_html_email(email, subject, html)
+
+
+def send_stage2_nudge_email(
+    email: str,
+    user_name: str | None,
+    child_name: str | None,
+    preview_link: str
+):
+    user_name = ((user_name or "").strip().title()) or "there"
+    child_name = ((child_name or "").strip().title()) or "your child"
 
     subject = f"Final reminder — {child_name}'s storybook is still waiting"
+
     html = f"""
     <html>
       <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #222;">
         <p>Hi <strong>{user_name}</strong>,</p>
 
-        <p>{child_name}’s personalised story is ready — over 300 parents completed their orders within 48 hours and loved the results.</p>
+        <p>
+          {child_name}’s personalised story is ready —
+          over 300 parents completed their orders within 48 hours
+          and loved the results.
+        </p>
 
-        <p style="margin-top:8px">Complete the order now for faster dispatch and a keepsake that {child_name} will treasure.</p>
+        <p>
+          Complete the order now for faster dispatch
+          and a keepsake {child_name} will treasure.
+        </p>
 
         <p style="margin: 22px 0;">
           <a href="{preview_link}"
-             style="display: inline-block; padding: 12px 20px; border-radius: 6px; text-decoration: none; font-weight: 600;">
+             style="display: inline-block;
+                    padding: 12px 20px;
+                    border-radius: 6px;
+                    text-decoration: none;
+                    font-weight: 600;">
             Finish & Order Now
           </a>
         </p>
 
-        <p style="margin-top:8px">Use code <strong>FAST10</strong> for 10% off — valid for the next 24 hours only.</p>
+        <p>
+          Use code <strong>FAST10</strong> for 10% off —
+          valid for the next 24 hours only.
+        </p>
 
-        <p style="margin-top:12px">Need help finishing up? Reply to this email and we’ll take care of the last steps for you.</p>
+        <p>
+          Need help finishing up?
+          Reply to this email and we’ll take care of the last steps.
+        </p>
 
-        <p style="margin-top:18px">Warmly,<br><strong>The Diffrun Team</strong></p>
+        <p>
+          Warmly,<br>
+          <strong>The Diffrun Team</strong>
+        </p>
       </body>
     </html>
     """
-    return subject, html
+
+    _send_html_email(email, subject, html)
 
 
 async def send_nudge_batches(batch_size: int = 200, days_window: int = 7):
@@ -3232,64 +3321,62 @@ async def send_nudge_batches(batch_size: int = 200, days_window: int = 7):
 
             def _send_and_record():
                 try:
-                    subject, html = _select_template_for_stage(
-                        desired_stage, user_name, child_name, preview_link)
+                    if desired_stage == 1:
+                        send_stage1_nudge_email(
+                            email=email,
+                            user_name=user_name,
+                            child_name=child_name,
+                            preview_link=preview_link,
+                        )
+                    elif desired_stage == 2:
+                        send_stage2_nudge_email(
+                            email=email,
+                            user_name=user_name,
+                            child_name=child_name,
+                            preview_link=preview_link,
+                        )
+                    else:
+                        return
 
-                    msg = EmailMessage()
-                    msg["Subject"] = subject
-                    msg["From"] = f"Diffrun Team <{os.getenv('EMAIL_ADDRESS')}>"
-                    msg["To"] = email
-                    msg.add_alternative(html, subtype="html")
-
-                    EMAIL_USER = (os.getenv("EMAIL_ADDRESS") or "").strip()
-                    EMAIL_PASS = (os.getenv("EMAIL_PASSWORD") or "").strip()
-                    if not EMAIL_USER or not EMAIL_PASS:
-                        raise RuntimeError(
-                            "EMAIL_ADDRESS/EMAIL_PASSWORD not configured")
-
-                    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
-                        smtp.login(EMAIL_USER, EMAIL_PASS)
-                        smtp.send_message(msg)
-
-                    # Update nudge_stage
                     res = orders_collection.update_one(
-                        {"job_id": job_id, "nudge_stage": current_stage},  # ensures no concurrent change
+                        {"job_id": job_id, "nudge_stage": current_stage},
                         {
                             "$set": {
                                 "nudge_stage": desired_stage,
                                 "nudge_last_sent_at": datetime.now(timezone.utc)
                             },
-                            "$push": {
-                                "nudge_history": {"stage": desired_stage, "at": datetime.now(timezone.utc), "via": "email"}
-                            }
                         }
                     )
+
                     if res.matched_count == 0:
-                        # another worker updated this doc, log and skip
-                        logger.warning("Race: order %s was not updated because nudge_stage != %s", job_id, current_stage)
+                        logger.warning(
+                            "Race condition: order %s stage changed, skipping update",
+                            job_id
+                        )
+
+                    upsert_nudge_history(
+                        job_id=job_id,
+                        stage=desired_stage,
+                        status="sent",
+                        error=None
+                    )
 
 
                     logger.info(
-                        f"✅ Sent nudge stage {desired_stage} to {email} (job_id={job_id})")
-                except Exception as exc:
-                    # record failure for debugging/metrics
-                    try:
-                        orders_collection.update_one(
-                            {"job_id": job_id},
-                            {"$push": {
-                                "nudge_history": {
-                                    "stage": desired_stage,
-                                    "at": datetime.now(timezone.utc),
-                                    "via": "email",
-                                    "status": "failed",
-                                    "error": str(exc)[:1000]
-                                }
-                            }}
-                        )
-                    except Exception:
-                        logger.exception("Failed to write nudge failure to DB for job_id=%s", job_id)
+                        f"✅ Sent stage {desired_stage} nudge to {email} (job_id={job_id})"
+                    )
 
-                    logger.exception(f"❌ Error sending nudge to {email} (job_id={job_id}): {exc}")
+                except Exception as exc:
+                    upsert_nudge_history(
+                        job_id=job_id,
+                        stage=desired_stage,
+                        status="failed",
+                        error=str(exc)
+                    )
+
+                    logger.exception(
+                        f"❌ Failed sending stage {desired_stage} to {email}: {exc}"
+                    )
 
             await asyncio.to_thread(_send_and_record)
 
@@ -5039,7 +5126,6 @@ def send_feedback_email(job_id: str, background_tasks: BackgroundTasks):
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
             EMAIL_USER = os.getenv("EMAIL_ADDRESS")
             EMAIL_PASS = os.getenv("EMAIL_PASSWORD")
-            print(f"email, password: {EMAIL_USER}, {EMAIL_PASS}")
             smtp.login(EMAIL_USER, EMAIL_PASS)
             smtp.send_message(msg)
 
