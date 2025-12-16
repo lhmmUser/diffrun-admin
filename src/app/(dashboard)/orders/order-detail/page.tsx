@@ -102,7 +102,7 @@ type OrderDetail = {
   book_style?: string;
   discount_code?: string;
   quantity?: number;
-  cust_status?: "red" | "green" | "" | undefined;
+  current_status?: string;
   shipping_address?: ShippingAddress;
   preview_url?: string;
   job_id?: string;
@@ -114,6 +114,7 @@ type OrderDetail = {
   cover_image?: string;
   tracking_code?: string | null;
   printer?: string;
+  remarks?: string; // ✅ ADD
 };
 
 type FormState = {
@@ -135,7 +136,8 @@ type FormState = {
   user_name: string;
   email: string;
   phone: string;
-  cust_status: string;
+  current_status: string;
+  remarks: string; // ✅ ADD
   shipping_address: {
     address1: string;
     address2: string;
@@ -323,7 +325,8 @@ export default function OrderDetailPage() {
     user_name: o.user_name || o.customer?.user_name || "",
     email: o.email || o.customer?.email || "",
     phone: o.phone || o.customer?.phone_number || "",
-    cust_status: (o as any).cust_status || "",
+    current_status: (o as any).current_status || "",
+    remarks: (o as any).remarks || "", // ✅ ADD
     shipping_address: {
       address1: o.shipping_address?.address1 || "",
       address2: o.shipping_address?.address2 || "",
@@ -850,11 +853,29 @@ export default function OrderDetailPage() {
                       type="link"
                     />
                     <InfoField
-                      label="Status"
-                      value={form.cust_status}
+                      label="Shipping Status"
+                      value={isEditing ? form.current_status : order.current_status || "-"}
                       editable={isEditing}
-                      onChange={(v) => updateForm("cust_status", v)}
+                      onChange={(v) => updateForm("current_status", v)}
                     />
+                    <div className="sm:col-span-2">
+                      <label className="text-xs font-bold text-gray-700">Remarks:</label>
+
+                      {isEditing ? (
+                        <textarea
+                          value={form.remarks}
+                          onChange={(e) => updateForm("remarks", e.target.value)}
+                          placeholder="Add shipment remarks..."
+                          className="mt-1 w-full border border-gray-300 rounded px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-[#5784ba]"
+                          rows={3}
+                        />
+                      ) : (
+                        <div className="mt-1 text-xs text-gray-900 whitespace-pre-wrap">
+                          {order.remarks || "-"}
+                        </div>
+                      )}
+                    </div>
+
                   </div>
                 </div>
 
@@ -907,9 +928,8 @@ export default function OrderDetailPage() {
                         label="Sent for Printing"
                         date={
                           order.timeline?.print_sent_at
-                            ? `${prettyDate(order.timeline.print_sent_at)} ${
-                                order.printer ? `(${order.printer})` : ""
-                              }`
+                            ? `${prettyDate(order.timeline.print_sent_at)} ${order.printer ? `(${order.printer})` : ""
+                            }`
                             : "-"
                         }
                       />
@@ -919,7 +939,7 @@ export default function OrderDetailPage() {
                         date={formatIso(order.timeline?.shipped_at)}
                         subtext={
                           order.timeline?.shipped_at &&
-                          order.order?.tracking_code ? (
+                            order.order?.tracking_code ? (
                             <>
                               <span>
                                 Tracking ID: {order.order.tracking_code}
@@ -933,11 +953,11 @@ export default function OrderDetailPage() {
                                       order.shipping_address?.country || ""
                                     ).toUpperCase() === "INDIA"
                                       ? `https://shiprocket.co/tracking/${encodeURIComponent(
-                                          order.order.tracking_code.trim()
-                                        )}`
+                                        order.order.tracking_code.trim()
+                                      )}`
                                       : `https://parcelsapp.com/en/tracking/${encodeURIComponent(
-                                          order.order.tracking_code.trim()
-                                        )}`
+                                        order.order.tracking_code.trim()
+                                      )}`
                                   }
                                   target="_blank"
                                   rel="noopener noreferrer"
@@ -1261,7 +1281,7 @@ export default function OrderDetailPage() {
                   )}
 
                   {order.child?.child1_input_images?.length ||
-                  order.child?.child2_input_images?.length ? (
+                    order.child?.child2_input_images?.length ? (
                     <div className="mt-2 flex flex-col gap-4">
                       <div>
                         <div className="text-xs font-semibold text-gray-800 mb-1">
@@ -1274,7 +1294,7 @@ export default function OrderDetailPage() {
                         )}
                       </div>
                       {order.child?.is_twin ||
-                      order.child?.child2_input_images?.length ? (
+                        order.child?.child2_input_images?.length ? (
                         <div>
                           <div className="text-xs font-semibold text-gray-800 mb-1">
                             Child 2 Inputs

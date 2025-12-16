@@ -5880,6 +5880,7 @@ def _build_order_response(order: Dict[str, Any]) -> Dict[str, Any]:
         raise HTTPException(status_code=404, detail="Order not found")
 
     job_id = _first_non_empty(order, ["job_id", "JobId", "jobID"], default="")
+    current_status = order.get("current_status") 
 
     user_doc = {}
     if job_id:
@@ -6009,7 +6010,9 @@ def _build_order_response(order: Dict[str, Any]) -> Dict[str, Any]:
         "customer": customer_details,
         "order": order_details,
         "timeline": timeline,
-        "printer": order.get("printer", "")
+        "printer": order.get("printer", ""),
+        "current_status": current_status,
+        "remarks": order.get("remarks", ""),   # ✅ ADD
     })
     return response
 
@@ -6075,12 +6078,14 @@ class OrderUpdate(BaseModel):
     user_name: Optional[str] = None
     email:     Optional[EmailStr] = None
     phone:     Optional[str] = None
-    cust_status: Optional[str] = None
+    current_status: Optional[str] = None
     printer:   Optional[str] = None
     shipping_address: Optional[ShippingAddressUpdate] = None
     timeline:         Optional[TimelineUpdate] = None
     order_id: Optional[str] = None
     tracking_code: Optional[str] = None
+    remarks: Optional[str] = None   # ✅ ADD
+
 
 
 IMMUTABLE_PATHS = {
@@ -6142,8 +6147,9 @@ def patch_order(order_id: str, update: OrderUpdate):
         "user_name": "user_name",
         "email": "email",
         "phone": "phone_number",
-        "cust_status": "cust_status",
+        "current_status": "current_status",
         "order_id": "order_id",
+        "remarks": "remarks",   # ✅ ADD
         "tracking_code": "tracking_code"
     }
 
