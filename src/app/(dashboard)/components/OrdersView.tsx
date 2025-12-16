@@ -90,6 +90,7 @@ export default function OrdersView({
   const router = useRouter();
   const searchParams = useSearchParams();
 
+  const [showFilters, setShowFilters] = useState(false);
   const [orders, setOrders] = useState<Order[]>([]);
   const [selectedOrders, setSelectedOrders] = useState<Set<string>>(new Set());
   const [filterStatus, setFilterStatus] = useState<string>("all");
@@ -1715,107 +1716,125 @@ export default function OrdersView({
 
       </div>
 
-      <div className="flex flex-wrap gap-2">
-        <select
-          className="border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring focus:ring-blue-200 text-black"
-          value={filterStatus}
-          onChange={(e) => setFilterStatus(e.target.value)}
+      {/* Top bar: Filters button + Search */}
+      <div className="mb-2 flex items-center gap-3">
+        {/* Filters toggle */}
+        <button
+          type="button"
+          onClick={() => setShowFilters((v) => !v)}
+          className="px-3 py-1 border rounded text-sm bg-white hover:bg-gray-50"
         >
-          <option value="all">All Statuses</option>
-          <option value="approved">Approved</option>
-          <option value="uploaded">Uploaded</option>
-        </select>
+          Filters
+        </button>
 
-        <select
-          className="border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring focus:ring-blue-200 text-black"
-          value={filterBookStyle}
-          onChange={(e) => setFilterBookStyle(e.target.value)}
-        >
-          <option value="all">All Book Styles</option>
-          <option value="paperback">Paperback</option>
-          <option value="hardcover">Hardcover</option>
-        </select>
-
-        <select
-          className="border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring focus:ring-blue-200 text-black"
-          value={sortBy}
-          onChange={(e) => setSortBy(e.target.value)}
-        >
-          <option value="created_at">Sort by: Created At</option>
-          <option value="name">Sort by: Name</option>
-          <option value="city">Sort by: City</option>
-          <option value="processed_at">Sort by: Payment At</option>
-        </select>
-
-        <select
-          className="border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring focus:ring-blue-200 text-black"
-          value={sortDir}
-          onChange={(e) => setSortDir(e.target.value)}
-        >
-          <option value="desc">↓ Descending</option>
-          <option value="asc">↑ Ascending</option>
-        </select>
-
-        <select
-          className="border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring focus:ring-blue-200 text-black"
-          value={filterPrintApproval}
-          onChange={(e) => setFilterPrintApproval(e.target.value)}
-        >
-          <option value="all">All Print Approvals</option>
-          <option value="yes">Yes</option>
-          <option value="no">No</option>
-          <option value="not_found">Not Found</option>
-        </select>
-        {!hideDiscountFilter && (
-          <select
-            value={filterDiscountCode}
-            onChange={(e) => setFilterDiscountCode(e.target.value)}
-            className="border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring focus:ring-blue-200 text-black"
-          >
-            <option value="all">All Discount Codes</option>
-            <option value="LHMM">LHMM</option>
-            {/* <option value="TEST">TEST</option> */}
-            <option value="SPECIAL10">SPECIAL10</option>
-            <option value="none">None</option>
-          </select>
-        )}
-      </div>
-
-      <div className="relative">
-        <input
-          type="text"
-          value={search}
-          onChange={(e) => {
-            const v = e.target.value;
-            setSearch(v);
-            if (typing) clearTimeout(typing);
-            const t = setTimeout(() => setUrlParam("q", v || null), 300);
-            setTyping(t);
-          }}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") {
+        {/* Search */}
+        <div className="relative">
+          <input
+            type="text"
+            value={search}
+            onChange={(e) => {
+              const v = e.target.value;
+              setSearch(v);
               if (typing) clearTimeout(typing);
-              setUrlParam("q", search || null);
-              fetchOrders();
-            }
-          }}
-          placeholder="Search here..."
-          className="sm:w-72 rounded border border-gray-300 px-3 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-        />
-        {search && (
-          <button
-            type="button"
-            onClick={() => {
-              setSearch("");
-              setUrlParam("q", null);
+              const t = setTimeout(() => setUrlParam("q", v || null), 300);
+              setTyping(t);
             }}
-            className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500 text-xs"
-            aria-label="Clear"
-          >
-            ✕
-          </button>
-        )}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                if (typing) clearTimeout(typing);
+                setUrlParam("q", search || null);
+                fetchOrders();
+              }
+            }}
+            placeholder="Search here..."
+            className="sm:w-72 rounded border border-gray-300 px-3 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+          />
+
+          {search && (
+            <button
+              type="button"
+              onClick={() => {
+                setSearch("");
+                setUrlParam("q", null);
+              }}
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500 text-xs"
+              aria-label="Clear"
+            >
+              ✕
+            </button>
+          )}
+        </div>
       </div>
+
+      {/* Filters panel (hidden by default) */}
+      {showFilters && (
+        <div className="mb-3 flex flex-wrap gap-2">
+          <select
+            className="border border-gray-300 rounded px-3 py-2 text-sm text-black"
+            value={filterStatus}
+            onChange={(e) => setFilterStatus(e.target.value)}
+          >
+            <option value="all">All Statuses</option>
+            <option value="approved">Approved</option>
+            <option value="uploaded">Uploaded</option>
+          </select>
+
+          <select
+            className="border border-gray-300 rounded px-3 py-2 text-sm text-black"
+            value={filterBookStyle}
+            onChange={(e) => setFilterBookStyle(e.target.value)}
+          >
+            <option value="all">All Book Styles</option>
+            <option value="paperback">Paperback</option>
+            <option value="hardcover">Hardcover</option>
+          </select>
+
+          <select
+            className="border border-gray-300 rounded px-3 py-2 text-sm text-black"
+            value={sortBy}
+            onChange={(e) => setSortBy(e.target.value)}
+          >
+            <option value="created_at">Sort by: Created At</option>
+            <option value="name">Sort by: Name</option>
+            <option value="city">Sort by: City</option>
+            <option value="processed_at">Sort by: Payment At</option>
+          </select>
+
+          <select
+            className="border border-gray-300 rounded px-3 py-2 text-sm text-black"
+            value={sortDir}
+            onChange={(e) => setSortDir(e.target.value)}
+          >
+            <option value="desc">↓ Descending</option>
+            <option value="asc">↑ Ascending</option>
+          </select>
+
+          <select
+            className="border border-gray-300 rounded px-3 py-2 text-sm text-black"
+            value={filterPrintApproval}
+            onChange={(e) => setFilterPrintApproval(e.target.value)}
+          >
+            <option value="all">All Print Approvals</option>
+            <option value="yes">Yes</option>
+            <option value="no">No</option>
+            <option value="not_found">Not Found</option>
+          </select>
+
+          {!hideDiscountFilter && (
+            <select
+              value={filterDiscountCode}
+              onChange={(e) => setFilterDiscountCode(e.target.value)}
+              className="border border-gray-300 rounded px-3 py-2 text-sm text-black"
+            >
+              <option value="all">All Discount Codes</option>
+              <option value="LHMM">LHMM</option>
+              <option value="SPECIAL10">SPECIAL10</option>
+              <option value="none">None</option>
+            </select>
+          )}
+        </div>
+      )}
+
 
       <div className="overflow-auto rounded border border-gray-200">
         <table className="min-w-full table-auto text-sm text-left">
