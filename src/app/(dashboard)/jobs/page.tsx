@@ -258,7 +258,9 @@ export default function JobsPage() {
                             <th className="p-3">Paid</th>
                             <th className="p-3">Approved</th>
                             <th className="p-3">Partial Preview</th>
+                            <th className="p-3">PP Ins</th>
                             <th className="p-3">Final Preview</th>
+                            <th className="p-3">FP Ins</th>
                         </tr>
                     </thead>
                     <tbody>
