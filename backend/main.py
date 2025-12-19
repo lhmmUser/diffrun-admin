@@ -111,21 +111,20 @@ shipping_collection = db["shipping_details"]
 scheduler = BackgroundScheduler(timezone=IST_TZ)
 
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
         if not scheduler.running:
             scheduler.start()
 
-        # capture the running loop for thread-safe submission
         loop = asyncio.get_running_loop()
 
         def _kick_auto_reconcile():
-            # schedule the coroutine on the FastAPI event loop
             asyncio.run_coroutine_threadsafe(
-                _auto_reconcile_and_sign_once(), loop)
+                _auto_reconcile_and_sign_once(), loop
+            )
 
-        # every 5 minutes
         scheduler.add_job(
             _kick_auto_reconcile,
             trigger=CronTrigger(minute="*/5", timezone=IST_TZ),
@@ -135,19 +134,26 @@ async def lifespan(app: FastAPI):
             max_instances=1,
         )
 
-        # your existing jobs stay unchanged
         scheduler.add_job(
             _run_export_and_email,
-            trigger=CronTrigger(hour="0,3,6,9,12,15,18,21",
-                                minute="0", timezone=IST_TZ),
+            trigger=CronTrigger(
+                hour="0,3,6,9,12,15,18,21",
+                minute="0",
+                timezone=IST_TZ,
+            ),
             id="xlsx_export_fixed_ist_times",
             replace_existing=True,
             coalesce=True,
             max_instances=1,
         )
 
+        def _kick_feedback_emails():
+            asyncio.run_coroutine_threadsafe(
+                _run_feedback_emails_once(), loop
+            )
+
         scheduler.add_job(
-            run_feedback_emails_job,
+            _kick_feedback_emails,
             trigger=CronTrigger(hour="14", minute="0", timezone=IST_TZ),
             id="feedback_emails_job",
             replace_existing=True,
@@ -170,7 +176,7 @@ async def lifespan(app: FastAPI):
         )
 
     except Exception:
-        logger.exception("Failed to start APScheduler in lifespan")
+        logger.exception("Failed to start APScheduler")
 
     yield
 
@@ -178,7 +184,7 @@ async def lifespan(app: FastAPI):
         if scheduler.running:
             scheduler.shutdown(wait=False)
     except Exception:
-        logger.exception("Failed to stop APScheduler in lifespan")
+        logger.exception("Failed to stop APScheduler")
 
 app = FastAPI(lifespan=lifespan)
 app.include_router(vlookup_router)
@@ -5411,23 +5417,26 @@ def send_feedback_email(job_id: str, background_tasks: BackgroundTasks):
 
 @app.get("/debug/feedback-email-candidates")
 def debug_feedback_email_candidates():
+
+    blocked_emails = orders_collection.distinct(
+        "email",
+        {
+            "$or": [
+                {"feedback_email_sent": True},
+                {"feedback_email": True},
+            ]
+        }
+    )
+
     pipeline = [
         {
             "$match": {
-                # 1) Only orders where feedback email not already sent
+                "email": {"$exists": True, "$ne": "", "$nin": blocked_emails},
                 "feedback_email_sent": {"$ne": True},
-
-                # 2) We need processed_at present (UTC value)
+                "feedback_email": {"$ne": True},
                 "processed_at": {"$exists": True, "$ne": None},
-
-                # 3) Keep your existing discount/test rules (example)
-                "$or": [
-                    {"discount_code": {"$exists": False}},
-                    {"discount_code": {"$ne": "TEST"}},
-                ],
             }
         },
-        # 4) Join with shipping_details by order_id
         {
             "$lookup": {
                 "from": "shipping_details",
@@ -5436,9 +5445,7 @@ def debug_feedback_email_candidates():
                 "as": "shipping_docs",
             }
         },
-        # 5) Only keep orders that actually have shipping data
         {"$unwind": "$shipping_docs"},
-        # 6) Filter for Delivered status via Shiprocket
         {
             "$match": {
                 "$or": [
@@ -5451,40 +5458,6 @@ def debug_feedback_email_candidates():
                 },
             }
         },
-        # 7) Exclude wigu + paperback from BOTH user_details and shipping_details
-        {
-            "$match": {
-                "$expr": {
-                    "$and": [
-                        # Exclude when user_details says wigu + paperback
-                        {
-                            "$not": [
-                                {
-                                    "$and": [
-                                        {"$eq": ["$book_id", "wigu"]},
-                                        {"$eq": ["$book_style", "paperback"]},
-                                    ]
-                                }
-                            ]
-                        },
-                        # Exclude when shipping_details says wigu + paperback
-                        {
-                            "$not": [
-                                {
-                                    "$and": [
-                                        {"$eq": [
-                                            "$shipping_docs.book_id", "wigu"]},
-                                        {"$eq": [
-                                            "$shipping_docs.book_style", "paperback"]},
-                                    ]
-                                }
-                            ]
-                        },
-                    ]
-                }
-            }
-        },
-        # 8) Convert processed_at + delivery timestamp to Date
         {
             "$addFields": {
                 "processed_dt": {"$toDate": "$processed_at"},
@@ -5493,7 +5466,6 @@ def debug_feedback_email_candidates():
                 },
             }
         },
-        # 9) Compute diff in days (IST) between processed_at and delivery
         {
             "$addFields": {
                 "processing_to_delivery_days": {
@@ -5506,7 +5478,6 @@ def debug_feedback_email_candidates():
                 }
             }
         },
-        # 10) Only keep orders where diff is between 0 and 8 days
         {
             "$match": {
                 "$expr": {
@@ -5517,47 +5488,52 @@ def debug_feedback_email_candidates():
                 }
             }
         },
-        # 11) Select fields you need for inspection
+        {
+            "$group": {
+                "_id": "$email",
+                "sample": {"$first": "$$ROOT"},
+            }
+        },
+        {"$replaceRoot": {"newRoot": "$sample"}},
         {
             "$project": {
                 "_id": 0,
+                "email": 1,
                 "order_id": 1,
                 "job_id": 1,
-                "email": 1,
-                "name": 1,
-                "user_name": 1,
-                "gender": 1,
-                "book_id": 1,
-                "book_style": 1,
-                "discount_code": 1,
-                "processed_at": 1,
-                "processed_dt": 1,
-                "delivered_dt": 1,
                 "processing_to_delivery_days": 1,
-                "feedback_email_sent": 1,
-                # some shipping fields for debugging
-                "shipping_docs.shiprocket_data.current_status": 1,
-                "shipping_docs.shiprocket_data.shipment_status": 1,
-                "shipping_docs.shiprocket_data.current_timestamp_iso": 1,
             }
         },
-        {"$sort": {"delivered_dt": 1, "order_id": 1}},
     ]
 
     candidates = list(orders_collection.aggregate(pipeline))
 
     return {
-        "total": len(candidates),
+        "blocked_emails_count": len(blocked_emails),
+        "total_unique_emails": len(candidates),
         "candidates": candidates,
     }
 
 
 @app.post("/cron/feedback-emails")
 def cron_feedback_emails(limit: int = 200):
+
+    blocked_emails = orders_collection.distinct(
+        "email",
+        {
+            "$or": [
+                {"feedback_email_sent": True},
+                {"feedback_email": True},
+            ]
+        }
+    )
+
     pipeline = [
         {
             "$match": {
+                "email": {"$exists": True, "$ne": "", "$nin": blocked_emails},
                 "feedback_email_sent": {"$ne": True},
+                "feedback_email": {"$ne": True},
                 "processed_at": {"$exists": True, "$ne": None},
             }
         },
@@ -5580,36 +5556,6 @@ def cron_feedback_emails(limit: int = 200):
                     "$exists": True,
                     "$ne": None,
                 },
-            }
-        },
-        {
-            "$match": {
-                "$expr": {
-                    "$and": [
-                        {
-                            "$not": [
-                                {
-                                    "$and": [
-                                        {"$eq": ["$book_id", "wigu"]},
-                                        {"$eq": ["$book_style", "paperback"]},
-                                    ]
-                                }
-                            ]
-                        },
-                        {
-                            "$not": [
-                                {
-                                    "$and": [
-                                        {"$eq": [
-                                            "$shipping_docs.book_id", "wigu"]},
-                                        {"$eq": [
-                                            "$shipping_docs.book_style", "paperback"]},
-                                    ]
-                                }
-                            ]
-                        },
-                    ]
-                }
             }
         },
         {
@@ -5643,27 +5589,12 @@ def cron_feedback_emails(limit: int = 200):
             }
         },
         {
-            "$project": {
-                "_id": 0,
-                "order_id": 1,
-                "job_id": 1,
-                "email": 1,
-                "name": 1,
-                "user_name": 1,
-                "gender": 1,
-                "book_id": 1,
-                "book_style": 1,
-                "discount_code": 1,
-                "processed_at": 1,
-                "processed_dt": 1,
-                "delivered_dt": 1,
-                "processing_to_delivery_days": 1,
-                "shipping_docs.shiprocket_data.current_status": 1,
-                "shipping_docs.shiprocket_data.shipment_status": 1,
-                "shipping_docs.shiprocket_data.current_timestamp_iso": 1,
+            "$group": {
+                "_id": "$email",
+                "sample": {"$first": "$$ROOT"},
             }
         },
-        {"$sort": {"delivered_dt": 1, "order_id": 1}},
+        {"$replaceRoot": {"newRoot": "$sample"}},
         {"$limit": int(limit)},
     ]
 
@@ -5674,98 +5605,25 @@ def cron_feedback_emails(limit: int = 200):
         "sent": 0,
         "skipped": 0,
         "errors": 0,
-        "details": [],
     }
 
     for c in candidates:
-        job_id = c.get("job_id")
-        email = c.get("email")
-        order_id = c.get("order_id")
-
-        if not job_id or not email:
-            results["skipped"] += 1
-            results["details"].append(
-                {
-                    "job_id": job_id,
-                    "order_id": order_id,
-                    "status": "skipped",
-                    "reason": "missing job_id or email",
-                }
-            )
-            continue
-
         try:
-            # Call the centralized function
-            res = send_feedback_email(job_id, BackgroundTasks())
-            status = res.get("status")
-
-            if status == "sent":
+            res = send_feedback_email(c["job_id"], BackgroundTasks())
+            if res.get("status") == "sent":
                 results["sent"] += 1
-                results["details"].append(
-                    {
-                        "job_id": job_id,
-                        "order_id": order_id,
-                        "status": "sent",
-                        "email": email,
-                    }
-                )
-            elif status == "already_sent":
-                results["skipped"] += 1
-                results["details"].append(
-                    {
-                        "job_id": job_id,
-                        "order_id": order_id,
-                        "status": "skipped",
-                        "reason": "already sent for this email",
-                        "email": email,
-                    }
-                )
             else:
-                # Unknown status, but no exception raised
                 results["skipped"] += 1
-                results["details"].append(
-                    {
-                        "job_id": job_id,
-                        "order_id": order_id,
-                        "status": "skipped",
-                        "reason": f"unexpected status from send_feedback_email: {status}",
-                        "email": email,
-                    }
-                )
-
-        except HTTPException as e:
-            # Your send_feedback_email threw an HTTP error
+        except Exception:
             results["errors"] += 1
-            results["details"].append(
-                {
-                    "job_id": job_id,
-                    "order_id": order_id,
-                    "status": "error",
-                    "error": f"HTTPException: {e.status_code} {e.detail}",
-                }
-            )
-        except Exception as e:
-            results["errors"] += 1
-            results["details"].append(
-                {
-                    "job_id": job_id,
-                    "order_id": order_id,
-                    "status": "error",
-                    "error": str(e),
-                }
-            )
 
     return results
 
-
-def run_feedback_emails_job():
+async def _run_feedback_emails_once():
     try:
-        print("Starting cron_feedback_emails job")
         cron_feedback_emails(limit=200)
-        print("Finished cron_feedback_emails job")
-    except Exception as e:
-        print(f"Error running cron_feedback_emails job: {e}")
-        logger.exception("Error running feedback emails job")
+    except Exception:
+        logger.exception("Feedback email cron failed")
 
 
 @app.get("/orders/meta/by-job/{job_id}")
