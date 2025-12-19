@@ -3163,6 +3163,8 @@ def get_jobs(
         "locale": 1,
         "partial_preview": 1,
         "final_preview": 1,
+        "pp_instance":1,
+        "fp_instance":1,
         "printer": 1,
         "_id": 0
     }
@@ -3200,6 +3202,8 @@ def get_jobs(
             "locale": doc.get("locale", ""),
             "partial_preview": doc.get("partial_preview", "") or "",
             "final_preview": doc.get("final_preview", "") or "",
+            "pp_instance":doc.get("pp_instance", "") or "",
+            "fp_instance":doc.get("fp_instance", "") or "",
             "printer": doc.get("printer", "") or "",
         })
 

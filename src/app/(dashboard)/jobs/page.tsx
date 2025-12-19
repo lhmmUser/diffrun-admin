@@ -18,6 +18,8 @@ type RawOrder = {
     locale?: string;
     partial_preview?: string;
     final_preview?: string;
+    pp_instance?: string;
+    fp_instance?: string
 };
 
 type Order = {
@@ -32,6 +34,8 @@ type Order = {
     locale: string;
     partialPreview: string;
     finalPreview: string;
+    pp_instance: string;
+    fp_instance: string
 };
 
 const formatDate = (dateInput: any) => {
@@ -140,6 +144,8 @@ export default function JobsPage() {
                 locale: order.locale || "",
                 partialPreview: (order.partial_preview ?? "").toString(),
                 finalPreview: (order.final_preview ?? "").toString(),
+                pp_instance: (order.pp_instance ?? "").toString(),
+                fp_instance: (order.fp_instance ?? "").toString(),
             }));
 
             console.log("Transformed orders:", transformed);
@@ -320,7 +326,9 @@ export default function JobsPage() {
                                         </span>
                                     </td>
                                     <td className="p-3 text-black">{order.partialPreview || "-"}</td>
+                                    <td className="p-3 text-black">{order.pp_instance || "-"}</td>
                                     <td className="p-3 text-black">{order.finalPreview || "-"}</td>
+                                    <td className="p-3 text-black">{order.fp_instance || "-"}</td>
                                 </tr>
                             ))
                         )}
