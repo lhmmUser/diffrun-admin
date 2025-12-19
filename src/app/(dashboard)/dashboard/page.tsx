@@ -1,0 +1,824 @@
+"use client";
+
+import dynamic from "next/dynamic";
+import { useEffect, useMemo, useState } from "react";
+
+const ReactApexChart = dynamic(() => import("react-apexcharts"), { ssr: false });
+
+// ---------- Types ----------
+type StatsResponse = {
+  labels: string[];
+  current: number[];
+  previous: number[];
+  exclusions: string[];
+  granularity?: "hour" | "day";
+};
+
+type JobsStatsResponse = {
+  labels: string[];
+  current_jobs: number[];
+  previous_jobs: number[];
+  current_orders: number[];
+  previous_orders: number[];
+  conversion_current: number[];
+  conversion_previous: number[];
+  granularity: "hour" | "day";
+};
+
+// NEW: Revenue stats mirror Orders (current vs previous)
+type RevenueStatsResponse = {
+  labels: string[];
+  current: number[];
+  previous: number[];
+  granularity: "hour" | "day";
+};
+
+type RangeKey = "1d" | "1w" | "1m" | "6m" | "this_month" | "custom";
+
+// CHANGED: add 'revenue'
+type Metric = "orders" | "jobs" | "conversion" | "revenue";
+
+// NEW: Country codes and options
+type CountryCode = "IN" | "AE" | "CA" | "US" | "GB" | "IN_ONLY";
+const COUNTRY_OPTIONS: { label: string; value: CountryCode }[] = [
+  { label: "All", value: "IN" },        // default – uses current behaviour
+  { label: "India", value: "IN_ONLY" },
+  { label: "United Arab Emirates", value: "AE" },
+  { label: "Canada", value: "CA" },
+  { label: "United States", value: "US" },
+  { label: "United Kingdom", value: "GB" },
+];
+
+export default function Home() {
+  const baseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
+
+  const [stats, setStats] = useState<StatsResponse | null>(null);
+  const [error, setError] = useState<string>("");
+
+  const [jobsStats, setJobsStats] = useState<JobsStatsResponse | null>(null);
+  const [jobsError, setJobsError] = useState<string>("");
+
+  // NEW: revenue state
+  const [revenueStats, setRevenueStats] = useState<RevenueStatsResponse | null>(null);
+  const [revenueError, setRevenueError] = useState<string>("");
+
+  const [range, setRange] = useState<RangeKey>("1w");
+  const [metric, setMetric] = useState<Metric>("orders");
+
+  // NEW: country state (India default)
+  const [country, setCountry] = useState<CountryCode>("IN");
+
+  const todayISO = new Date().toISOString().slice(0, 10);
+  const weekAgoISO = new Date(Date.now() - 6 * 86400000).toISOString().slice(0, 10);
+  const [startDate, setStartDate] = useState<string>(weekAgoISO);
+  const [endDate, setEndDate] = useState<string>(todayISO);
+
+  // NEW: require explicit Apply for custom
+  const [customApplied, setCustomApplied] = useState(false);
+
+  // --- Shipment status table state (NEW) ---
+  const [shipRows, setShipRows] = useState<any[]>([]);
+  const [shipActivities, setShipActivities] = useState<string[]>([]);
+  const [shipError, setShipError] = useState<string>("");
+  const [shipLoading, setShipLoading] = useState<boolean>(false);
+  const [showShipTable, setShowShipTable] = useState(false);
+
+  const buildShipStatusUrl = (r: RangeKey) => {
+    const params = new URLSearchParams();
+    if (r === "custom") {
+      params.append("start_date", startDate);
+      params.append("end_date", endDate);
+    } else {
+      params.append("range", r);
+    }
+    // default to all printers; front-end can be extended to pass 'printer' from UI
+    params.append("printer", "all");
+    params.append("loc", country);
+    return `${baseUrl}/stats/ship-status?${params.toString()}`;
+  };
+  // --- end shipment state ---
+
+
+  const addDays = (ymd: string, days: number) => {
+    const d = new Date(ymd + "T00:00:00Z");
+    d.setUTCDate(d.getUTCDate() + days);
+    return d.toISOString().slice(0, 10);
+  };
+
+
+  const exclusions = ["TEST", "COLLAB", "REJECTED"];
+
+  // NEW: helper to build URLs and always include `loc`
+  const withParams = (path: string, params: Record<string, string | number | undefined>) => {
+    const url = new URL(path, baseUrl);
+    const qs = new URLSearchParams();
+    Object.entries(params).forEach(([k, v]) => {
+      if (v !== undefined && v !== null) qs.append(k, String(v));
+    });
+    qs.set("loc", country); // critical: pass selected country
+    url.search = qs.toString();
+    return url.toString();
+  };
+
+  const buildOrdersUrl = (r: RangeKey) => {
+    const params = new URLSearchParams();
+
+    // exclusions (if any)
+    exclusions.forEach((c) => params.append("exclude_codes", c));
+
+    // range or custom dates
+    if (r === "custom") {
+      params.append("start_date", startDate);
+      params.append("end_date", endDate);
+    } else {
+      params.append("range", r);
+    }
+
+    // country
+    params.append("loc", country);
+
+    return `${baseUrl}/stats/orders?${params.toString()}`;
+  };
+
+  const buildJobsUrl = (r: RangeKey) => {
+    const params = new URLSearchParams();
+
+    // range or custom dates
+    if (r === "custom") {
+      params.append("start_date", startDate);
+      params.append("end_date", endDate);
+    } else {
+      params.append("range", r);
+    }
+
+    // country
+    params.append("loc", country);
+
+    return `${baseUrl}/stats/preview-vs-orders?${params.toString()}`;
+  };
+
+  const buildRevenueUrl = (r: RangeKey) => {
+    const params = new URLSearchParams();
+
+    // range or custom dates
+    if (r === "custom") {
+      params.append("start_date", startDate);
+      params.append("end_date", endDate);
+    } else {
+      params.append("range", r);
+    }
+
+    // country
+    params.append("loc", country);
+
+    return `${baseUrl}/stats/revenue?${params.toString()}`;
+  };
+
+
+  const isCustomInvalid =
+    range === "custom" && (!!startDate && !!endDate) && startDate > endDate;
+
+  // NEW: helper—only fetch when ready
+  const canFetch = useMemo(() => {
+    if (range !== "custom") return true;
+    if (isCustomInvalid) return false;
+    return customApplied; // only after Apply
+  }, [range, isCustomInvalid, customApplied]);
+
+  // Fetch: Orders
+  useEffect(() => {
+    if (!canFetch) return;
+    setError("");
+    setStats(null);
+    fetch(buildOrdersUrl(range), { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : Promise.reject(r.statusText || r.status)))
+      .then(setStats)
+      .catch((e) => setError(String(e)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [baseUrl, range, startDate, endDate, canFetch, country]);
+
+  // Fetch: Jobs & Conversion (robust to either response shape)
+  useEffect(() => {
+    if (!canFetch) return;
+    setJobsError("");
+    setJobsStats(null);
+    fetch(buildJobsUrl(range), { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : Promise.reject(r.statusText || r.status)))
+      .then((raw) => {
+        // If backend already returns JobsStatsResponse, use it.
+        if (
+          raw &&
+          Array.isArray(raw.current_jobs) &&
+          Array.isArray(raw.previous_jobs) &&
+          Array.isArray(raw.current_orders) &&
+          Array.isArray(raw.previous_orders)
+        ) {
+          setJobsStats(raw as JobsStatsResponse);
+          return;
+        }
+
+        // Backward-compat: two-series shape (paid_with_preview / unpaid_with_preview)
+        const labels: string[] = Array.isArray(raw?.labels) ? raw.labels : [];
+        const jobs: number[] = Array.isArray(raw?.unpaid_with_preview) ? raw.unpaid_with_preview : [];
+        const orders: number[] = Array.isArray(raw?.paid_with_preview) ? raw.paid_with_preview : [];
+        const zeros = (n: number) => Array(n).fill(0);
+
+        const current_jobs = jobs;
+        const previous_jobs = zeros(jobs.length);
+        const current_orders = orders;
+        const previous_orders = zeros(orders.length);
+
+        const conversion_current = current_orders.map((o: number, i: number) =>
+          (current_jobs[i] ?? 0) > 0 ? +(o * 100 / current_jobs[i]).toFixed(2) : 0
+        );
+        const conversion_previous = zeros(current_orders.length);
+
+        const granularity: "hour" | "day" = (raw?.granularity === "hour" ? "hour" : "day");
+
+        const normalized: JobsStatsResponse = {
+          labels,
+          current_jobs,
+          previous_jobs,
+          current_orders,
+          previous_orders,
+          conversion_current,
+          conversion_previous,
+          granularity,
+        };
+        setJobsStats(normalized);
+      })
+      .catch((e) => setJobsError(String(e)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [baseUrl, range, startDate, endDate, canFetch, country]);
+
+  // NEW: Fetch Revenue
+  useEffect(() => {
+    if (!canFetch) return;
+    setRevenueError("");
+    setRevenueStats(null);
+    fetch(buildRevenueUrl(range), { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : Promise.reject(r.statusText || r.status)))
+      .then((data) => setRevenueStats(data as RevenueStatsResponse))
+      .catch((e) => setRevenueError(String(e)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [baseUrl, range, startDate, endDate, canFetch, country]);
+
+  // --- Fetch shipment status table (NEW) ---
+  useEffect(() => {
+    if (!canFetch) return;
+
+    if (country !== "IN_ONLY") {
+      // clear any old data and stop loading
+      setShipRows([]);
+      setShipActivities([]);
+      setShipError("");
+      setShipLoading(false);
+      return;
+    }
+
+    fetch(buildShipStatusUrl(range), { cache: "no-store" })
+      .then((r) => {
+        if (!r.ok) return r.text().then((txt) => Promise.reject(txt || r.status));
+        return r.json();
+      })
+      .then((json) => {
+        // Expecting { labels: [...], activities: [...], rows: [...] }
+        const activities = Array.isArray(json.activities) ? json.activities : [];
+
+        // rows should be array of { date, total, counts: { activityName: count, ... } }
+        let rows: any[] = Array.isArray(json.rows) ? json.rows : [];
+
+        // Normalize rows: ensure date, total and counts exist
+        rows = rows.map((r: any) => ({
+          date: (r.date ?? r.label ?? "").toString(),
+          total: Number.isFinite(r.total) ? r.total : 0, // Total orders (new column)
+          sent_to_print: Number.isFinite(r.sent_to_print)
+            ? r.sent_to_print
+            : (Number.isFinite(r.total) ? r.total : 0),  // fallback for old backend
+          counts: r.counts && typeof r.counts === "object" ? r.counts : {},
+        }));
+
+        // Optional: sort rows descending by date (newest first)
+        rows.sort((a: any, b: any) => {
+          const da = a.date.length === 10 ? new Date(a.date + "T00:00:00Z") : new Date(a.date);
+          const db = b.date.length === 10 ? new Date(b.date + "T00:00:00Z") : new Date(b.date);
+          return db.getTime() - da.getTime();
+        });
+
+        setShipActivities(activities);
+        setShipRows(rows);
+      })
+      .catch((err) => {
+        console.error("ship-status fetch error:", err);
+        setShipError(String(err));
+      })
+      .finally(() => setShipLoading(false));
+  }, [baseUrl, range, startDate, endDate, canFetch, country]);
+  // --- end fetch shipment table ---
+
+
+
+  // Helpers
+  const parseYMD = (input: unknown) => {
+    const s = String(input ?? "");
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+    if (!m) return null;
+    const y = Number(m[1]); const mo = Number(m[2]) - 1; const d = Number(m[3]);
+    return new Date(Date.UTC(y, mo, d));
+  };
+
+  const toDate = (raw: string): Date | null => {
+    if (!raw) return null;
+    if (raw.length === 10 && /^\d{4}-\d{2}-\d{2}$/.test(raw)) return parseYMD(raw);
+    const d = new Date(raw);
+    return isNaN(d.getTime()) ? null : d;
+  };
+
+  const prettyIST = (ymd: string) => {
+    const base = parseYMD(ymd);
+    if (!base) return ymd || "";
+    const ist = new Date(base.getTime() + 19800000);
+    if (range === "1m" || range === "6m" || range === "custom" || range === "this_month")
+      return ist.toLocaleDateString("en-GB", { day: "2-digit", month: "short", timeZone: "UTC" });
+    return ist.toLocaleDateString("en-GB", { weekday: "short", day: "2-digit", month: "short", timeZone: "UTC" });
+  };
+
+  const fmtDay = (d: Date) =>
+    d.toLocaleDateString("en-GB", { weekday: "short", day: "2-digit", month: "short" });
+
+  const subMonthsKeepDOM = (d: Date, n: number) => {
+    const y = d.getUTCFullYear();
+    const m = d.getUTCMonth();
+    const targetIndex = m - n;
+    const ty = y + Math.floor(targetIndex / 12);
+    const tm = ((targetIndex % 12) + 12) % 12;
+    const lastDay = new Date(Date.UTC(ty, tm + 1, 0)).getUTCDate();
+    const dom = Math.min(d.getUTCDate(), lastDay);
+    return new Date(Date.UTC(ty, tm, dom, d.getUTCHours(), d.getUTCMinutes(), d.getUTCSeconds(), d.getUTCMilliseconds()));
+  };
+
+  // shift for ranges; custom uses window length in days
+  const prevShiftDays = (r: RangeKey): number | null => {
+    if (r === "1d") return 7;
+    if (r === "1w") return 7;
+    if (r === "1m") return 30;
+    if (r === "6m") return 182;
+    if (r === "this_month") return null;
+    if (r === "custom") return Math.max(1,
+      Math.ceil((new Date(endDate + "T00:00:00Z").getTime() - new Date(startDate + "T00:00:00Z").getTime()) / 86400000)
+    );
+    return 7;
+  };
+
+  // Labels
+  const isHourlyOrders = stats?.granularity === "hour";
+  const ordersRawLabels = stats?.labels ?? [];
+  const ordersLabels = useMemo(() => {
+    if (!stats) return [];
+    return isHourlyOrders ? ordersRawLabels.map((s) => s.slice(11)) : ordersRawLabels.map(prettyIST);
+  }, [stats, range]);
+
+  const isHourlyJobs = jobsStats?.granularity === "hour";
+  const jobsRawLabels = jobsStats?.labels ?? [];
+  const jobsLabels = useMemo(() => {
+    if (!jobsStats) return [];
+    return isHourlyJobs ? jobsRawLabels.map((s) => s.slice(11)) : jobsRawLabels.map(prettyIST);
+  }, [jobsStats, range]);
+
+  // NEW: revenue labels
+  const isHourlyRevenue = revenueStats?.granularity === "hour";
+  const revenueRawLabels = revenueStats?.labels ?? [];
+  const revenueLabels = useMemo(() => {
+    if (!revenueStats) return [];
+    return isHourlyRevenue ? revenueRawLabels.map((s) => s.slice(11)) : revenueRawLabels.map(prettyIST);
+  }, [revenueStats, range]);
+
+  // CHANGED: choose active labels by metric, including revenue
+  const activeLabels = useMemo(() => {
+    if (metric === "orders") return ordersLabels;
+    if (metric === "jobs" || metric === "conversion") return jobsLabels;
+    return revenueLabels; // revenue
+  }, [metric, ordersLabels, jobsLabels, revenueLabels]);
+
+  type Series = { name: string; data: number[] }[];
+
+  // CHANGED: include revenue series
+  const activeSeries: Series = useMemo(() => {
+    if (metric === "orders") {
+      if (!stats) return [];
+      return [
+        { name: "Current Orders", data: stats.current ?? [] },
+        { name: "Previous Orders", data: stats.previous ?? [] },
+      ];
+    }
+    if (metric === "jobs") {
+      if (!jobsStats) return [];
+      return [
+        { name: "Current Jobs", data: jobsStats.current_jobs ?? [] },
+        { name: "Previous Jobs", data: jobsStats.previous_jobs ?? [] },
+      ];
+    }
+    if (metric === "conversion") {
+      if (!jobsStats) return [];
+      return [
+        { name: "Current Conversion %", data: jobsStats.conversion_current ?? [] },
+        { name: "Previous Conversion %", data: jobsStats.conversion_previous ?? [] },
+      ];
+    }
+    // revenue
+    if (!revenueStats) return [];
+    return [
+      { name: "Current Revenue", data: revenueStats.current ?? [] },
+      { name: "Previous Revenue", data: revenueStats.previous ?? [] },
+    ];
+  }, [metric, stats, jobsStats, revenueStats]);
+
+  // CHANGED: totals include revenue
+  const totals = useMemo(() => {
+    const sum = (arr?: number[]) => (arr ?? []).reduce((a, b) => a + (Number.isFinite(b) ? b : 0), 0);
+    const ordersCurrent = sum(stats?.current);
+    const ordersPrev = sum(stats?.previous);
+    const jobsCurrent = sum(jobsStats?.current_jobs);
+    const jobsPrev = sum(jobsStats?.previous_jobs);
+    const convCurrent = jobsCurrent > 0 ? +(ordersCurrent * 100 / jobsCurrent).toFixed(2) : 0;
+    const convPrev = jobsPrev > 0 ? +(ordersPrev * 100 / jobsPrev).toFixed(2) : 0;
+    const revenueCurrent = sum(revenueStats?.current);
+    const revenuePrev = sum(revenueStats?.previous);
+    return {
+      orders: { current: ordersCurrent, prev: ordersPrev },
+      jobs: { current: jobsCurrent, prev: jobsPrev },
+      conversion: { current: convCurrent, prev: convPrev },
+      revenue: { current: revenueCurrent, prev: revenuePrev },
+    };
+  }, [stats, jobsStats, revenueStats]);
+
+  const isPercent = metric === "conversion";
+  const showDataLabels = true;
+
+  const chartOptions = useMemo(() => {
+    const colors = activeSeries.length === 2 ? ["#2563eb", "#16a34a"] : ["#2563eb"];
+    const hourGran =
+      metric === "orders"
+        ? stats?.granularity === "hour"
+        : metric === "jobs" || metric === "conversion"
+          ? jobsStats?.granularity === "hour"
+          : revenueStats?.granularity === "hour";
+
+    const rawLabels =
+      metric === "orders"
+        ? ordersRawLabels
+        : metric === "jobs" || metric === "conversion"
+          ? jobsRawLabels
+          : revenueRawLabels;
+
+    const shift = prevShiftDays(range);
+
+    const customTooltip = (opts: any): string => {
+      const i: number = opts.dataPointIndex;
+      const r = rawLabels[i] as string | undefined;
+      const currDate = r ? toDate(r) : null;
+
+      let prevDate: Date | null = null;
+      if (currDate) {
+        if (range === "this_month") {
+          prevDate = subMonthsKeepDOM(currDate, 1);
+        } else if (typeof shift === "number") {
+          prevDate = new Date(currDate.getTime());
+          prevDate.setDate(prevDate.getDate() - shift);
+        }
+      }
+
+      const title =
+        currDate
+          ? `${fmtDay(currDate)}${prevDate ? ` • prev ${fmtDay(prevDate)}` : ""}`
+          : (activeLabels[i] ?? "");
+
+      const s0 = opts.series[0]?.[i];
+      const s1 = opts.series[1]?.[i];
+
+      const dot = (c: string) =>
+        `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${c};margin-right:6px;"></span>`;
+
+      const fmtVal = (v: any) => {
+        const n = Number.isFinite(v) ? Number(v) : 0;
+        if (isPercent) return `${Math.round(n)}%`;
+        if (metric === "revenue") return `${n.toFixed(2)}`;
+        return `${Math.round(n)}`;
+      };
+
+      return `
+        <div class="apexcharts-tooltip-custom" style="padding:10px 12px;">
+          <div style="font-weight:600;margin-bottom:6px;">${title}</div>
+          <div style="display:flex;flex-direction:column;gap:4px;">
+            ${typeof s0 !== "undefined" ? `<div style="display:flex;align-items:center;">${dot(colors[0])}<span style="margin-right:6px;">${activeSeries[0]?.name ?? "Current"}</span><strong>${fmtVal(s0)}</strong></div>` : ""}
+            ${typeof s1 !== "undefined" ? `<div style="display:flex;align-items:center;">${dot(colors[1])}<span style="margin-right:6px;">${activeSeries[1]?.name ?? "Previous"}</span><strong>${fmtVal(s1)}</strong></div>` : ""}
+          </div>
+        </div>
+      `;
+    };
+
+    return {
+      chart: { id: "unified-metric", type: "line", toolbar: { show: false }, animations: { enabled: true, easing: "easeinout", speed: 250 } },
+      colors,
+      xaxis: {
+        categories: activeLabels,
+        labels: { rotate: (range === "1m" || range === "6m" || range === "custom" || range === "this_month") ? -30 : 0 },
+        axisBorder: { color: "#e2e8f0" },
+        axisTicks: { color: "#e2e8f0" },
+      },
+      yaxis: {
+        title: {
+          text:
+            metric === "orders"
+              ? "Orders"
+              : metric === "jobs"
+                ? "Jobs"
+                : metric === "conversion"
+                  ? "Conversion %"
+                  : "Revenue",
+        },
+        labels: {
+          formatter: (v: number) => {
+            if (isPercent) return `${Math.round(v)}%`;
+            if (metric === "revenue") return `${v.toFixed(0)}`;
+            return `${Math.round(v)}`;
+          },
+        },
+        min: 0,
+        forceNiceScale: true,
+      },
+      grid: { borderColor: "#e2e8f0", strokeDashArray: 3 },
+      stroke: { width: activeSeries.length === 2 ? [3, 3] : 3, curve: "smooth", dashArray: [0, 6] },
+      legend: { position: "top", horizontalAlign: "center" },
+      markers: { size: hourGran ? 0 : 3, hover: { size: 4 } },
+      dataLabels: {
+        enabled: true,
+        offsetY: -6,
+        formatter: (val: number) => {
+          if (isPercent) return `${Math.round(val)}%`;
+          if (metric === "revenue") return `${val.toFixed(0)}`;
+          return `${Math.round(val)}`;
+        },
+        style: { fontWeight: 700 },
+        background: { enabled: true, foreColor: "#fff", borderRadius: 8, borderWidth: 0, opacity: 0.95 },
+      },
+      tooltip: { shared: true, intersect: false, custom: customTooltip },
+    } as const;
+  }, [
+    metric,
+    stats?.granularity,
+    jobsStats?.granularity,
+    revenueStats?.granularity,
+    activeLabels,
+    activeSeries,
+    ordersRawLabels,
+    jobsRawLabels,
+    revenueRawLabels,
+    range,
+    isPercent,
+  ]);
+
+  // ---------- UI ----------
+  return (
+    <main className="min-h-screen p-6 sm:p-8 bg-slate-50">
+      <h1 className="text-2xl sm:text-3xl font-semibold text-slate-800 mb-4">Welcome to Diffrun Admin Dashboard</h1>
+
+      <div className="flex flex-col md:flex-row items-start md:items-end gap-3 mb-4">
+        {/* Range dropdown */}
+        <div className="ml-0 md:ml-2">
+          <label className="block text-sm text-slate-600 mb-1">Range</label>
+          <select
+            value={range}
+            onChange={(e) => {
+              const val = e.target.value as RangeKey;
+              setRange(val);
+              if (val === "custom") setCustomApplied(false);
+              else setCustomApplied(true);
+            }}
+            className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 shadow-sm focus:outline-none focus:ring-2 focus:ring-slate-400"
+          >
+            <option value="1d">1 day</option>
+            <option value="1w">Last 7 days</option>
+            <option value="1m">Last 30 days</option>
+            <option value="this_month">This month</option>
+            <option value="6m">6 months (~182d)</option>
+            <option value="custom">Custom</option>
+          </select>
+        </div>
+
+        {/* Calendar controls for custom */}
+        {range === "custom" && (
+          <div className="flex items-end gap-2">
+            <div>
+              <label className="block text-sm text-slate-600 mb-1">Start date</label>
+              <input
+                type="date"
+                value={startDate}
+                onChange={(e) => { setStartDate(e.target.value); setCustomApplied(false); }}
+                className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm"
+              />
+            </div>
+            <div>
+              <label className="block text-sm text-slate-600 mb-1">End date</label>
+              <input
+                type="date"
+                value={endDate}
+                onChange={(e) => { setEndDate(e.target.value); setCustomApplied(false); }}
+                className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm"
+              />
+            </div>
+            <button
+              onClick={() => setCustomApplied(true)}
+              disabled={isCustomInvalid}
+              className={`h-10 px-4 rounded-lg text-white ${isCustomInvalid ? "bg-slate-400 cursor-not-allowed" : "bg-slate-800 hover:bg-slate-700"}`}
+              title={isCustomInvalid ? "Start date must be before or equal to End date" : "Apply range"}
+            >
+              Apply
+            </button>
+          </div>
+        )}
+
+        {/* Country dropdown */}
+        <div className="ml-0 md:ml-2">
+          <label className="block text-sm text-slate-600 mb-1">Country</label>
+          <select
+            value={country}
+            onChange={(e) => setCountry(e.target.value as CountryCode)}
+            className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 shadow-sm focus:outline-none focus:ring-2 focus:ring-slate-400"
+            aria-label="Select Country"
+          >
+            {COUNTRY_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      {range === "custom" && isCustomInvalid && (
+        <p className="mb-2 text-red-600 text-sm">Start date must be before or equal to End date.</p>
+      )}
+
+      {/* Metric tiles */}
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mb-2">
+        <button onClick={() => setMetric("orders")} className={`rounded-lg overflow-hidden shadow-sm border ${metric === "orders" ? "border-blue-500" : "border-slate-200"}`}>
+          <div className="bg-blue-600 text-white px-4 py-3">
+            <div className="text-sm opacity-90">Orders</div>
+            <div className="text-3xl font-semibold leading-tight">{(totals.orders.current)}</div>
+          </div>
+          <div className="px-4 py-2 text-sm text-slate-700">Prev: {totals.orders.prev}</div>
+        </button>
+
+        <button onClick={() => setMetric("jobs")} className={`rounded-lg overflow-hidden shadow-sm border ${metric === "jobs" ? "border-red-500" : "border-slate-200"}`}>
+          <div className="bg-red-600 text-white px-4 py-3">
+            <div className="text-sm opacity-90">Jobs</div>
+            <div className="text-3xl font-semibold leading-tight">{(totals.jobs.current)}</div>
+          </div>
+          <div className="px-4 py-2 text-sm text-slate-700">Prev: {totals.jobs.prev}</div>
+        </button>
+
+        <button onClick={() => setMetric("conversion")} className={`rounded-lg overflow-hidden shadow-sm border ${metric === "conversion" ? "border-amber-500" : "border-slate-200"}`}>
+          <div className="bg-amber-500 text-white px-4 py-3">
+            <div className="text-sm opacity-90">Conversion</div>
+            <div className="text-3xl font-semibold leading-tight">
+              {totals.conversion.current.toFixed(2)}%
+            </div>
+          </div>
+          <div className="px-4 py-2 text-sm text-slate-700">Prev: {totals.conversion.prev.toFixed(2)}%</div>
+        </button>
+
+        <button onClick={() => setMetric("revenue")} className={`rounded-lg overflow-hidden shadow-sm border ${metric === "revenue" ? "border-emerald-500" : "border-slate-200"}`}>
+          <div className="bg-emerald-600 text-white px-4 py-3">
+            <div className="text-sm opacity-90">Revenue</div>
+            <div className="text-3xl font-semibold leading-tight">{(totals.revenue.current.toFixed(0))}</div>
+          </div>
+          <div className="px-4 py-2 text-sm text-slate-700">Prev: {totals.revenue.prev.toFixed(0)}</div>
+        </button>
+      </div>
+
+      {(error || jobsError || revenueError) && (
+        <p className="mb-3 text-red-600">
+          {error ? `Orders error: ${error}` : jobsError ? `Jobs/Conversion error: ${jobsError}` : `Revenue error: ${revenueError}`}
+        </p>
+      )}
+
+      <section className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4 sm:p-6">
+        {(
+          (metric === "orders" && !stats) ||
+          ((metric === "jobs" || metric === "conversion") && !jobsStats) ||
+          (metric === "revenue" && !revenueStats)
+        ) ? (
+          <div className="h-48 rounded-xl bg-slate-100 animate-pulse" />
+        ) : (
+          <ReactApexChart
+            key={`${metric}-${range}-${country}-${activeLabels.length}-${customApplied ? "applied" : "pending"}`}
+            options={chartOptions as any}
+            series={activeSeries as any}
+            type="line"
+            height={360}
+          />
+        )}
+      </section>
+      {/* --- Shipment Status Table (NEW) --- */}
+      {country === "IN_ONLY" && (
+        <section className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4 sm:p-6 mt-6">
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-lg font-medium text-slate-800">Shipment Status India</h3>
+          <div className="flex items-center gap-2">
+            {/* You can later change this to a printer dropdown if you want */}
+            <button
+              onClick={() => setShowShipTable(prev => !prev)}
+              className="text-sm px-3 py-1 rounded bg-slate-200 hover:bg-slate-300"
+            >
+              {showShipTable ? "▲" : "▼"}
+            </button>
+            <button
+              onClick={() => {
+                // refresh
+                // refresh
+                setShipLoading(true);
+                setShipError("");
+                fetch(buildShipStatusUrl(range), { cache: "no-store" })
+                  .then((r) => (r.ok ? r.json() : Promise.reject(r.statusText)))
+                  .then((j) => {
+                    const activities = Array.isArray(j.activities) ? j.activities : [];
+                    const rows = Array.isArray(j.rows) ? j.rows : [];
+                    // normalize & sort as above
+                    const normalized = rows.map((r: any) => ({
+                      date: (r.date ?? r.label ?? "").toString(),
+                      total: Number.isFinite(r.total) ? r.total : 0,
+                      sent_to_print: Number.isFinite(r.sent_to_print)
+                        ? r.sent_to_print
+                        : (Number.isFinite(r.total) ? r.total : 0),
+                      counts: r.counts && typeof r.counts === "object" ? r.counts : {},
+                    })).sort((a: any, b: any) => {
+                      const da = a.date.length === 10 ? new Date(a.date + "T00:00:00Z") : new Date(a.date);
+                      const db = b.date.length === 10 ? new Date(b.date + "T00:00:00Z") : new Date(b.date);
+                      return db.getTime() - da.getTime();
+                    });
+                    setShipActivities(activities);
+                    setShipRows(normalized);
+                  })
+                  .catch((e) => setShipError(String(e)))
+                  .finally(() => setShipLoading(false));
+
+              }}
+              className="text-sm px-3 py-1 rounded bg-slate-100 hover:bg-slate-200"
+            >
+              Refresh
+            </button>
+          </div>
+        </div>
+
+        {shipLoading && <div className="text-sm text-slate-500">Loading shipment data…</div>}
+        {shipError && <div className="text-sm text-red-600">Error: {shipError}</div>}
+
+        {!shipLoading && shipRows.length === 0 && <div className="text-sm text-slate-500"></div>}
+
+        {showShipTable && !shipLoading && shipRows.length > 0 && (
+          <div className="overflow-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-slate-600 border-b">
+                  <th className="p-2">Date</th>
+                  {/* dynamic activity columns */}
+                  {shipActivities.map((act) => (
+                    <th key={act} className="p-2">{act}</th>
+                  ))}
+                  <th className="p-2">Sent to Print</th>
+                  <th className="p-2">Total</th>
+                  
+                </tr>
+              </thead>
+              <tbody>
+                {shipRows.map((r: any) => (
+                  <tr key={r.date} className="border-t hover:bg-slate-50">
+                    <td className="p-2">{r.date}</td>
+                    {/* render counts for each activity (fallback 0) */}
+                    {shipActivities.map((act) => (
+                      <td key={act} className="p-2">
+                        {Number(r.counts?.[act] ?? 0)}
+                      </td>
+                    ))}
+                    {/* NEW: Total orders for the day (loc-filtered) */}
+                    <td className="p-2 font-medium">
+                      {r.sent_to_print ?? r.total ?? 0}
+                    </td>
+                    <td className="p-2 font-medium">{r.total ?? 0}</td>
+                    {/* Sent to Print (genesis + yara) */}
+                    
+                  </tr>
+                ))}
+              </tbody>
+
+
+            </table>
+          </div>
+        )}
+      </section>)}
+      {/* --- end shipment status table --- */}
+
+    </main>
+  );
+}
