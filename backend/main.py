@@ -168,7 +168,7 @@ async def lifespan(app: FastAPI):
 
         scheduler.add_job(
             _kick_send_nudges,
-            trigger=CronTrigger(hour="14", minute="0", timezone=IST_TZ),
+            trigger=CronTrigger(hour="16", minute="0", timezone=IST_TZ),
             id="send_nudges_job",
             replace_existing=True,
             coalesce=True,
