@@ -75,7 +75,6 @@ export default function JobsPage() {
     const [search, setSearch] = useState("");
     const [totalJobs, setTotalJobs] = useState(0);
     const [loading, setLoading] = useState(false);
-    const [loading1, setLoading1] = useState(false);
     const router = useRouter();
 
     const handleSearch = (e: React.KeyboardEvent<HTMLInputElement>) => {
