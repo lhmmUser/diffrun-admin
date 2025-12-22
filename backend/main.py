@@ -6075,7 +6075,8 @@ def _presigned_urls_for_saved_files(files: List[str], expires_in: int = 3600) ->
     if not files:
         return []
     try:
-        s3, bucket = _get_s3_client()
+        bucket = os.getenv("REPLICACOMFY_BUCKET")
+        s3 = _get_s3_client()
     except HTTPException:
         raise
 
