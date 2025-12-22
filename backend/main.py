@@ -226,6 +226,16 @@ def _to_naive_utc(x):
 def health_check():
     return {"status": "ok"}
 
+def get_aws_region() -> str:
+    region = (os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION") or "").strip()
+    if not region:
+        raise HTTPException(status_code=500, detail="AWS region not configured")
+    return region
+
+def get_ec2_client():
+    region = get_aws_region()
+    return boto3.client("ec2", region_name=region)
+
 
 def split_full_name(full_name: str) -> tuple[str, str]:
     """Split a full name into first name and last name."""
@@ -1428,10 +1438,7 @@ client = MongoClient(MONGO_URI, tz_aware=True)
 db = client["candyman"]
 orders_collection = db["user_details"]
 
-s3 = boto3.client('s3',
-                  aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
-                  aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
-                  region_name=os.getenv("AWS_REGION"))
+s3 = boto3.client('s3')
 
 BUCKET_NAME = "replicacomfy"
 
@@ -4336,7 +4343,7 @@ def _get_ec2_status_rows():
         if not AWS_REGION:
             return [], "AWS region not set. Set AWS_REGION or AWS_DEFAULT_REGION."
 
-        ec2 = boto3.client("ec2", region_name=AWS_REGION)
+        ec2 = get_ec2_client()
         resp = ec2.describe_instances(InstanceIds=INSTANCE_IDS)
         reservations = resp.get("Reservations", [])
 
@@ -4395,7 +4402,7 @@ def _get_ec2_status_rows() -> Tuple[List[dict], Optional[str]]:
     Return (rows, err).  Skips any missing instance IDs instead of failing.
     rows schema includes keys used later: OnOff, Name, InstanceId (plus extras).
     """
-    ec2 = boto3.client("ec2", region_name=os.getenv("AWS_REGION", None))
+    ec2 = get_ec2_client()
 
     # Source of instance IDs: keep whatever you already use
     # Example: a global/list env. Do NOT change your current source; just read it.
@@ -4835,7 +4842,7 @@ def _format_ec2_status_table(rows: List[dict]) -> pd.DataFrame:
 
     # Resolve statuses from DescribeInstanceStatus (include stopped)
     status_map = {}
-    ec2 = boto3.client("ec2", region_name=os.getenv("AWS_REGION", None))
+    ec2 = get_ec2_client()
     ids = [i for i in df.get("InstanceId", []).tolist(
     ) if isinstance(i, str) and i.startswith("i-")]
     for i in range(0, len(ids), 100):
@@ -6039,30 +6046,16 @@ def patch_order(order_id: str, update: OrderUpdate):
 
 def _get_s3_client() -> Tuple[boto3.client, str]:
     bucket = os.getenv("REPLICACOMFY_BUCKET", "").strip()
-    region = os.getenv("AWS_REGION", "").strip()
-    access_key = os.getenv("AWS_ACCESS_KEY_ID", "").strip()
-    secret_key = os.getenv("AWS_SECRET_ACCESS_KEY", "").strip()
-
-    if not bucket:
-        raise HTTPException(
-            status_code=500, detail="REPLICACOMFY_BUCKET not configured")
-    if not region:
-        raise HTTPException(
-            status_code=500, detail="AWS_REGION not configured")
-    if not access_key or not secret_key:
-        raise HTTPException(
-            status_code=500, detail="AWS credentials not configured")
-
-    cfg = Config(signature_version="s3v4", region_name=region,
-                 retries={"max_attempts": 3, "mode": "standard"})
-    s3 = boto3.client(
+    region = get_aws_region()
+    return boto3.client(
         "s3",
         region_name=region,
-        aws_access_key_id=access_key,
-        aws_secret_access_key=secret_key,
-        config=cfg,
+        config=Config(
+            retries={"max_attempts": 3, "mode": "standard"}
+        )
     )
-    return s3, bucket
+
+   
 
 
 def _s3_key_for_input(filename: str) -> str:
@@ -6113,28 +6106,21 @@ def _presigned_urls_for_saved_files(files: List[str], expires_in: int = 3600) ->
     return urls
 
 
-def _get_s3_client_generic() -> boto3.client:
-    region = (os.getenv("AWS_REGION") or "").strip()
-    access = (os.getenv("AWS_ACCESS_KEY_ID") or "").strip()
-    secret = (os.getenv("AWS_SECRET_ACCESS_KEY") or "").strip()
-    if not region or not access or not secret:
+def _get_s3_client_generic():
+    region = (os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION") or "").strip()
+    if not region:
         raise HTTPException(
-            status_code=500, detail="AWS credentials/region not configured")
+            status_code=500,
+            detail="AWS region not configured"
+        )
 
     return boto3.client(
         "s3",
         region_name=region,
-        aws_access_key_id=access,
-        aws_secret_access_key=secret,
-        # force regional endpoint
-        endpoint_url=f"https://s3.{region}.amazonaws.com",
         config=Config(
-            signature_version="s3v4",
-            retries={"max_attempts": 3, "mode": "standard"},
-            s3={"addressing_style": "virtual"}  # virtual-hosted–style URLs
+            retries={"max_attempts": 3, "mode": "standard"}
         ),
     )
-
 
 def _list_objects_with_prefix(s3, bucket: str, prefix: str, max_collect: int = 1000) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
