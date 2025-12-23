@@ -6651,69 +6651,524 @@ def shiprocket_order_show(internal_order_id: str):
     }
 
 
-'''
-@app.post("/admin/sync-shipping-fields-once")
-def sync_shipping_fields_once(limit: int = None):
+from fastapi import Query
+from typing import Optional, Dict, Any
+from datetime import datetime, timedelta, timezone
+
+
+def _parse_iso_utc(dt):
     """
-    One-time sync:
-    Copy these from shipping_details.shiprocket_data → user_details:
-        - current_status
-        - current_timestamp_iso
-
-    Matched by order_id.
+    Safely parse ISO datetime string or datetime to UTC-aware datetime.
+    Returns None if invalid.
     """
-    total = 0
-    updated = 0
-    skipped_no_order = 0
-    skipped_missing_fields = 0
-    errors = 0
-    sample_errors = {}
+    if not dt:
+        return None
 
-    cursor = shipping_collection.find({})
-    if limit and limit > 0:
-        cursor = cursor.limit(limit)
+    if isinstance(dt, datetime):
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
-    for doc in cursor:
-        total += 1
+    if isinstance(dt, str):
         try:
-            order_id = doc.get("order_id")
-            if not order_id:
-                skipped_no_order += 1
-                continue
+            parsed = datetime.fromisoformat(dt)
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        except Exception:
+            return None
 
-            ship_data = doc.get("shiprocket_data", {}) or {}
+    return None
 
-            current_status = ship_data.get("current_status")
-            current_timestamp_iso = ship_data.get("current_timestamp_iso")
+@app.get("/stats/sla-cohorts")
+def stats_sla_cohorts(
+    start_date: str = Query(..., description="YYYY-MM-DD (processed_at cohort)"),
+    end_date: str = Query(..., description="YYYY-MM-DD (processed_at cohort)"),
+    cohort_date: Optional[str] = Query(
+        None, description="YYYY-MM-DD for table drill-down"
+    ),
+):
+    start_ist = _ist_midnight(_parse_ymd_ist(start_date))
+    end_ist = _ist_midnight(_parse_ymd_ist(end_date)) + timedelta(days=1)
 
-            if current_status is None or current_timestamp_iso is None:
-                skipped_missing_fields += 1
-                continue
+    start_utc = start_ist.astimezone(timezone.utc)
+    end_utc = end_ist.astimezone(timezone.utc)
 
-            res = orders_collection.update_one(
-                {"order_id": order_id},
-                {
-                    "$set": {
-                        "current_status": current_status,
-                        "current_timestamp_iso": current_timestamp_iso
-                    }
-                }
-            )
+    # -------------------------------------------------
+    # Mongo query
+    # -------------------------------------------------
+    base_query = {
+        "paid": True,
+        "processed_at": {"$gte": start_utc, "$lt": end_utc},
+        "printer": {"$in": ["Genesis", "Yara"]},
+        "order_id": {"$regex": r"^#\d+(_\d+)?$"},
+    }
 
-            if res.modified_count > 0:
-                updated += 1
+    projection = {
+        "_id": 0,
+        "order_id": 1,
+        "processed_at": 1,
+        "current_status": 1,
+        "current_timestamp_iso": 1,  # used ONLY if DELIVERED
+    }
 
-        except Exception as e:
-            errors += 1
-            if len(sample_errors) < 5:
-                sample_errors[str(order_id)] = str(e)
+    docs = list(orders_collection.find(base_query, projection))
+
+    cohorts: Dict[str, Dict[str, Any]] = {}
+
+    # -------------------------------------------------
+    # Core processing
+    # -------------------------------------------------
+    for d in docs:
+        processed_at = d.get("processed_at")
+        if not processed_at:
+            continue
+
+        # Cohort key = processed_at date (IST)
+        proc_date_ist = processed_at.astimezone(IST_TZ).date()
+        cohort_key = proc_date_ist.isoformat()
+
+        status = (d.get("current_status") or "").upper()
+        is_delivered = status == "DELIVERED"
+
+        # -----------------------------
+        # SLA check (strict & safe)
+        # -----------------------------
+        delivered_in_8_days = "NO"
+
+        if is_delivered:
+            delivered_at = _parse_iso_utc(d.get("current_timestamp_iso"))
+
+            if delivered_at:
+                delta_days = (delivered_at - processed_at).days
+                if delta_days <= 8:
+                    delivered_in_8_days = "YES"
+
+        cohorts.setdefault(
+            cohort_key,
+            {
+                "total": 0,
+                "delivered": 0,
+                "undelivered": 0,
+                "orders": [],
+            },
+        )
+
+        c = cohorts[cohort_key]
+        c["total"] += 1
+
+        if is_delivered:
+            c["delivered"] += 1
+        else:
+            c["undelivered"] += 1
+
+        c["orders"].append(
+            {
+                "order_id": d["order_id"],
+                "processed_at": processed_at,
+                "current_status": d.get("current_status"),
+                "delivered_in_8_days": delivered_in_8_days,
+                "delivered_at": d.get("current_timestamp_iso") if is_delivered else None,
+            }
+        )
+
+    # -------------------------------------------------
+    # Drill-down table (date click)
+    # -------------------------------------------------
+    if cohort_date:
+        bucket = cohorts.get(cohort_date)
+        if not bucket:
+            return []
+        return bucket["orders"]
+
+    # -------------------------------------------------
+    # Summary for bar chart
+    # -------------------------------------------------
+    response = []
+
+    for day in sorted(cohorts.keys()):
+        c = cohorts[day]
+        total = c["total"]
+
+        response.append(
+            {
+                "processed_date": day,
+                "delivered_pct": round(c["delivered"] * 100 / total, 1),
+                "undelivered_pct": round(c["undelivered"] * 100 / total, 1),
+                "total_orders": total,
+            }
+        )
+
+    return response
+
+@app.get("/stats/sla-summary")
+def stats_sla_summary(
+    start_date: str = Query(...),
+    end_date: str = Query(...)
+):
+    start_ist = _ist_midnight(_parse_ymd_ist(start_date))
+    end_ist = _ist_midnight(_parse_ymd_ist(end_date)) + timedelta(days=1)
+
+    start_utc = start_ist.astimezone(timezone.utc)
+    end_utc = end_ist.astimezone(timezone.utc)
+
+    query = {
+        "paid": True,
+        "processed_at": {"$gte": start_utc, "$lt": end_utc},
+        "printer": {"$in": ["Genesis", "Yara"]},
+        "order_id": {"$regex": r"^#\d+(_\d+)?$"},
+    }
+
+    projection = {
+        "_id": 0,
+        "processed_at": 1,
+        "current_status": 1,
+        "current_timestamp_iso": 1,
+    }
+
+    docs = list(orders_collection.find(query, projection))
+
+    delivered = 0
+    undelivered = 0
+
+    for d in docs:
+        status = (d.get("current_status") or "").upper()
+
+        if status == "DELIVERED":
+            delivered_at = _parse_iso_utc(d.get("current_timestamp_iso"))
+            if delivered_at:
+                delta = (delivered_at - d["processed_at"]).days
+                if delta <= 8:
+                    delivered += 1
+                else:
+                    undelivered += 1
+            else:
+                undelivered += 1
+        else:
+            undelivered += 1
 
     return {
-        "total_shipping_docs": total,
-        "updated_user_details": updated,
-        "skipped_no_order_id": skipped_no_order,
-        "skipped_missing_fields": skipped_missing_fields,
-        "errors": errors,
-        "sample_errors": sample_errors,
+        "delivered_within_8_days": delivered,
+        "not_delivered_within_8_days": undelivered,
+        "total_orders": delivered + undelivered,
     }
-'''
+
+
+@app.get("/stats/delivery-latency-cohorts")
+def delivery_latency_cohorts(
+    start_date: str = Query(..., description="YYYY-MM-DD"),
+    end_date: str = Query(..., description="YYYY-MM-DD"),
+):
+    # -----------------------------
+    # Date range (IST → UTC)
+    # -----------------------------
+    start_ist = _ist_midnight(_parse_ymd_ist(start_date))
+    end_ist = _ist_midnight(_parse_ymd_ist(end_date)) + timedelta(days=1)
+
+    start_utc = start_ist.astimezone(timezone.utc)
+    end_utc = end_ist.astimezone(timezone.utc)
+
+    # -----------------------------
+    # Mongo query — ALL orders
+    # -----------------------------
+    query = {
+        "paid": True,
+        "processed_at": {"$gte": start_utc, "$lt": end_utc},
+        "printer": {"$in": ["Genesis", "Yara"]},
+        "order_id": {"$regex": r"^#\d+(_\d+)?$"},
+    }
+
+    projection = {
+        "_id": 0,
+        "processed_at": 1,
+        "current_status": 1,
+        "current_timestamp_iso": 1,
+    }
+
+    docs = list(orders_collection.find(query, projection))
+
+    # -----------------------------
+    # Buckets by processed date
+    # -----------------------------
+    buckets_by_day: Dict[str, Dict[str, Any]] = {}
+
+    for d in docs:
+        processed_at = d.get("processed_at")
+        if not processed_at:
+            continue
+
+        cohort_day = processed_at.astimezone(IST_TZ).date().isoformat()
+
+        buckets_by_day.setdefault(
+            cohort_day,
+            {
+                "total_orders": 0,
+                "delivered_orders": 0,
+                "day_le_3": 0,   # 👈 NEW
+                "day_4": 0,
+                "day_5": 0,
+                "day_6": 0,
+                "day_7": 0,
+                "day_8": 0,
+                "day_9": 0,
+                "day_10_plus": 0,
+            },
+        )
+
+        c = buckets_by_day[cohort_day]
+
+        # ✅ Count ALL orders
+        c["total_orders"] += 1
+
+        # Only delivered orders go into buckets
+        status = (d.get("current_status") or "").strip().upper()
+        if status != "DELIVERED":
+            continue
+
+        delivered_at = _parse_iso_utc(d.get("current_timestamp_iso"))
+        if not delivered_at:
+            continue
+
+        c["delivered_orders"] += 1
+
+        days_taken = (delivered_at - processed_at).days
+
+        # -----------------------------
+        # NEW BUCKET LOGIC
+        # -----------------------------
+        if days_taken <= 3:
+            c["day_le_3"] += 1
+        elif days_taken == 4:
+            c["day_4"] += 1
+        elif days_taken == 5:
+            c["day_5"] += 1
+        elif days_taken == 6:
+            c["day_6"] += 1
+        elif days_taken == 7:
+            c["day_7"] += 1
+        elif days_taken == 8:
+            c["day_8"] += 1
+        elif days_taken == 9:
+            c["day_9"] += 1
+        elif days_taken >= 10:
+            c["day_10_plus"] += 1
+
+    # -----------------------------
+    # Build response + TOTAL row
+    # -----------------------------
+    response = []
+
+    total_acc = {
+        "total_orders": 0,
+        "delivered_orders": 0,
+        "day_le_3": 0,
+        "day_4": 0,
+        "day_5": 0,
+        "day_6": 0,
+        "day_7": 0,
+        "day_8": 0,
+        "day_9": 0,
+        "day_10_plus": 0,
+    }
+
+    for day in sorted(buckets_by_day.keys()):
+        c = buckets_by_day[day]
+        total = c["total_orders"] or 1
+
+        # accumulate raw counts
+        for k in total_acc:
+            total_acc[k] += c.get(k, 0)
+
+        response.append(
+            {
+                "processed_date": day,
+                "total_orders": c["total_orders"],
+                "delivered_orders": c["delivered_orders"],
+                "day_le_3": round(c["day_le_3"] * 100 / total, 1),
+                "day_4": round(c["day_4"] * 100 / total, 1),
+                "day_5": round(c["day_5"] * 100 / total, 1),
+                "day_6": round(c["day_6"] * 100 / total, 1),
+                "day_7": round(c["day_7"] * 100 / total, 1),
+                "day_8": round(c["day_8"] * 100 / total, 1),
+                "day_9": round(c["day_9"] * 100 / total, 1),
+                "day_10_plus": round(c["day_10_plus"] * 100 / total, 1),
+            }
+        )
+
+    grand_total = total_acc["total_orders"] or 1
+
+    response.append(
+        {
+            "processed_date": "TOTAL",
+            "total_orders": total_acc["total_orders"],
+            "delivered_orders": total_acc["delivered_orders"],
+            "day_le_3": round(total_acc["day_le_3"] * 100 / grand_total, 1),
+            "day_4": round(total_acc["day_4"] * 100 / grand_total, 1),
+            "day_5": round(total_acc["day_5"] * 100 / grand_total, 1),
+            "day_6": round(total_acc["day_6"] * 100 / grand_total, 1),
+            "day_7": round(total_acc["day_7"] * 100 / grand_total, 1),
+            "day_8": round(total_acc["day_8"] * 100 / grand_total, 1),
+            "day_9": round(total_acc["day_9"] * 100 / grand_total, 1),
+            "day_10_plus": round(total_acc["day_10_plus"] * 100 / grand_total, 1),
+        }
+    )
+
+    return response
+
+from datetime import datetime
+from typing import Optional
+from fastapi import APIRouter
+from pymongo.collection import Collection
+
+router = APIRouter()
+
+SHIPPED_STATUSES = {
+    "PICKED UP",
+    "IN TRANSIT",
+    "OUT FOR DELIVERY",
+    "DELIVERED",
+    "REACHED AT DESTINATION HUB",
+}
+
+@app.get("/stats/production-kpis")
+def production_kpis():
+    query = {
+        "paid": True,
+        "printer": {"$in": ["Genesis", "Yara"]},
+        "order_id": {"$regex": r"^#\d+(_\d+)?$"},
+    }
+
+    projection = {
+        "_id": 0,
+        "printer": 1,
+        "current_status": 1,
+    }
+
+    docs = list(orders_collection.find(query, projection))
+
+    genesis_total = yara_total = 0
+    genesis_in_prod = yara_in_prod = 0
+    genesis_shipped = yara_shipped = 0
+
+    for d in docs:
+        printer = (d.get("printer") or "").strip().lower()
+        status = (d.get("current_status") or "").strip().upper()
+        is_shipped = status in SHIPPED_STATUSES
+
+        if printer == "genesis":
+            genesis_total += 1
+            if is_shipped:
+                genesis_shipped += 1
+            else:
+                genesis_in_prod += 1
+
+        elif printer == "yara":
+            yara_total += 1
+            if is_shipped:
+                yara_shipped += 1
+            else:
+                yara_in_prod += 1
+
+    return {
+        "in_production": {
+            "genesis": genesis_in_prod,
+            "yara": yara_in_prod,
+        },
+        "shipped": {
+            "genesis": genesis_shipped,
+            "yara": yara_shipped,
+        },
+        "total_sent": {
+            "genesis": genesis_total,
+            "yara": yara_total,
+        },
+    }
+
+
+
+from datetime import timedelta, timezone
+from fastapi import Query
+
+@app.get("/stats/production-kpis-graph")
+def production_kpis_graph(
+    start_date: str = Query(..., description="YYYY-MM-DD"),
+    end_date: str = Query(..., description="YYYY-MM-DD"),
+):
+    """
+    Date-filtered KPIs.
+    Used ONLY for Production vs Shipped graph.
+    """
+
+    # -----------------------------
+    # Date range (IST → UTC)
+    # -----------------------------
+    try:
+        start_ist = _ist_midnight(_parse_ymd_ist(start_date))
+        end_ist = _ist_midnight(_parse_ymd_ist(end_date)) + timedelta(days=1)
+
+        start_utc = start_ist.astimezone(timezone.utc)
+        end_utc = end_ist.astimezone(timezone.utc)
+    except Exception:
+        return {"error": "Invalid date format. Use YYYY-MM-DD"}
+
+    # -----------------------------
+    # Mongo query
+    # -----------------------------
+    query = {
+        "paid": True,
+        "processed_at": {"$gte": start_utc, "$lt": end_utc},
+        "printer": {"$in": ["Genesis", "Yara"]},
+        "order_id": {"$regex": r"^#\d+(_\d+)?$"},
+    }
+
+    projection = {
+        "_id": 0,
+        "printer": 1,
+        "current_status": 1,
+    }
+
+    docs = list(orders_collection.find(query, projection))
+
+    # -----------------------------
+    # Buckets
+    # -----------------------------
+    genesis_in_prod = []
+    yara_in_prod = []
+
+    genesis_shipped = []
+    yara_shipped = []
+
+    # -----------------------------
+    # Core logic (same as before)
+    # -----------------------------
+    for d in docs:
+        printer = (d.get("printer") or "").strip().lower()
+        status = (d.get("current_status") or "").strip().upper()
+
+        is_shipped = status in SHIPPED_STATUSES
+
+        if printer == "genesis":
+            if is_shipped:
+                genesis_shipped.append(1)
+            else:
+                genesis_in_prod.append(1)
+
+        elif printer == "yara":
+            if is_shipped:
+                yara_shipped.append(1)
+            else:
+                yara_in_prod.append(1)
+
+    # -----------------------------
+    # Response (EXACT format you want)
+    # -----------------------------
+    return {
+        "in_production": {
+            "genesis": len(genesis_in_prod),
+            "yara": len(yara_in_prod),
+        },
+        "shipped": {
+            "genesis": len(genesis_shipped),
+            "yara": len(yara_shipped),
+        },
+        "range": {
+            "start_date": start_date,
+            "end_date": end_date,
+        },
+    }
