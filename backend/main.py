@@ -68,6 +68,8 @@ from fastapi import HTTPException, Body
 from pydantic import BaseModel, EmailStr
 from datetime import datetime, timezone
 from pydantic import BaseModel, EmailStr
+import builtins
+
 
 
 IST_TZ = pytz.timezone("Asia/Kolkata")
@@ -967,7 +969,7 @@ def stats_revenue(
     }
 
 
-# --- START: dynamic-activity ship-status endpoint (ONLY shiprocket_data.scans[*].activity) ---
+# --- START: dynamic-activity ship-status endpoint (ONLY shiprocket_data.scans[*].activity) in Dashboard page ---
 
 
 @app.get("/stats/ship-status")
@@ -1177,10 +1179,15 @@ def stats_ship_status(
 
 
 ################################### Shipment Status Endpoint V2 ####################################
-# --- START: dynamic-activity ship-status endpoint (ONLY shiprocket_data.scans[*].activity) -------
+# --- START: dynamic-activity ship-status endpoint (ONLY shiprocket_data.scans[*].activity) in Shipment status page -------
 ################################### Shipment Status Endpoint V2 ####################################
 ################################### Shipment Status Endpoint V2 ####################################
 
+from fastapi import Query
+from datetime import datetime, timedelta, timezone
+from collections import defaultdict
+from typing import Optional
+from dateutil import parser as date_parser
 
 @app.get("/stats/ship-status-v2")
 def stats_ship_status_v2(
@@ -1193,19 +1200,26 @@ def stats_ship_status_v2(
     """
     Shipment Status V2
     Uses ONLY orders_collection.current_status
+    Adds pending_age_chart with order_ids for NO-status orders
     """
 
     exclude_codes = ["TEST", "COLLAB", "REJECTED"]
     exclude_set = {c.upper() for c in exclude_codes}
 
+    # --------------------------------------------------
     # Location match
+    # --------------------------------------------------
     try:
         loc_match = _build_loc_match(loc)
     except Exception:
         loc_match = None
 
-    # --- 1) Determine Period ---
+    # --------------------------------------------------
+    # 1) Determine Period
+    # --------------------------------------------------
     now_utc = datetime.now(timezone.utc)
+    now_ist = now_utc.astimezone(IST_TZ)
+
     effective_range = "1w" if range == "1d" else range
 
     try:
@@ -1216,15 +1230,20 @@ def stats_ship_status_v2(
             cs, ce, ps, pe, gran = _periods(effective_range, now_utc)
             labels = _labels_for(effective_range, cs, ce)
     except Exception:
-        today = datetime.now(timezone.utc)
         labels = []
         for i in range(6, -1, -1):
-            d = (today - timedelta(days=i)).astimezone(IST_TZ)
+            d = (now_ist - timedelta(days=i))
             labels.append(d.strftime("%Y-%m-%d"))
         cs = ce = None
 
-    # --- 2) Base order query ---
-    base_match = {"paid": True, "processed_at": {"$exists": True, "$ne": None}}
+    # --------------------------------------------------
+    # 2) Base order query
+    # --------------------------------------------------
+    base_match = {
+        "paid": True,
+        "processed_at": {"$exists": True, "$ne": None},
+    }
+
     if loc_match:
         base_match = {"$and": [base_match, loc_match]}
 
@@ -1246,9 +1265,13 @@ def stats_ship_status_v2(
 
     cursor = orders_collection.find(base_match, projection)
 
-    # --- 3) Organize orders ---
+    # --------------------------------------------------
+    # 3) Organize orders
+    # --------------------------------------------------
     orders_by_date = {k.split(" ")[0]: [] for k in labels}
-    order_printer_map = {}
+
+    # ✅ CHANGED: store order_ids per age bucket
+    pending_age_buckets = defaultdict(list)
 
     for doc in cursor:
         try:
@@ -1263,41 +1286,51 @@ def stats_ship_status_v2(
             if not dt:
                 continue
 
-            ist_d = dt.astimezone(IST_TZ).strftime("%Y-%m-%d")
-            if ist_d not in orders_by_date:
+            dt_ist = dt.astimezone(IST_TZ)
+            ist_date = dt_ist.strftime("%Y-%m-%d")
+
+            if ist_date not in orders_by_date:
                 continue
 
-            oid = doc.get("order_id")
             printer_val = (doc.get("printer") or "").strip().lower()
-
-            order_printer_map[oid] = printer_val
-
             if printer and printer.lower() not in ("all", ""):
                 if printer_val != printer.lower():
                     continue
 
-            orders_by_date[ist_d].append({
+            status = (doc.get("current_status") or "").strip().lower()
+            oid = doc.get("order_id")
+
+            
+            if status != "delivered" and printer_val!="cloudprinter":
+                age_days = (now_ist.date() - dt_ist.date()).days
+                if age_days >= 0:
+                    pending_age_buckets[age_days].append(oid)
+
+
+            orders_by_date[ist_date].append({
                 "order_id": oid,
-                "current_status": (doc.get("current_status") or "").strip().lower(),
-                "printer": printer_val
+                "current_status": status,
+                "printer": printer_val,
             })
 
         except Exception:
             continue
 
-    # --- 4) Build rows per day ---
+    # --------------------------------------------------
+    # 4) Build rows per day
+    # --------------------------------------------------
     rows = []
+
     for lbl in labels:
         date_key = lbl.split(" ")[0]
         day_orders = orders_by_date.get(date_key, [])
 
-        # buckets
         unapproved_ids = []
         new_ids = []
         sent_to_print_ids = []
         out_for_pickup_ids = []
         pickup_exception_ids = []
-        shipped_ids = []     # <-- NEW
+        shipped_ids = []
         delivered_ids = []
         issue_ids = []
 
@@ -1306,40 +1339,32 @@ def stats_ship_status_v2(
             printer_val = od["printer"]
             status = od["current_status"]
 
-            # 1) Unapproved
             if not printer_val:
                 unapproved_ids.append(oid)
 
-            # 2) Sent to Print
             if printer_val in ("genesis", "yara"):
                 sent_to_print_ids.append(oid)
 
-            # 3) NEW (no status)
             if not status:
                 new_ids.append(oid)
                 continue
 
-            # 4) Pickup Exception
             if "pickup exception" in status:
                 pickup_exception_ids.append(oid)
                 continue
 
-            # 5) Out for Pickup
             if "out for pickup" in status:
                 out_for_pickup_ids.append(oid)
                 continue
 
-            # 6) Delivered
             if "delivered" in status:
                 delivered_ids.append(oid)
                 continue
 
-            # 7) Issue category
             if "issue" in status or "rto" in status or "undelivered" in status:
                 issue_ids.append(oid)
                 continue
 
-            # 8) SHIPPED (NEW RULE)
             if (
                 "picked up" in status
                 or "pickup done" in status
@@ -1349,7 +1374,6 @@ def stats_ship_status_v2(
                 shipped_ids.append(oid)
                 continue
 
-            # 9) Fallback → treat unknown as shipped
             shipped_ids.append(oid)
 
         rows.append({
@@ -1371,8 +1395,8 @@ def stats_ship_status_v2(
             "pickup_exception": len(pickup_exception_ids),
             "pickup_exception_ids": pickup_exception_ids,
 
-            "shipped": len(shipped_ids),               
-            "shipped_ids": shipped_ids,              
+            "shipped": len(shipped_ids),
+            "shipped_ids": shipped_ids,
 
             "delivered": len(delivered_ids),
             "delivered_ids": delivered_ids,
@@ -1381,9 +1405,31 @@ def stats_ship_status_v2(
             "issue_ids": issue_ids,
         })
 
+    # --------------------------------------------------
+    # 5) Build pending age chart (FINAL)
+    # --------------------------------------------------
+    if pending_age_buckets:
+        min_day = min(pending_age_buckets.keys())
+        max_day = max(pending_age_buckets.keys())
+    else:
+        min_day = max_day = 0
+
+    pending_age_chart = []
+
+    for day in builtins.range(min_day, max_day + 1):
+        order_ids = pending_age_buckets.get(day, [])
+
+        pending_age_chart.append({
+            "label": f"{day} days",
+            "value": len(order_ids),
+            "order_ids": order_ids,
+        })
+
+
     return {
         "labels": labels,
         "rows": rows,
+        "pending_age_chart": pending_age_chart,
         "printer": printer or "all",
     }
 

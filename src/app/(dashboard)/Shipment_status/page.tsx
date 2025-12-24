@@ -34,14 +34,21 @@ type ShipRow = {
   issue_ids?: string[];
 };
 
+type PendingAgeRow = {
+  label: string;
+  value: number;
+  order_ids: string[];
+};
+
+
 export default function ShipmentStatusPage() {
   const baseUrl =
     process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
 
   const todayISO = new Date().toISOString().slice(0, 10);
   const monthAgoISO = new Date(Date.now() - 30 * 86400000)
-  .toISOString()
-  .slice(0, 10);
+    .toISOString()
+    .slice(0, 10);
 
 
   const [range, setRange] = useState<RangeKey>("1m");
@@ -54,6 +61,8 @@ export default function ShipmentStatusPage() {
   const [shipRows, setShipRows] = useState<ShipRow[]>([]);
   const [shipError, setShipError] = useState<string>("");
   const [shipLoading, setShipLoading] = useState<boolean>(false);
+
+  const [pendingAgeChart, setPendingAgeChart] = useState<PendingAgeRow[]>([]);
 
   const [modalOpen, setModalOpen] = useState(false);
   const [modalDate, setModalDate] = useState("");
@@ -131,7 +140,10 @@ export default function ShipmentStatusPage() {
           return r.text().then((txt) => Promise.reject(txt || r.status));
         return r.json();
       })
-      .then((json) => setShipRows(parseRows(json)))
+      .then((json) => {
+        setShipRows(parseRows(json));
+        setPendingAgeChart(json.pending_age_chart || []);
+      })
       .catch((err) => {
         console.error("ship-status-v2 fetch error:", err);
         setShipError(String(err));
@@ -162,16 +174,10 @@ export default function ShipmentStatusPage() {
 
   const goToShipmentOrders = (ids: string[]) => {
     if (!ids || ids.length === 0) return;
-
     const params = new URLSearchParams();
     ids.forEach(id => params.append("order_ids", id));
-
     window.location.href = `/Shipment_orders?${params.toString()}`;
-
-
-
   };
-
 
   return (
     <main className="min-h-screen p-6 sm:p-8 bg-slate-50">
@@ -236,8 +242,8 @@ export default function ShipmentStatusPage() {
               onClick={() => setCustomApplied(true)}
               disabled={isCustomInvalid}
               className={`h-10 px-4 rounded-lg text-white ${isCustomInvalid
-                  ? "bg-slate-400 cursor-not-allowed"
-                  : "bg-slate-800 hover:bg-slate-700"
+                ? "bg-slate-400 cursor-not-allowed"
+                : "bg-slate-800 hover:bg-slate-700"
                 }`}
             >
               Apply
@@ -250,108 +256,146 @@ export default function ShipmentStatusPage() {
         <p className="text-red-600 mb-2 text-sm">Error: {shipError}</p>
       )}
 
-      {/* TABLE */}
+      {/* TABLE + NEW REQUIREMENT */}
       {!shipLoading && shipRows.length > 0 && (
-        <section className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4 sm:p-6">
-          <div className="flex items-center justify-between mb-4">
-            <h3 className="text-lg font-medium text-slate-800">
-              Shipment Status India
-            </h3>
-            <button
-              onClick={handleRefresh}
-              className="text-sm px-3 py-1 rounded bg-slate-100 hover:bg-slate-200"
-            >
-              Refresh
-            </button>
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+
+          {/* LEFT: EXISTING TABLE — UNCHANGED */}
+          <div>
+            <section className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4 sm:p-6 w-full">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-lg font-medium text-slate-800">
+                  Shipment Status India
+                </h3>
+                <button
+                  onClick={handleRefresh}
+                  className="text-sm px-3 py-1 rounded bg-slate-100 hover:bg-slate-200"
+                >
+                  Refresh
+                </button>
+              </div>
+
+              <div className="overflow-y-auto h-[calc(100vh-280px)] border rounded-lg">
+                <table className="w-full text-sm">
+                  <thead className="sticky top-0 bg-white z-10 shadow-sm">
+                    <tr className="text-left text-slate-600 border-b">
+                      <th className="p-2">Date</th>
+                      <th className="p-2">New</th>
+                      <th className="p-2">Sent to Print</th>
+                      <th className="p-2">Out for Pickup</th>
+                      <th className="p-2">Pickup Exception</th>
+                      <th className="p-2">Shipped</th>
+                      <th className="p-2">Issue</th>
+                      <th className="p-2">Delivered</th>
+                      <th className="p-2">Total</th>
+                    </tr>
+                  </thead>
+
+                  <tbody>
+                    {shipRows.map((r) => (
+                      <tr key={r.date} className="border-t hover:bg-slate-50">
+                        <td className="p-2">{r.date}</td>
+
+                        <td className="p-2 text-blue-600 cursor-pointer"
+                          onClick={() => goToShipmentOrders(r.unapproved_ids || [])}>
+                          {r.unapproved}
+                        </td>
+
+                        <td className="p-2 text-blue-600 cursor-pointer"
+                          onClick={() => goToShipmentOrders(r.sent_to_print_ids || [])}>
+                          {r.sent_to_print}
+                        </td>
+
+                        <td className="p-2 text-blue-600 cursor-pointer"
+                          onClick={() => goToShipmentOrders(r.out_for_pickup_ids || [])}>
+                          {r.out_for_pickup}
+                        </td>
+
+                        <td className="p-2 text-blue-600 cursor-pointer"
+                          onClick={() => goToShipmentOrders(r.pickup_exception_ids || [])}>
+                          {r.pickup_exception}
+                        </td>
+
+                        <td className="p-2 text-blue-600 cursor-pointer"
+                          onClick={() => goToShipmentOrders(r.shipped_ids || [])}>
+                          {r.shipped}
+                        </td>
+
+                        <td className="p-2 text-blue-600 cursor-pointer"
+                          onClick={() => goToShipmentOrders(r.issue_ids || [])}>
+                          {r.issue}
+                        </td>
+
+                        <td className="p-2 text-blue-600 cursor-pointer"
+                          onClick={() => goToShipmentOrders(r.delivered_ids || [])}>
+                          {r.delivered}
+                        </td>
+
+                        <td className="p-2 font-medium">{r.total}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
           </div>
 
-          <div className="overflow-y-auto max-h-[600px] border rounded-lg">
-            <table className="w-full text-sm">
-              <thead className="sticky top-0 bg-white z-10 shadow-sm">
-                <tr className="text-left text-slate-600 border-b">
-                  <th className="p-2">Date</th>
-                  <th className="p-2">New</th>
-                  <th className="p-2">Sent to Print</th>
-                  <th className="p-2">Out for Pickup</th>
-                  <th className="p-2">Pickup Exception</th>
-                  <th className="p-2">Shipped</th>
-                  <th className="p-2">Issue</th>
-                  <th className="p-2">Delivered</th>
-                  <th className="p-2">Total</th>
-                </tr>
-              </thead>
+          <div>
+            <section className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4 sm:p-6">
+              <h3 className="text-lg font-medium text-slate-800 mb-4">
+                Orders by Age
+              </h3>
 
-              <tbody>
-                {shipRows.map((r) => (
-                  <tr key={r.date} className="border-t hover:bg-slate-50">
-                    <td className="p-2">{r.date}</td>
+              {pendingAgeChart.length === 0 ? (
+                <p className="text-sm text-slate-500">No pending orders</p>
+              ) : (
+                <>
+                  {(() => {
+                    // ✅ define max ONCE (fixes TS error + performance)
+                    const max = Math.max(
+                      ...pendingAgeChart.map((d) => d.value),
+                      1
+                    );
 
-                    {/* Unapproved */}
-                    <td
-                      className="p-2 text-blue-600 cursor-pointer"
-                      onClick={() => goToShipmentOrders(r.unapproved_ids || [])}
-                    >
-                      {r.unapproved}
-                    </td>
+                    return (
+                      <div className="overflow-y-auto h-[calc(100vh-340px)] pr-2 space-y-4">
+                        {pendingAgeChart.map((row) => (
+                          <div
+                            key={row.label}   // ✅ fixes React key warning
+                            className="flex items-center gap-3"
+                          >
+                            {/* Label */}
+                            <div className="w-16 text-sm font-medium text-blue-600">
+                              {row.label}
+                            </div>
 
-                    {/* Sent to Print */}
-                    <td
-                      className="p-2 text-blue-600 cursor-pointer"
-                      onClick={() => goToShipmentOrders(r.sent_to_print_ids || [])}
-                    >
-                      {r.sent_to_print}
-                    </td>
-
-
-
-                    {/* Out for Pickup */}
-                    <td
-                      className="p-2 text-blue-600 cursor-pointer"
-                      onClick={() => goToShipmentOrders(r.out_for_pickup_ids || [])}
-                    >
-                      {r.out_for_pickup}
-                    </td>
-
-                    {/* Pickup Exception */}
-                    <td
-                      className="p-2 text-blue-600 cursor-pointer"
-                      onClick={() => goToShipmentOrders(r.pickup_exception_ids || [])}
-                    >
-                      {r.pickup_exception}
-                    </td>
-
-                    {/* Shipped */}
-                    <td
-                      className="p-2 text-blue-600 cursor-pointer"
-                      onClick={() => goToShipmentOrders(r.shipped_ids || [])}
-                    >
-                      {r.shipped}
-                    </td>
-
-                    {/* Issue */}
-                    <td
-                      className="p-2 text-blue-600 cursor-pointer"
-                      onClick={() => goToShipmentOrders(r.issue_ids || [])}
-                    >
-                      {r.issue}
-                    </td>
-
-                    {/* Delivered */}
-                    <td
-                      className="p-2 text-blue-600 cursor-pointer"
-                      onClick={() => goToShipmentOrders(r.delivered_ids || [])}
-                    >
-                      {r.delivered}
-                    </td>
-
-                    <td className="p-2 font-medium">{r.total}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+                            {/* Bar + Count */}
+                            <div className="flex items-center gap-2 flex-1">
+                              <div
+                                className="h-4 bg-blue-600 rounded-sm cursor-pointer"
+                                style={{
+                                  width: `${(row.value / max) * 100}%`,
+                                }}
+                                onClick={() =>
+                                  goToShipmentOrders(row.order_ids)
+                                }
+                              />
+                              <span className="text-sm text-slate-800 font-medium">
+                                {row.value}
+                              </span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  })()}
+                </>
+              )}
+            </section>
           </div>
-        </section>
+        </div>
       )}
+
 
       {/* Loading */}
       {shipLoading && (
