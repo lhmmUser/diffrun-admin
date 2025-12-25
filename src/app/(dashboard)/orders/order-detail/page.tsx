@@ -21,6 +21,21 @@ const LOCALE_TO_NUMBER_LOCALE: Record<string, string> = {
   AE: "en-AE",
 };
 
+const SHIPPING_STATUS_OPTIONS = [
+  "PICKUP SCHEDULED",
+  "PICKUP EXCEPTION",
+  "PICKED UP",
+  "IN TRANSIT",
+  "OUT FOR DELIVERY",
+  "DELIVERED",
+  "RTO INITIATED",
+  "RTO IN TRANSIT",
+  "RTO DELIVERED",
+  "CANCELLED",
+  "UNDELIVERED",
+];
+
+
 function formatMoney(amount: string | number | "", locale?: string) {
   const cleanLocale = String(locale || "US").toUpperCase();
   const code = LOCALE_TO_CURRENCY_CODE[cleanLocale] || "USD";
@@ -213,6 +228,7 @@ type InfoFieldProps = {
   editable?: boolean;
   onChange?: (value: any) => void;
   type?: string;
+  options?: string[];
   className?: string;
 };
 
@@ -222,6 +238,7 @@ const InfoField: React.FC<InfoFieldProps> = React.memo(function InfoField({
   editable = false,
   onChange,
   type = "text",
+  options,    
   className = "",
 }) {
   const isLink = type === "link";
@@ -233,7 +250,22 @@ const InfoField: React.FC<InfoFieldProps> = React.memo(function InfoField({
       <span className="text-xs font-bold text-gray-700">{label}:</span>
 
       {editable ? (
-        type === "select" ? (
+        type === "select" && options ? (
+          // ✅ Generic dropdown (Shipping Status)
+          <select
+            className="border border-gray-300 rounded px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-[#5784ba] text-xs w-full"
+            value={value as string}
+            onChange={(e) => onChange?.(e.target.value)}
+          >
+            <option value="">Select</option>
+            {options.map((opt) => (
+              <option key={opt} value={opt}>
+                {opt}
+              </option>
+            ))}
+          </select>
+        ) : type === "select" ? (
+          // ✅ Existing Gender dropdown — unchanged
           <select
             className="border border-gray-300 rounded px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-[#5784ba] text-xs w-full"
             value={value as string}
@@ -275,6 +307,7 @@ const InfoField: React.FC<InfoFieldProps> = React.memo(function InfoField({
       ) : (
         <span className="text-xs text-gray-900">{value || "-"}</span>
       )}
+
     </div>
   );
 });
@@ -854,9 +887,11 @@ export default function OrderDetailPage() {
                     />
                     <InfoField
                       label="Shipping Status"
-                      value={isEditing ? form.current_status : order.current_status || "-"}
+                      value={form.current_status}
                       editable={isEditing}
                       onChange={(v) => updateForm("current_status", v)}
+                      type="select"
+                      options={SHIPPING_STATUS_OPTIONS}
                     />
                     <div className="sm:col-span-2">
                       <label className="text-xs font-bold text-gray-700">Remarks:</label>
