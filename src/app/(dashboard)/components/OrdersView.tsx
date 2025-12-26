@@ -313,6 +313,16 @@ export default function OrdersView({
     });
   };
 
+  const hasOnlyPremiumSelectedOrders = () => {
+    if (selectedOrders.size === 0) return false;
+
+    return Array.from(selectedOrders).every((orderId) => {
+      const order = orders.find((o) => o.orderId === orderId);
+      return order?.bookStyle === "premium";
+    });
+  };
+
+
   const fetchOrders = async () => {
     try {
       const params = new URLSearchParams();
@@ -1545,16 +1555,20 @@ export default function OrdersView({
         <button
           onClick={() => handleAction("approve")}
           disabled={selectedOrders.size === 0 || hasNonApprovedOrders() ||
-            hasLockedSelectedOrders()}
+            hasLockedSelectedOrders() || hasOnlyPremiumSelectedOrders()}
           title={
-            hasNonApprovedOrders()
-              ? "All selected orders must be approved before printing"
-              : hasLockedSelectedOrders()
-                ? "Locked orders cannot be sent to Cloudprinter"
-                : ""
+            hasOnlyPremiumSelectedOrders()
+              ? "Premium books can only be sent to Yara"
+              : hasNonApprovedOrders()
+                ? "All selected orders must be approved before printing"
+                : hasLockedSelectedOrders()
+                  ? "Locked orders cannot be sent to Cloudprinter"
+                  : ""
           }
+
           className={`px-4 py-2 rounded text-sm font-medium transition ${selectedOrders.size === 0 || hasNonApprovedOrders() ||
-            hasLockedSelectedOrders()
+            hasLockedSelectedOrders() ||
+            hasOnlyPremiumSelectedOrders()
             ? "bg-gray-200 text-gray-500 cursor-not-allowed"
             : "bg-green-600 text-white hover:bg-green-700"
             }`}
@@ -1568,21 +1582,25 @@ export default function OrdersView({
             selectedOrders.size === 0 ||
             hasNonApprovedOrders() ||
             hasNonIndiaSelectedOrders() ||
-            hasLockedSelectedOrders()
+            hasLockedSelectedOrders() ||
+            hasOnlyPremiumSelectedOrders()
           }
           title={
-            hasNonApprovedOrders()
-              ? "All selected orders must be approved before sending"
-              : hasNonIndiaSelectedOrders()
-                ? "Send to Genesis is available only for India (IN) orders"
-                : hasLockedSelectedOrders()
-                  ? "Locked orders cannot be sent to Genesis"
-                  : ""
+            hasOnlyPremiumSelectedOrders()
+              ? "Premium books can only be sent to Yara"
+              : hasNonApprovedOrders()
+                ? "All selected orders must be approved before sending"
+                : hasNonIndiaSelectedOrders()
+                  ? "Send to Genesis is available only for India (IN) orders"
+                  : hasLockedSelectedOrders()
+                    ? "Locked orders cannot be sent to Genesis"
+                    : ""
           }
           className={`px-4 py-2 rounded text-sm font-medium transition ${selectedOrders.size === 0 ||
             hasNonApprovedOrders() ||
             hasNonIndiaSelectedOrders() ||
-            hasLockedSelectedOrders()
+            hasLockedSelectedOrders() ||
+            hasOnlyPremiumSelectedOrders()
             ? "bg-gray-200 text-gray-500 cursor-not-allowed"
             : "bg-green-600 text-white hover:bg-green-700"
             }`}
