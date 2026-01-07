@@ -223,6 +223,11 @@ def _to_naive_utc(x):
         return x.astimezone(timezone.utc).replace(tzinfo=None) if x.tzinfo else x
     return x
 
+@app.get("/healthcheck")
+def healthcheck():
+    return {"status": "ok"}
+
+
 
 @app.get("/health")
 def health_check():
