@@ -1438,6 +1438,238 @@ def stats_ship_status_v2(
         "printer": printer or "all",
     }
 
+@app.get("/stats/order-status")
+def stats_order_status(
+    range: str = Query("1w", description="1d, 1w, 1m, 6m, this_month, custom"),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    printer: Optional[str] = Query("all", description="genesis | yara"),
+    loc: Optional[str] = Query("IN", description="country code"),
+):
+    """
+    Order Status
+    Same logic as ship-status-v2
+    WITHOUT out_for_pickup, pickup_exception, issue columns
+    WITH cancelled, rejected, refunded, reprint
+    """
+
+    exclude_codes = ["TEST", "COLLAB", "REJECTED"]
+    exclude_set = {c.upper() for c in exclude_codes}
+
+    # --------------------------------------------------
+    # Location match
+    # --------------------------------------------------
+    try:
+        loc_match = _build_loc_match(loc)
+    except Exception:
+        loc_match = None
+
+    # --------------------------------------------------
+    # 1) Determine Period
+    # --------------------------------------------------
+    now_utc = datetime.now(timezone.utc)
+    now_ist = now_utc.astimezone(IST_TZ)
+
+    effective_range = "1w" if range == "1d" else range
+
+    try:
+        if start_date and end_date:
+            cs, ce, ps, pe, _ = _periods_custom(start_date, end_date)
+            labels = _labels_for("custom", cs, ce)
+        else:
+            cs, ce, ps, pe, gran = _periods(effective_range, now_utc)
+            labels = _labels_for(effective_range, cs, ce)
+    except Exception:
+        labels = []
+        for i in range(6, -1, -1):
+            d = (now_ist - timedelta(days=i))
+            labels.append(d.strftime("%Y-%m-%d"))
+        cs = ce = None
+
+    # --------------------------------------------------
+    # 2) Base order query
+    # --------------------------------------------------
+    base_match = {
+        "paid": True,
+        "processed_at": {"$exists": True, "$ne": None},
+    }
+
+    if loc_match:
+        base_match = {"$and": [base_match, loc_match]}
+
+    if cs and ce:
+        date_filter = {"processed_at": {"$gte": cs, "$lt": ce}}
+        if "$and" in base_match:
+            base_match["$and"].append(date_filter)
+        else:
+            base_match = {"$and": [base_match, date_filter]}
+
+    projection = {
+        "order_id": 1,
+        "processed_at": 1,
+        "printer": 1,
+        "discount_code": 1,
+        "current_status": 1,
+        "order_status": 1,   # ✅ IMPORTANT
+        "_id": 0,
+    }
+
+    cursor = orders_collection.find(base_match, projection)
+
+    # --------------------------------------------------
+    # 3) Organize orders
+    # --------------------------------------------------
+    orders_by_date = {k.split(" ")[0]: [] for k in labels}
+
+    for doc in cursor:
+        try:
+            raw_code = (doc.get("discount_code") or "").strip().upper()
+            if raw_code in exclude_set:
+                continue
+
+            dt = doc.get("processed_at")
+            if isinstance(dt, str):
+                dt = date_parser.isoparse(dt)
+
+            if not dt:
+                continue
+
+            dt_ist = dt.astimezone(IST_TZ)
+            ist_date = dt_ist.strftime("%Y-%m-%d")
+
+            if ist_date not in orders_by_date:
+                continue
+
+            printer_val = (doc.get("printer") or "").strip().lower()
+            if printer and printer.lower() not in ("all", ""):
+                if printer_val != printer.lower():
+                    continue
+
+            status = (doc.get("current_status") or "").strip().lower()
+            order_status = (doc.get("order_status") or "").strip().lower()
+            oid = doc.get("order_id")
+
+            orders_by_date[ist_date].append({
+                "order_id": oid,
+                "current_status": status,
+                "order_status": order_status,
+                "printer": printer_val,
+            })
+
+        except Exception:
+            continue
+
+    # --------------------------------------------------
+    # 4) Build rows per day
+    # --------------------------------------------------
+    rows = []
+
+    for lbl in labels:
+        date_key = lbl.split(" ")[0]
+        day_orders = orders_by_date.get(date_key, [])
+
+        unapproved_ids = []
+        new_ids = []
+        sent_to_print_ids = []
+        shipped_ids = []
+        delivered_ids = []
+
+        cancelled_ids = []
+        rejected_ids = []
+        refunded_ids = []
+        reprint_ids = []
+
+        for od in day_orders:
+            oid = od["order_id"]
+            printer_val = od["printer"]
+            status = od["current_status"]
+            order_status = od["order_status"]
+
+            # ------------------------------
+            # BUSINESS TERMINAL STATES FIRST
+            # ------------------------------
+            if order_status == "cancelled":
+                cancelled_ids.append(oid)
+                continue
+
+            if order_status == "rejected":
+                rejected_ids.append(oid)
+                continue
+
+            if order_status == "refunded":
+                refunded_ids.append(oid)
+                continue
+
+            if order_status == "reprint":
+                reprint_ids.append(oid)
+                continue
+
+            # ------------------------------
+            # NORMAL FLOW
+            # ------------------------------
+            if not printer_val:
+                unapproved_ids.append(oid)
+
+            if printer_val in ("genesis", "yara"):
+                sent_to_print_ids.append(oid)
+
+            if not status:
+                new_ids.append(oid)
+                continue
+
+            if "delivered" in status:
+                delivered_ids.append(oid)
+                continue
+
+            if (
+                "picked up" in status
+                or "pickup done" in status
+                or "in transit" in status
+                or "transit" in status
+            ):
+                shipped_ids.append(oid)
+                continue
+
+            shipped_ids.append(oid)
+
+        rows.append({
+            "date": date_key,
+            "total": len(day_orders),
+
+            "unapproved": len(unapproved_ids),
+            "unapproved_ids": unapproved_ids,
+
+            "sent_to_print": len(sent_to_print_ids),
+            "sent_to_print_ids": sent_to_print_ids,
+
+            "new": len(new_ids),
+            "new_ids": new_ids,
+
+            "shipped": len(shipped_ids),
+            "shipped_ids": shipped_ids,
+
+            "delivered": len(delivered_ids),
+            "delivered_ids": delivered_ids,
+
+            # ✅ NEW FIELDS
+            "cancelled": len(cancelled_ids),
+            "cancelled_ids": cancelled_ids,
+
+            "rejected": len(rejected_ids),
+            "rejected_ids": rejected_ids,
+
+            "refunded": len(refunded_ids),
+            "refunded_ids": refunded_ids,
+
+            "reprint": len(reprint_ids),
+            "reprint_ids": reprint_ids,
+        })
+
+    return {
+        "labels": labels,
+        "rows": rows,
+        "printer": printer or "all",
+    }
 
 
 @app.get("/orders/hash-ids")
@@ -2604,6 +2836,36 @@ _SCOPES = ["https://www.googleapis.com/auth/spreadsheets",
            "https://www.googleapis.com/auth/drive.file"]
 
 
+def extract_reprint_key(order_id: str):
+    """
+    If order_id = TEST#366_RP1 → returns 'RP1'
+    Else returns None
+    """
+    if not order_id:
+        return None
+    m = re.search(r"_RP(\d+)$", order_id)
+    if not m:
+        return None
+    return f"RP{m.group(1)}"
+
+
+def find_order_by_any_id(order_id: str):
+    """
+    Finds order by:
+      - order_id
+      - reprint_order_id
+    """
+    order = orders_collection.find_one({"order_id": order_id})
+    if order:
+        return order
+
+    order = orders_collection.find_one({"reprint_order_id": order_id})
+    if order:
+        return order
+
+    return None
+
+
 def get_gspread_client():
     """
     Return authenticated gspread client. Preference:
@@ -2856,7 +3118,7 @@ async def send_to_google_sheet(payload: BulkPrintRequest, background_tasks: Back
     results = []
     for order_id in unique_order_ids:
         print(f"[SHEETS] Processing order ID: {order_id}")
-        order = orders_collection.find_one({"order_id": order_id})
+        order = find_order_by_any_id(order_id)
         if not order:
             print(f"[SHEETS] Order not found: {order_id}")
             results.append({
@@ -2868,16 +3130,37 @@ async def send_to_google_sheet(payload: BulkPrintRequest, background_tasks: Back
             continue
 
         # 2) ATOMIC LOCK: mark as queued only if not already queued
-        lock_update = {
-            "$set": {
-                "sheet_queued": True,
-                "printer": "Genesis",
-                "print_status": "sent_to_genesis",
-                "print_sent_at": datetime.now().isoformat(),
-                "print_sent_by": print_sent_by,
+        reprint_key = extract_reprint_key(order_id)
+
+        if reprint_key:
+            # REPRINT FLOW
+            lock_filter = {
+                "_id": order["_id"],
+                f"reprint_meta.{reprint_key}.sheet_queued": {"$ne": True}
             }
-        }
-        lock_filter = {"_id": order["_id"], "sheet_queued": {"$ne": True}}
+
+            lock_update = {
+                "$set": {
+                    f"reprint_meta.{reprint_key}.sheet_queued": True,
+                    f"reprint_meta.{reprint_key}.printer": "Genesis",
+                    f"reprint_meta.{reprint_key}.print_status": "sent_to_genesis",
+                    f"reprint_meta.{reprint_key}.print_sent_at": datetime.now().isoformat(),
+                    f"reprint_meta.{reprint_key}.print_sent_by": print_sent_by,
+                }
+            }
+        else:
+            # ORIGINAL FLOW (unchanged)
+            lock_filter = {"_id": order["_id"], "sheet_queued": {"$ne": True}}
+            lock_update = {
+                "$set": {
+                    "sheet_queued": True,
+                    "printer": "Genesis",
+                    "print_status": "sent_to_genesis",
+                    "print_sent_at": datetime.now().isoformat(),
+                    "print_sent_by": print_sent_by,
+                }
+            }
+
         lock_result = orders_collection.update_one(lock_filter, lock_update)
 
         if lock_result.modified_count == 0:
@@ -2891,7 +3174,12 @@ async def send_to_google_sheet(payload: BulkPrintRequest, background_tasks: Back
             continue
 
         # 3) Only now build the row and enqueue appends
-        row = order_to_sheet_row(order)
+        # force correct order_id into sheet
+        order_copy = dict(order)
+        order_copy["order_id"] = order_id
+
+        row = order_to_sheet_row(order_copy)
+
         background_tasks.add_task(
             append_shipping_details, row, order, "Genesis")
         quantity = int(order.get("quantity", 1) or 1)
@@ -3107,7 +3395,8 @@ async def send_to_yara(payload: BulkPrintRequest, background_tasks: BackgroundTa
     results = []
     for order_id in unique_order_ids:
         print(f"[SHEETS][YARA] Processing order ID: {order_id}")
-        order = orders_collection.find_one({"order_id": order_id})
+        order = find_order_by_any_id(order_id)
+
         if not order:
             print(f"[SHEETS][YARA] Order not found: {order_id}")
             results.append({
@@ -3119,16 +3408,37 @@ async def send_to_yara(payload: BulkPrintRequest, background_tasks: BackgroundTa
             continue
 
         # ATOMIC LOCK: mark as queued only if not already queued (Yara-specific flags)
-        lock_update = {
-            "$set": {
-                "sheet_queued": True,
-                "printer": "Yara",
-                "print_status": "sent_to_yara",
-                "print_sent_at": datetime.now().isoformat(),
-                "print_sent_by": print_sent_by,
+        reprint_key = extract_reprint_key(order_id)
+
+        if reprint_key:
+            # REPRINT FLOW
+            lock_filter = {
+                "_id": order["_id"],
+                f"reprint_meta.{reprint_key}.sheet_queued": {"$ne": True}
             }
-        }
-        lock_filter = {"_id": order["_id"], "sheet_queued": {"$ne": True}}
+
+            lock_update = {
+                "$set": {
+                    f"reprint_meta.{reprint_key}.sheet_queued": True,
+                    f"reprint_meta.{reprint_key}.printer": "Yara",
+                    f"reprint_meta.{reprint_key}.print_status": "sent_to_yara",
+                    f"reprint_meta.{reprint_key}.print_sent_at": datetime.now().isoformat(),
+                    f"reprint_meta.{reprint_key}.print_sent_by": print_sent_by,
+                }
+            }
+        else:
+            # ORIGINAL FLOW (unchanged)
+            lock_filter = {"_id": order["_id"], "sheet_queued": {"$ne": True}}
+            lock_update = {
+                "$set": {
+                    "sheet_queued": True,
+                    "printer": "Yara",
+                    "print_status": "sent_to_yara",
+                    "print_sent_at": datetime.now().isoformat(),
+                    "print_sent_by": print_sent_by,
+                }
+            }
+
         lock_result = orders_collection.update_one(lock_filter, lock_update)
 
         if lock_result.modified_count == 0:
@@ -3141,7 +3451,11 @@ async def send_to_yara(payload: BulkPrintRequest, background_tasks: BackgroundTa
             continue
 
         # Build the row and schedule background tasks
-        row = order_to_sheet_row_yara(order)
+        order_copy = dict(order)
+        order_copy["order_id"] = order_id
+
+        row = order_to_sheet_row_yara(order_copy)
+
         background_tasks.add_task(append_shipping_details, row, order, "Yara")
         quantity = int(order.get("quantity", 1) or 1)
         quantity = max(1, quantity)
@@ -5933,6 +6247,10 @@ def _build_order_response(order: Dict[str, Any]) -> Dict[str, Any]:
         "printer": order.get("printer", ""),
         "current_status": current_status,
         "remarks": order.get("remarks", ""),   # ✅ ADD
+        "order_status": order.get("order_status"),
+        "order_status_remarks": order.get("order_status_remarks"),
+        "reprint_order_id": order.get("reprint_order_id", ""),
+        "issue_origin": order.get("issue_origin", ""),
     })
     return response
 
@@ -6006,6 +6324,120 @@ class OrderUpdate(BaseModel):
     tracking_code: Optional[str] = None
     remarks: Optional[str] = None   # ✅ ADD
 
+class OrderStatusUpdatePayload(BaseModel):
+    order_status: str
+    order_status_remarks: str
+
+from pymongo import ReturnDocument
+
+
+@app.post("/orders/{order_id}/status")
+def update_order_status(order_id: str, payload: OrderStatusUpdatePayload):
+    allowed = {"refunded", "cancelled", "rejected", "reprint"}
+
+    status = payload.order_status.strip().lower()
+    remarks = payload.order_status_remarks.strip()
+
+    if status not in allowed:
+        raise HTTPException(status_code=400, detail="Invalid order_status value")
+
+    if not remarks:
+        raise HTTPException(status_code=400, detail="order_status_remarks is required")
+
+    now = datetime.utcnow()
+
+    update_data = {
+        "order_status": status,
+        "order_status_remarks": remarks,
+        "order_status_updated_at": now,
+    }
+
+    # ===============================
+    # REPRINT LOGIC (ONLY if reprint)
+    # ===============================
+    if status == "reprint":
+        order = orders_collection.find_one({"order_id": order_id})
+        if not order:
+            raise HTTPException(status_code=404, detail="Order not found")
+
+        existing_reprint_id = order.get("reprint_order_id")
+
+        if not existing_reprint_id:
+            # First reprint
+            new_reprint_id = f"{order_id}_RP1"
+        else:
+            # Extract number and increment
+            match = re.search(r"_RP(\d+)$", existing_reprint_id)
+            if match:
+                current_num = int(match.group(1))
+                new_reprint_id = f"{order_id}_RP{current_num + 1}"
+            else:
+                # fallback safety
+                new_reprint_id = f"{order_id}_RP1"
+
+        update_data["reprint_order_id"] = new_reprint_id
+        update_data["reprint_created_at"] = now
+
+    # ===============================
+    # UPDATE IN DB
+    # ===============================
+    updated = orders_collection.find_one_and_update(
+        {"order_id": order_id},
+        {"$set": update_data},
+        return_document=ReturnDocument.AFTER
+    )
+
+    if not updated:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    # IMPORTANT: clean response
+    response = {
+        "success": True,
+        "order_id": order_id,
+        "order_status": updated.get("order_status"),
+        "order_status_remarks": updated.get("order_status_remarks"),
+        "order_status_updated_at": updated.get("order_status_updated_at"),
+    }
+
+    if status == "reprint":
+        response["reprint_order_id"] = updated.get("reprint_order_id")
+
+    return response
+
+class IssueOriginUpdatePayload(BaseModel):
+    issue_origin: str
+
+@app.post("/orders/{order_id}/issue-origin")
+def update_issue_origin(order_id: str, payload: IssueOriginUpdatePayload):
+    allowed = {"diffrun", "genesis", "yara", "customer"}
+
+    origin = payload.issue_origin.strip().lower()
+
+    if origin not in allowed:
+        raise HTTPException(status_code=400, detail="Invalid issue_origin value")
+
+    now = datetime.utcnow()
+
+    update_data = {
+        "issue_origin": origin,
+        "issue_origin_updated_at": now,
+    }
+
+    updated = orders_collection.find_one_and_update(
+        {"order_id": order_id},
+        {"$set": update_data},
+        return_document=ReturnDocument.AFTER
+    )
+
+    if not updated:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    return {
+        "success": True,
+        "order_id": order_id,
+        "issue_origin": updated.get("issue_origin"),
+        "issue_origin_updated_at": updated.get("issue_origin_updated_at"),
+    }
 
 
 IMMUTABLE_PATHS = {
@@ -6362,7 +6794,7 @@ def _sr_headers(tok: str) -> Dict[str, str]:
     return {"Authorization": f"Bearer {tok}", "Content-Type": "application/json"}
 
 
-def _sr_order_payload_from_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
+def _sr_order_payload_from_doc(doc: Dict[str, Any], order_id_override: str = None) -> Dict[str, Any]:
     ship = doc.get("shipping_address") or {}
     # name split (helper exists earlier in this file)
     first, last = split_full_name(ship.get("name", "") or (
@@ -6389,7 +6821,7 @@ def _sr_order_payload_from_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
     weight = float(doc.get("weight_kg", 0.5))
 
     # book identity for item line
-    order_id = (doc.get("order_id"))
+    order_id = order_id_override or doc.get("order_id")
     book_id = (doc.get("book_id") or "BOOK").upper()
     book_style = (doc.get("book_style") or "HARDCOVER").upper()
     order_id_long = (doc.get("order_id_long"))
@@ -6427,7 +6859,7 @@ def _sr_order_payload_from_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
 
     return {
         # your reference
-        "order_id": str(doc.get("order_id") or ""),
+        "order_id": str(order_id),
         "order_date": order_date,
         "pickup_location": pickup_name,
         "comment": doc.get("comment", ""),
@@ -6512,13 +6944,34 @@ def shiprocket_create_from_orders(
 
     # 1) Create orders only
     for oid in unique_ids:
-        doc = orders_collection.find_one({"order_id": oid})
+        doc = find_order_by_any_id(oid)
         if not doc:
             errors.append(f"{oid}: not found")
             continue
 
+        reprint_key = extract_reprint_key(oid)
+
+        # ================= ORIGINAL ORDER =================
+        if not reprint_key:
+            # already created? skip
+            if doc.get("sr_order_id") and doc.get("sr_shipment_id"):
+                errors.append(f"{oid}: shiprocket already exists for original order")
+                continue
+
+            payload = _sr_order_payload_from_doc(doc, order_id_override=doc["order_id"])
+
+        # ================= REPRINT ORDER =================
+        else:
+            rp_meta = (doc.get("reprint_meta") or {}).get(reprint_key) or {}
+
+            # already created? skip
+            if rp_meta.get("sr_order_id") and rp_meta.get("sr_shipment_id"):
+                errors.append(f"{oid}: shiprocket already exists for reprint {reprint_key}")
+                continue
+
+            payload = _sr_order_payload_from_doc(doc, order_id_override=oid)
+
         try:
-            payload = _sr_order_payload_from_doc(doc)
             r = requests.post(
                 f"{SHIPROCKET_BASE}/v1/external/orders/create/adhoc",
                 headers=headers, json=payload, timeout=40
@@ -6531,22 +6984,39 @@ def shiprocket_create_from_orders(
             sr_order_id = j.get("order_id")
             shipment_id = j.get("shipment_id")
 
-            # Persist SR ids so you can later call AWB/pickup manually if needed
-            orders_collection.update_one(
-                {"_id": doc["_id"]},
-                {"$set": {
-                    "sr_order_id": sr_order_id,
-                    "sr_shipment_id": shipment_id,
-                    "shiprocket_created_at": datetime.utcnow().isoformat(),
-                    "shiprocket_pickup_location": payload.get("pickup_location")
-                }}
-            )
+            # ================= SAVE =================
+            if not reprint_key:
+                # original order
+                orders_collection.update_one(
+                    {"_id": doc["_id"]},
+                    {"$set": {
+                        "sr_order_id": sr_order_id,
+                        "sr_shipment_id": shipment_id,
+                        "shiprocket_created_at": datetime.utcnow().isoformat(),
+                        "shiprocket_pickup_location": payload.get("pickup_location")
+                    }}
+                )
+            else:
+                # reprint order
+                orders_collection.update_one(
+                    {"_id": doc["_id"]},
+                    {"$set": {
+                        f"reprint_meta.{reprint_key}.sr_order_id": sr_order_id,
+                        f"reprint_meta.{reprint_key}.sr_shipment_id": shipment_id,
+                        f"reprint_meta.{reprint_key}.shiprocket_created_at": datetime.utcnow().isoformat(),
+                        f"reprint_meta.{reprint_key}.shiprocket_pickup_location": payload.get("pickup_location")
+                    }}
+                )
 
-            created_refs.append(
-                {"order_id": oid, "sr_order_id": sr_order_id, "shipment_id": shipment_id})
+            created_refs.append({
+                "order_id": oid,
+                "sr_order_id": sr_order_id,
+                "shipment_id": shipment_id
+            })
+
             if shipment_id:
-                # keep shipment ids for later steps only if user asked for AWB/pickup
                 shipment_ids.append(int(shipment_id))
+
         except Exception as e:
             errors.append(f"{oid}: exception {e}")
 
@@ -7223,3 +7693,450 @@ def production_kpis_graph(
             "end_date": end_date,
         },
     }
+
+
+import os
+import requests
+from datetime import datetime
+from typing import Dict
+from fastapi import FastAPI, HTTPException, Query
+from pymongo import MongoClient
+from dotenv import load_dotenv
+
+# -------------------------------------------------
+# Load ENV
+# -------------------------------------------------
+load_dotenv()
+
+SHIPROCKET_BASE = os.getenv(
+    "SHIPROCKET_BASE", "https://apiv2.shiprocket.in"
+).rstrip("/")
+SHIPROCKET_EMAIL = os.getenv("SHIPROCKET_EMAIL")
+SHIPROCKET_PASSWORD = os.getenv("SHIPROCKET_PASSWORD")
+
+MONGO_URI = os.getenv("MONGO_URI")
+
+# -------------------------------------------------
+# MongoDB
+# -------------------------------------------------
+client = MongoClient(MONGO_URI, tz_aware=True)
+db = client["candyman"]
+
+shipping_collection = db["shipping_details"]
+orders_collection = db["user_details"]
+
+
+# -------------------------------------------------
+# Shiprocket Auth
+# -------------------------------------------------
+def _sr_login_token() -> str:
+    if not SHIPROCKET_EMAIL or not SHIPROCKET_PASSWORD:
+        raise HTTPException(500, "Shiprocket credentials missing")
+
+    r = requests.post(
+        f"{SHIPROCKET_BASE}/v1/external/auth/login",
+        json={
+            "email": SHIPROCKET_EMAIL,
+            "password": SHIPROCKET_PASSWORD
+        },
+        timeout=30
+    )
+
+    if r.status_code != 200:
+        raise HTTPException(502, f"Shiprocket auth failed: {r.text}")
+
+    token = r.json().get("token")
+    if not token:
+        raise HTTPException(502, "Shiprocket token missing")
+
+    return token
+
+
+def _sr_headers(token: str) -> Dict[str, str]:
+    return {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
+
+# -------------------------------------------------
+# Shiprocket Tracking Call
+# -------------------------------------------------
+def get_shiprocket_tracking(order_id: str):
+    token = _sr_login_token()
+
+    r = requests.get(
+        f"{SHIPROCKET_BASE}/v1/external/courier/track",
+        headers=_sr_headers(token),
+        params={"order_id": order_id},
+        timeout=30
+    )
+
+    if r.status_code != 200:
+        raise HTTPException(502, f"Tracking API failed: {r.text}")
+
+    return r.json()
+
+# -------------------------------------------------
+# Normalize Tracking Data
+# -------------------------------------------------
+def normalize_tracking_data(tracking_response):
+    """
+    tracking_response is a LIST returned by Shiprocket
+    """
+
+    if not tracking_response or not isinstance(tracking_response, list):
+        raise HTTPException(502, "Invalid tracking response from Shiprocket")
+
+    tracking_data = tracking_response[0].get("tracking_data")
+    if not tracking_data:
+        raise HTTPException(502, "tracking_data missing in Shiprocket response")
+
+    shipment = tracking_data["shipment_track"][0]
+    scans = tracking_data.get("shipment_track_activities", [])
+
+    # Sort scans: oldest → newest
+    scans_sorted = sorted(
+        scans,
+        key=lambda x: datetime.strptime(x["date"], "%Y-%m-%d %H:%M:%S")
+    )
+
+    return {
+        "current_status": shipment["current_status"].upper(),
+        "shipping_status": tracking_data["shipment_status"],
+        "current_timestamp_iso": shipment.get("updated_time_stamp"),
+        "scans": scans_sorted
+    }
+
+# -------------------------------------------------
+# Mongo Updates
+# -------------------------------------------------
+def update_shipping_details(order_id: str, data: dict):
+    shipping_collection.update_one(
+        {"order_id": order_id},
+        {
+            "$set": {
+                "shiprocket_data.current_status": data["current_status"],
+                "shiprocket_data.shipping_status": data["shipping_status"],
+                "shiprocket_data.current_timestamp_iso": data["current_timestamp_iso"],
+                "shiprocket_data.scans": data["scans"],
+                "updated_at": datetime.utcnow()
+            }
+        }
+    )
+
+
+def update_order_details(order_id: str, data: dict):
+    orders_collection.update_one(
+        {"order_id": order_id},
+        {
+            "$set": {
+                "current_status": data["current_status"],
+                "current_timestamp_iso": data["current_timestamp_iso"],
+                "updated_at": datetime.utcnow()
+            }
+        }
+    )
+
+# -------------------------------------------------
+# API Endpoint
+# -------------------------------------------------
+@app.get("/tracking/order")
+def track_and_sync_order(
+    order_id: str = Query(..., description="Store Order ID")
+):
+    tracking_response = get_shiprocket_tracking(order_id)
+
+    normalized_data = normalize_tracking_data(tracking_response)
+
+    update_shipping_details(order_id, normalized_data)
+    update_order_details(order_id, normalized_data)
+
+    return {
+        "success": True,
+        "order_id": order_id,
+        "current_status": normalized_data["current_status"],
+        "current_timestamp_iso": normalized_data["current_timestamp_iso"],
+        "scans_count": len(normalized_data["scans"])
+    }
+
+# -------------------------------------------------
+# Health
+# -------------------------------------------------
+@app.get("/health")
+def health():
+    return {"status": "OK"}
+
+def get_shiprocket_tracking_with_token(order_id: str, token: str):
+    r = requests.get(
+        f"{SHIPROCKET_BASE}/v1/external/courier/track",
+        headers=_sr_headers(token),
+        params={"order_id": order_id},
+        timeout=30
+    )
+
+    if r.status_code != 200:
+        raise Exception(f"Tracking failed for {order_id}: {r.text}")
+
+    return r.json()
+
+@app.get("/tracking/order-range")
+def track_and_sync_order_range(
+    start_order: str = Query(..., description="Start order ID (e.g. #4000)"),
+    end_order: str = Query(..., description="End order ID (e.g. #4100)")
+):
+    # Extract numeric part to use in loop
+    try:
+        start_num = int(start_order.lstrip("#"))
+        end_num = int(end_order.lstrip("#"))
+    except ValueError:
+        raise HTTPException(400, "Invalid order_id format, must start with '#' followed by digits")
+
+    if start_num > end_num:
+        raise HTTPException(400, "start_order cannot be greater than end_order")
+
+    token = _sr_login_token()
+
+    success = []
+    failed = []
+
+    for order_no in range(start_num, end_num + 1):
+        order_id = f"#{order_no}"  # reconstruct with #
+
+        try:
+            tracking_response = get_shiprocket_tracking_with_token(order_id, token)
+            normalized_data = normalize_tracking_data(tracking_response)
+
+            update_shipping_details(order_id, normalized_data)
+            update_order_details(order_id, normalized_data)
+
+            success.append(order_id)
+
+        except Exception as e:
+            failed.append({
+                "order_id": order_id,
+                "error": str(e)
+            })
+
+    return {
+        "success": True,
+        "processed_count": len(success) + len(failed),
+        "updated": success,
+        "failed": failed
+    }
+
+
+
+
+import os
+import requests
+from datetime import datetime
+from typing import Dict
+from fastapi import FastAPI, HTTPException, Query
+from pymongo import MongoClient
+from dotenv import load_dotenv
+
+# -------------------------------------------------
+# Load ENV
+# -------------------------------------------------
+load_dotenv()
+
+SHIPROCKET_BASE = os.getenv(
+    "SHIPROCKET_BASE", "https://apiv2.shiprocket.in"
+).rstrip("/")
+SHIPROCKET_EMAIL = os.getenv("SHIPROCKET_EMAIL")
+SHIPROCKET_PASSWORD = os.getenv("SHIPROCKET_PASSWORD")
+
+MONGO_URI = os.getenv("MONGO_URI")
+
+# -------------------------------------------------
+# MongoDB
+# -------------------------------------------------
+client = MongoClient(MONGO_URI, tz_aware=True)
+db = client["candyman"]
+
+shipping_collection = db["shipping_details"]
+orders_collection = db["user_details"]
+
+
+# -------------------------------------------------
+# Shiprocket Auth
+# -------------------------------------------------
+def _sr_login_token() -> str:
+    if not SHIPROCKET_EMAIL or not SHIPROCKET_PASSWORD:
+        raise HTTPException(500, "Shiprocket credentials missing")
+
+    r = requests.post(
+        f"{SHIPROCKET_BASE}/v1/external/auth/login",
+        json={
+            "email": SHIPROCKET_EMAIL,
+            "password": SHIPROCKET_PASSWORD
+        },
+        timeout=30
+    )
+
+    if r.status_code != 200:
+        raise HTTPException(502, f"Shiprocket auth failed: {r.text}")
+
+    token = r.json().get("token")
+    if not token:
+        raise HTTPException(502, "Shiprocket token missing")
+
+    return token
+
+
+def _sr_headers(token: str) -> Dict[str, str]:
+    return {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
+
+# -------------------------------------------------
+# Shiprocket Tracking Call
+# -------------------------------------------------
+def get_shiprocket_tracking(order_id: str):
+    token = _sr_login_token()
+
+    r = requests.get(
+        f"{SHIPROCKET_BASE}/v1/external/courier/track",
+        headers=_sr_headers(token),
+        params={"order_id": order_id},
+        timeout=30
+    )
+
+    if r.status_code != 200:
+        raise HTTPException(502, f"Tracking API failed: {r.text}")
+
+    return r.json()
+
+# -------------------------------------------------
+# Normalize Tracking Data
+# -------------------------------------------------
+def normalize_tracking_data(tracking_response):
+    """
+    tracking_response is a LIST returned by Shiprocket
+    """
+
+    if not tracking_response or not isinstance(tracking_response, list):
+        raise HTTPException(502, "Invalid tracking response from Shiprocket")
+
+    tracking_data = tracking_response[0].get("tracking_data")
+    if not tracking_data:
+        raise HTTPException(502, "tracking_data missing in Shiprocket response")
+
+    shipment = tracking_data["shipment_track"][0]
+    scans = tracking_data.get("shipment_track_activities", [])
+
+    # Sort scans: oldest → newest
+    scans_sorted = sorted(
+        scans,
+        key=lambda x: datetime.strptime(x["date"], "%Y-%m-%d %H:%M:%S")
+    )
+
+    return {
+        "current_status": shipment["current_status"].upper(),
+        "shipping_status": tracking_data["shipment_status"],
+        "current_timestamp_iso": shipment.get("updated_time_stamp"),
+        "scans": scans_sorted
+    }
+
+# -------------------------------------------------
+# Mongo Updates
+# -------------------------------------------------
+def update_shipping_details(order_id: str, data: dict):
+    shipping_collection.update_one(
+        {"order_id": order_id},
+        {
+            "$set": {
+                "shiprocket_data.current_status": data["current_status"],
+                "shiprocket_data.shipping_status": data["shipping_status"],
+                "shiprocket_data.current_timestamp_iso": data["current_timestamp_iso"],
+                "shiprocket_data.scans": data["scans"],
+                "updated_at": datetime.utcnow()
+            }
+        }
+    )
+
+
+def update_order_details(order_id: str, data: dict):
+    orders_collection.update_one(
+        {"order_id": order_id},
+        {
+            "$set": {
+                "current_status": data["current_status"],
+                "current_timestamp_iso": data["current_timestamp_iso"],
+                "updated_at": datetime.utcnow()
+            }
+        }
+    )
+
+# -------------------------------------------------
+# API Endpoint
+# -------------------------------------------------
+@app.get("/tracking/order")
+def track_and_sync_order(
+    order_id: str = Query(..., description="Store Order ID")
+):
+    tracking_response = get_shiprocket_tracking(order_id)
+
+    normalized_data = normalize_tracking_data(tracking_response)
+
+    update_shipping_details(order_id, normalized_data)
+    update_order_details(order_id, normalized_data)
+
+    return {
+        "success": True,
+        "order_id": order_id,
+        "current_status": normalized_data["current_status"],
+        "current_timestamp_iso": normalized_data["current_timestamp_iso"],
+        "scans_count": len(normalized_data["scans"])
+    }
+
+# -------------------------------------------------
+# Health
+# -------------------------------------------------
+@app.get("/health")
+def health():
+    return {"status": "OK"}
+
+def get_shiprocket_tracking_with_token(order_id: str, token: str):
+    r = requests.get(
+        f"{SHIPROCKET_BASE}/v1/external/courier/track",
+        headers=_sr_headers(token),
+        params={"order_id": order_id},
+        timeout=30
+    )
+
+    if r.status_code != 200:
+        raise Exception(f"Tracking failed for {order_id}: {r.text}")
+
+    return r.json()
+
+@app.get("/tracking/order")
+def track_and_sync_order(
+    order_id: str = Query(..., description="Store Order ID, e.g. #4554 or #4554_1")
+):
+    # ---- Validate order_id format ----
+    if not re.match(r"^#\d+(_\d+)?$", order_id):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid order_id format. Expected #1234 or #1234_1"
+        )
+
+    # ---- Shiprocket call ----
+    tracking_response = get_shiprocket_tracking(order_id)
+
+    normalized_data = normalize_tracking_data(tracking_response)
+
+    # ---- Mongo updates ----
+    update_shipping_details(order_id, normalized_data)
+    update_order_details(order_id, normalized_data)
+
+    return {
+        "success": True,
+        "order_id": order_id,
+        "current_status": normalized_data["current_status"],
+        "current_timestamp_iso": normalized_data["current_timestamp_iso"],
+        "scans_count": len(normalized_data["scans"])
+    }
+
+

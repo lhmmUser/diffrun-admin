@@ -3,6 +3,8 @@
 import React from "react";
 import { useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import { useUser } from "@clerk/nextjs";
+
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "";
 
@@ -34,6 +36,8 @@ const SHIPPING_STATUS_OPTIONS = [
   "CANCELLED",
   "UNDELIVERED",
 ];
+
+
 
 
 function formatMoney(amount: string | number | "", locale?: string) {
@@ -314,7 +318,14 @@ const InfoField: React.FC<InfoFieldProps> = React.memo(function InfoField({
   );
 });
 
-export default function OrderDetailPage() {
+export default function ReprintPage() {
+  const { user, isLoaded } = useUser();
+
+  const clerkEmail =
+    user?.primaryEmailAddress?.emailAddress ||
+    user?.emailAddresses?.[0]?.emailAddress ||
+    "";
+
   const router = useRouter();
   const searchParams = useSearchParams();
   const orderIdFromQS = searchParams.get("order_id");
@@ -325,6 +336,8 @@ export default function OrderDetailPage() {
       return orderIdFromQS || "";
     }
   }, [orderIdFromQS]);
+
+
 
   const [loading, setLoading] = useState(false);
   const [loadErr, setLoadErr] = useState<string | null>(null);
@@ -344,6 +357,117 @@ export default function OrderDetailPage() {
   const [actionRemarks, setActionRemarks] = useState("");
   const [actionLoading, setActionLoading] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [reprintOrderId, setReprintOrderId] = useState<string | null>(null);
+  const [issueOrigin, setIssueOrigin] = useState<string>("");
+
+
+  const handleSendToCloudprinter = async () => {
+    if (!reprintOrderId) {
+      alert("Reprint Order ID not found");
+      return;
+    }
+
+    try {
+      const res = await fetch(`${API_BASE}/orders/approve-printing`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          order_ids: [reprintOrderId],
+          print_sent_by: clerkEmail,
+        }),
+      });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || "Failed to send to Cloudprinter");
+      }
+
+      alert("✅ Reprint sent to Cloudprinter");
+    } catch (e: any) {
+      console.error(e);
+      alert(e.message || "Cloudprinter failed");
+    }
+  };
+
+
+  const handleSendToGenesis = async () => {
+    if (!reprintOrderId) {
+      alert("Reprint Order ID not found");
+      return;
+    }
+
+    try {
+      const res = await fetch(`${API_BASE}/orders/send-to-google-sheet`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          order_ids: [reprintOrderId],
+          print_sent_by: clerkEmail,
+        }),
+      });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || "Failed to send to Genesis");
+      }
+
+      // trigger shiprocket
+      await fetch(`${API_BASE}/shiprocket/create-from-orders`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          order_ids: [reprintOrderId],
+          request_pickup: true,
+        }),
+      });
+
+      alert("✅ Reprint sent to Genesis");
+    } catch (e: any) {
+      console.error(e);
+      alert(e.message || "Genesis failed");
+    }
+  };
+
+
+  const handleSendToYara = async () => {
+    if (!reprintOrderId) {
+      alert("Reprint Order ID not found");
+      return;
+    }
+
+    try {
+      const res = await fetch(`${API_BASE}/orders/send-to-yara`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          order_ids: [reprintOrderId],
+          print_sent_by: clerkEmail,
+        }),
+      });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || "Failed to send to Yara");
+      }
+
+      // trigger shiprocket
+      await fetch(`${API_BASE}/shiprocket/create-from-orders`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          order_ids: [reprintOrderId],
+          request_pickup: true,
+        }),
+      });
+
+      alert("✅ Reprint sent to Yara");
+    } catch (e: any) {
+      console.error(e);
+      alert(e.message || "Yara failed");
+    }
+  };
+
+
 
   const toFormState = (o: OrderDetail): FormState => ({
     name: o.name || o.child?.name || "",
@@ -515,6 +639,12 @@ export default function OrderDetailPage() {
 
         setOrder(data);
         setForm(toFormState(data));
+        if ((data as any).reprint_order_id) {
+          setReprintOrderId((data as any).reprint_order_id);
+        }
+        if ((data as any).issue_origin) {
+          setIssueOrigin((data as any).issue_origin);
+        }
       } catch (e: any) {
         setLoadErr(e?.message || "Failed to load order");
       } finally {
@@ -522,6 +652,34 @@ export default function OrderDetailPage() {
       }
     })();
   }, [rawOrderId]);
+
+  const handleIssueOriginChange = async (value: string) => {
+    setIssueOrigin(value);
+
+    if (!order?.order_id) {
+      alert("Order ID missing");
+      return;
+    }
+
+    try {
+      const res = await fetch(
+        `${API_BASE}/orders/${encodeURIComponent(order.order_id)}/issue-origin`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ issue_origin: value }),
+        }
+      );
+
+      if (!res.ok) {
+        const t = await res.text();
+        throw new Error(t || "Failed to save issue origin");
+      }
+    } catch (e: any) {
+      console.error("Issue origin save failed", e);
+      alert(e.message || "Failed to save Issue Origin");
+    }
+  };
 
   const updateForm = (path: string, value: any) => {
     setForm((prev: any) => {
@@ -865,8 +1023,13 @@ export default function OrderDetailPage() {
         <div className="flex items-center justify-between mb-4">
           <div className="min-w-0">
             <h1 className="text-xl sm:text-3xl font-bold text-gray-900 leading-tight break-words">
-              {orderIdFromQS ? `${rawOrderId}` : "No order selected"}
+              {reprintOrderId
+                ? `Reprint – ${reprintOrderId}`
+                : rawOrderId
+                  ? `Reprint – ${rawOrderId} (creating...)`
+                  : "Reprint"}
             </h1>
+
           </div>
           <div className="flex items-center gap-2">
             <button
@@ -903,6 +1066,37 @@ export default function OrderDetailPage() {
             )}
           </div>
         </div>
+        {/* REPRINT PRINTER ACTIONS */}
+        {reprintOrderId && (
+          <div className="mb-4 bg-white rounded border border-gray-200 p-3 shadow-sm">
+            <h3 className="text-base font-semibold text-gray-900 mb-3 pb-1 border-b border-gray-100">
+              Reprint Actions
+            </h3>
+
+            <div className="flex flex-wrap gap-2">
+              <button
+                onClick={handleSendToCloudprinter}
+                className="px-3 py-1.5 bg-green-600 text-white text-xs rounded hover:bg-green-700"
+              >
+                Send to Cloudprinter
+              </button>
+
+              <button
+                onClick={handleSendToGenesis}
+                className="px-3 py-1.5 bg-green-600 text-white text-xs rounded hover:bg-green-700"
+              >
+                Send to Genesis
+              </button>
+
+              <button
+                onClick={handleSendToYara}
+                className="px-3 py-1.5 bg-green-600 text-white text-xs rounded hover:bg-green-700"
+              >
+                Send to Yara
+              </button>
+            </div>
+          </div>
+        )}
 
         {loading && (
           <div className="flex justify-center items-center py-6">
@@ -1039,127 +1233,6 @@ export default function OrderDetailPage() {
                 </h3>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>
-                    <div className="flex flex-col flex-wrap gap-1">
-                      <TimelineItem
-                        label="Storybook Created"
-                        date={formatIso(order.timeline?.created_at)}
-                      />
-                      <TimelineItem
-                        label="Order Processed"
-                        date={formatIso(order.timeline?.processed_at)}
-                      />
-                      <TimelineItem
-                        label="Order Approved"
-                        date={formatIso(order.timeline?.approved_at)}
-                      />
-                      <TimelineItem
-                        label="Sent for Printing"
-                        date={
-                          order.timeline?.print_sent_at
-                            ? `${prettyDate(order.timeline.print_sent_at)} ${order.printer ? `(${order.printer})` : ""
-                            }`
-                            : "-"
-                        }
-                      />
-
-                      <TimelineItem
-                        label="Order Shipped"
-                        date={formatIso(order.timeline?.shipped_at)}
-                        subtext={
-                          order.timeline?.shipped_at &&
-                            order.order?.tracking_code ? (
-                            <>
-                              <span>
-                                Tracking ID: {order.order.tracking_code}
-                              </span>
-                              <br />
-                              <span>
-                                Tracking URL:{" "}
-                                <a
-                                  href={
-                                    (
-                                      order.shipping_address?.country || ""
-                                    ).toUpperCase() === "INDIA"
-                                      ? `https://shiprocket.co/tracking/${encodeURIComponent(
-                                        order.order.tracking_code.trim()
-                                      )}`
-                                      : `https://parcelsapp.com/en/tracking/${encodeURIComponent(
-                                        order.order.tracking_code.trim()
-                                      )}`
-                                  }
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="text-blue-600 underline"
-                                >
-                                  {order.order.tracking_code}
-                                </a>
-                              </span>
-                            </>
-                          ) : undefined
-                        }
-                      />
-                      {order.timeline?.delivered_at ? (
-                        <TimelineItem
-                          label="Delivered"
-                          date={formatIso(order.timeline.delivered_at)}
-                          isLast
-                        />
-                      ) : (
-                        <TimelineItem label="Delivered" date="-" isLast />
-                      )}
-                    </div>
-
-                    {isEditing && (
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-3 gap-y-1.5 mt-3">
-                        <InfoField
-                          label="created_at"
-                          value={form.timeline.created_at}
-                          editable
-                          onChange={(v) => updateForm("timeline.created_at", v)}
-                        />
-                        <InfoField
-                          label="processed_at"
-                          value={form.timeline.processed_at}
-                          editable
-                          onChange={(v) =>
-                            updateForm("timeline.processed_at", v)
-                          }
-                        />
-                        <InfoField
-                          label="approved_at"
-                          value={form.timeline.approved_at}
-                          editable
-                          onChange={(v) =>
-                            updateForm("timeline.approved_at", v)
-                          }
-                        />
-                        <InfoField
-                          label="print_sent_at"
-                          value={form.timeline.print_sent_at}
-                          editable
-                          onChange={(v) =>
-                            updateForm("timeline.print_sent_at", v)
-                          }
-                        />
-                        <InfoField
-                          label="shipped_at"
-                          value={form.timeline.shipped_at}
-                          editable
-                          onChange={(v) => updateForm("timeline.shipped_at", v)}
-                        />
-                        <InfoField
-                          label="delivered_at"
-                          value={form.timeline.delivered_at}
-                          editable
-                          onChange={(v) =>
-                            updateForm("timeline.delivered_at", v)
-                          }
-                        />
-                      </div>
-                    )}
-                  </div>
-
-                  <div>
                     <div className="flex flex-col gap-2">
                       <InfoField
                         label="Name"
@@ -1232,33 +1305,7 @@ export default function OrderDetailPage() {
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-                <div className="bg-white rounded border border-gray-200 p-3 shadow-sm">
-                  <h3 className="text-base font-semibold text-gray-900 mb-3 pb-1 border-b border-gray-100">
-                    Transaction ID
-                  </h3>
-                  <div className="space-y-2">
-                    <InfoField
-                      label="Transaction ID"
-                      value={form.transaction_id}
-                      editable={isEditing}
-                      onChange={(v) => updateForm("transaction_id", v)}
-                    />
-                    <InfoField
-                      label="PayPal Order ID"
-                      value={form.paypal_order_id}
-                      editable={isEditing}
-                      onChange={(v) => updateForm("paypal_order_id", v)}
-                    />
-                    <InfoField
-                      label="PayPal Capture ID"
-                      value={form.paypal_capture_id}
-                      editable={isEditing}
-                      onChange={(v) => updateForm("paypal_capture_id", v)}
-                    />
-                  </div>
-                </div>
-              </div>
+
 
               {saveErr && (
                 <div className="bg-red-50 border border-red-200 rounded p-2">
@@ -1470,132 +1517,30 @@ export default function OrderDetailPage() {
                 </div>
               </div>
 
-              {/* ORDER ACTIONS START */}
+              {/* Issue Origin */}
               <div className="bg-white rounded border border-gray-200 p-3 shadow-sm">
-                <h3 className="text-base font-semibold text-gray-900 mb-5 pb-1 border-b border-gray-100">
-                  Order Actions
+                <h3 className="text-base font-semibold text-gray-900 mb-3 pb-1 border-b border-gray-100">
+                  Issue Origin
                 </h3>
 
-                {/* Action Buttons – always visible */}
-                <div className="flex flex-wrap gap-2 mb-3">
-                  <button
-                    onClick={() => setActionType("refund")}
-                    className="px-3 py-1.5 bg-[#5784ba] text-white text-xs rounded hover:bg-[#4a76a8]"
-                  >
-                    Refund
-                  </button>
-
-                  <button
-                    onClick={() => setActionType("cancel")}
-                    className="px-3 py-1.5 bg-[#5784ba] text-white text-xs rounded hover:bg-[#4a76a8]"
-                  >
-                    Cancel
-                  </button>
-
-                  <button
-                    onClick={() => setActionType("reject")}
-                    className="px-3 py-1.5 bg-[#5784ba] text-white text-xs rounded hover:bg-[#4a76a8]"
-                  >
-                    Reject
-                  </button>
-
-                  <button
-                    onClick={() => setActionType("reprint")}
-                    className="px-3 py-1.5 bg-[#5784ba] text-white text-xs rounded hover:bg-[#4a76a8]"
-                  >
-                    Reprint
-                  </button>
-                </div>
-                {/* Status Display */}
-                {order.order_status && (
-                  <div className="mb-3 p-2 rounded bg-gray-50 border border-gray-200">
-                    <p className="text-xs font-semibold text-gray-800 capitalize">
-                      Status:{" "}
-                      <span className="text-gray-900">
-                        {order.order_status}
-                      </span>
-                    </p>
-                  </div>
-                )}
-
-                {/* Reason Display */}
-                {order.order_status_remarks && (
-                  <div className="mb-3 p-2 rounded bg-gray-50 border border-gray-200">
-                    <p className="text-xs font-semibold text-gray-700 mb-1">
-                      Reason:
-                    </p>
-                    <p className="text-xs text-gray-900 whitespace-pre-wrap leading-relaxed">
-                      {order.order_status_remarks}
-                    </p>
-                  </div>
-                )}
-
-                {/* Go to Reprint Page Button */}
-                {order.order_status === "reprint" && (
-                  <div className="mb-3">
-                    <button
-                      onClick={() => {
-                        router.push(
-                          `/orders/reprint?order_id=${encodeURIComponent(order.order_id)}&reason=${encodeURIComponent(
-                            order.order_status_remarks || actionRemarks || ""
-                          )}`
-                        );
-                      }}
-                      className="w-full px-3 py-1.5 bg-[#5784ba] text-white text-xs rounded hover:bg-[#4a76a8]"
-                    >
-                      Go to Reprint Page
-                    </button>
-                  </div>
-                )}
-
-                {/* Reason Input Box */}
-                {(actionType === "refund" ||
-                  actionType === "cancel" ||
-                  actionType === "reject" ||
-                  actionType === "reprint") && (
-                    <div className="mt-3 pt-3 border-t border-gray-200">
-                      <label className="block text-xs font-bold text-gray-700 mb-1">
-                        Reason for {actionType}
-                      </label>
-
-                      <textarea
-                        value={actionRemarks}
-                        onChange={(e) => setActionRemarks(e.target.value)}
-                        rows={3}
-                        className="w-full border border-gray-300 rounded px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-[#5784ba]"
-                        placeholder="Enter reason..."
+                <div className="flex flex-col gap-2 text-xs text-gray-700">
+                  {["diffrun", "genesis", "yara", "customer"].map((opt) => (
+                    <label key={opt} className="flex items-center gap-2 cursor-pointer capitalize">
+                      <input
+                        type="radio"
+                        name="issue_origin"
+                        value={opt}
+                        className="accent-[#5784ba]"
+                        checked={issueOrigin === opt}
+                        onChange={() => handleIssueOriginChange(opt)}
                       />
+                      {opt}
+                    </label>
+                  ))}
 
-                      <div className="flex gap-2 mt-2">
-                        <button
-                          onClick={submitOrderAction}
-                          disabled={actionLoading}
-                          className="px-3 py-1.5 bg-[#5784ba] text-white text-xs rounded hover:bg-[#4a76a8] disabled:opacity-60"
-                        >
-                          {actionLoading ? "Saving..." : "Submit"}
-                        </button>
-
-                        <button
-                          onClick={() => {
-                            setActionType("");
-                            setActionRemarks("");
-                            setActionError(null);
-                          }}
-                          className="px-3 py-1.5 border border-gray-300 text-gray-700 text-xs rounded hover:bg-gray-100"
-                        >
-                          Cancel
-                        </button>
-                      </div>
-
-                      {actionError && (
-                        <p className="text-xs text-red-600 mt-1">
-                          {actionError}
-                        </p>
-                      )}
-                    </div>
-                  )}
+                </div>
               </div>
-              {/* ORDER ACTIONS END */}
+
             </div>
 
           </div>
