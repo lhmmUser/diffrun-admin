@@ -344,6 +344,19 @@ export default function OrderDetailPage() {
   const [actionRemarks, setActionRemarks] = useState("");
   const [actionLoading, setActionLoading] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const reprintMeta = useMemo(() => {
+    if (!order || order.order_status !== "reprint") return null;
+    return (order as any).reprint_meta?.RP1 || null;
+  }, [order]);
+
+  const [reprintShippingTimeline, setReprintShippingTimeline] = useState<{
+    shipped_at?: string | null;
+    delivered_at?: string | null;
+    tracking_code?: string | null;
+  } | null>(null);
+
+
+
 
   const toFormState = (o: OrderDetail): FormState => ({
     name: o.name || o.child?.name || "",
@@ -512,7 +525,66 @@ export default function OrderDetailPage() {
             printerStr
           );
         }
+        // ===============================
+        // REPRINT SHIPPING FETCH (NEW FLOW)
+        // ===============================
+        if (
+          data.order_status === "reprint" &&
+          (data as any).reprint_order_id
+        ) {
+          try {
+            const reprintOrderId = (data as any).reprint_order_id;
 
+            const reprintShipUrl = `${API_BASE}/shipping/${encodeURIComponent(
+              reprintOrderId
+            )}`;
+
+            console.info("DEBUG fetching REPRINT shipping:", reprintShipUrl);
+
+            const reprintShipRes = await fetch(reprintShipUrl, { cache: "no-store" });
+
+            if (reprintShipRes && reprintShipRes.ok) {
+              const reprintShipDoc = await reprintShipRes.json().catch(() => null);
+
+              console.info("DEBUG REPRINT shipping doc:", reprintShipDoc);
+
+              if (reprintShipDoc) {
+                let shippedAtRaw =
+                  reprintShipDoc.shiprocket_raw?.shipments?.shipped_date ||
+                  reprintShipDoc.shiprocket_raw?.shipments?.shipped_at ||
+                  null;
+
+                let shippedAt = normalizeShiprocketTimestamp(shippedAtRaw);
+
+                const deliveredRaw =
+                  reprintShipDoc.shiprocket_data?.current_status === "DELIVERED"
+                    ? reprintShipDoc.shiprocket_data?.current_timestamp_raw || null
+                    : null;
+
+                const deliveredAt = normalizeShiprocketTimestamp(deliveredRaw);
+
+                const tracking =
+                  reprintShipDoc.tracking_number ||
+                  reprintShipDoc.shiprocket_data?.awb ||
+                  reprintShipDoc.shiprocket_raw?.awb ||
+                  "";
+
+                setReprintShippingTimeline({
+                  shipped_at: shippedAt || null,
+                  delivered_at: deliveredAt || null,
+                  tracking_code: tracking || null,
+                });
+              }
+            } else {
+              console.warn(
+                "DEBUG REPRINT shipping endpoint returned non-ok:",
+                reprintShipRes?.status
+              );
+            }
+          } catch (e) {
+            console.warn("DEBUG REPRINT shipping fetch error:", e);
+          }
+        }
         setOrder(data);
         setForm(toFormState(data));
       } catch (e: any) {
@@ -1037,7 +1109,7 @@ export default function OrderDetailPage() {
                 <h3 className="text-base font-semibold text-gray-900 mb-3 pb-1 border-b border-gray-100">
                   Order Timeline and Shipping Detail
                 </h3>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className={`grid grid-cols-1 ${order.order_status === "reprint" ? "md:grid-cols-3" : "md:grid-cols-2"} gap-4`}>
                   <div>
                     <div className="flex flex-col flex-wrap gap-1">
                       <TimelineItem
@@ -1158,6 +1230,77 @@ export default function OrderDetailPage() {
                       </div>
                     )}
                   </div>
+
+                  {order.order_status === "reprint" && (
+                    <div>
+                      <div className="flex flex-col flex-wrap gap-1">
+                        <TimelineItem
+                          label="Storybook Created"
+                          date={formatIso(order.timeline?.created_at)}
+                        />
+                        <TimelineItem
+                          label="Order Processed"
+                          date={formatIso(order.timeline?.processed_at)}
+                        />
+                        <TimelineItem
+                          label="Order Approved"
+                          date={formatIso(order.timeline?.approved_at)}
+                        />
+                        <TimelineItem
+                          label="Sent for Printing"
+                          date={
+                            reprintMeta?.print_sent_at
+                              ? `${prettyDate(reprintMeta.print_sent_at)} ${reprintMeta.printer ? `(${reprintMeta.printer})` : ""
+                              }`
+                              : "-"
+                          }
+                        />
+                        <TimelineItem
+                          label="Order Shipped"
+                          date={formatIso(reprintShippingTimeline?.shipped_at || null)}
+                          subtext={
+                            reprintShippingTimeline?.shipped_at &&
+                              reprintShippingTimeline?.tracking_code ? (
+                              <>
+                                <span>
+                                  Tracking ID: {reprintShippingTimeline.tracking_code}
+                                </span>
+                                <br />
+                                <span>
+                                  Tracking URL:{" "}
+                                  <a
+                                    href={
+                                      (order.shipping_address?.country || "").toUpperCase() === "INDIA"
+                                        ? `https://shiprocket.co/tracking/${encodeURIComponent(
+                                          reprintShippingTimeline.tracking_code.trim()
+                                        )}`
+                                        : `https://parcelsapp.com/en/tracking/${encodeURIComponent(
+                                          reprintShippingTimeline.tracking_code.trim()
+                                        )}`
+                                    }
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="text-blue-600 underline"
+                                  >
+                                    {reprintShippingTimeline.tracking_code}
+                                  </a>
+                                </span>
+                              </>
+                            ) : undefined
+                          }
+                        />
+                        {reprintShippingTimeline?.delivered_at ? (
+                          <TimelineItem
+                            label="Delivered"
+                            date={formatIso(reprintShippingTimeline.delivered_at)}
+                            isLast
+                          />
+                        ) : (
+                          <TimelineItem label="Delivered" date="-" isLast />
+                        )}
+                      </div>
+                    </div>
+                  )}
 
                   <div>
                     <div className="flex flex-col gap-2">

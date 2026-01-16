@@ -6251,6 +6251,7 @@ def _build_order_response(order: Dict[str, Any]) -> Dict[str, Any]:
         "order_status_remarks": order.get("order_status_remarks"),
         "reprint_order_id": order.get("reprint_order_id", ""),
         "issue_origin": order.get("issue_origin", ""),
+        "reprint_meta": order.get("reprint_meta", {}),
     })
     return response
 
@@ -8138,5 +8139,3 @@ def track_and_sync_order(
         "current_timestamp_iso": normalized_data["current_timestamp_iso"],
         "scans_count": len(normalized_data["scans"])
     }
-
-
