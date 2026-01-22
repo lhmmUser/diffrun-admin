@@ -156,7 +156,7 @@ async def lifespan(app: FastAPI):
 
         scheduler.add_job(
             _kick_feedback_emails,
-            trigger=CronTrigger(hour="14", minute="0", timezone=IST_TZ),
+            trigger=CronTrigger(hour="12", minute="0", timezone=IST_TZ),
             id="feedback_emails_job",
             replace_existing=True,
             coalesce=True,
@@ -170,7 +170,7 @@ async def lifespan(app: FastAPI):
 
         scheduler.add_job(
             _kick_send_nudges,
-            trigger=CronTrigger(hour="16", minute="0", timezone=IST_TZ),
+            trigger=CronTrigger(hour="12", minute="45", timezone=IST_TZ),
             id="send_nudges_job",
             replace_existing=True,
             coalesce=True,
@@ -6825,6 +6825,28 @@ def _sr_order_payload_from_doc(doc: Dict[str, Any], order_id_override: str = Non
     order_id = order_id_override or doc.get("order_id")
     book_id = (doc.get("book_id") or "BOOK").upper()
     book_style = (doc.get("book_style") or "HARDCOVER").upper()
+    book_id_norm = book_id.lower()
+    book_style_norm = book_style.lower()
+
+    if book_id_norm == "wigu":
+        sku_prefix = "24_W"
+    elif book_id_norm == "abcd":
+        sku_prefix = "28_S"
+    else:
+        sku_prefix = "24_S"
+
+    if book_style_norm == "hardcover":
+        sku_suffix = "HC"
+    elif book_style_norm == "paperback":
+        sku_suffix = "PB"
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid book_style for SKU: {book_style}"
+        )
+
+    sku = f"{sku_prefix}_{sku_suffix}"
+
     order_id_long = (doc.get("order_id_long"))
     name = (doc.get("name"))
     product_name = generate_book_title(book_id, name)
@@ -6891,7 +6913,7 @@ def _sr_order_payload_from_doc(doc: Dict[str, Any], order_id_override: str = Non
         "order_items": [
             {
                 "name": f"{product_name}",
-                "sku": f"{order_id_long}",
+                "sku": sku,
                 "units": qty,
                 "selling_price": float(round(subtotal / max(qty, 1), 2)),
                 "discount": 0,
