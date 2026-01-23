@@ -190,6 +190,11 @@ export default function JobsPage() {
                     <option value="wigu">WIGU</option>
                     <option value="astro">Astro</option>
                     <option value="abcd">ABCD</option>
+                    <option value="hero">HERO</option>
+                    <option value="sports">SPORTS</option>
+                    <option value="dream">DREAM</option>        
+                    <option value="bloom">BLOOM</option>
+                    <option value="twin">TWIN</option>
                 </select>
 
                 <select
@@ -334,7 +339,7 @@ export default function JobsPage() {
                                     <td className="p-3 text-black">{order.pp_instance || "-"}</td>
                                     <td className="p-3 text-black">{order.finalPreview || "-"}</td>
                                     <td className="p-3 text-black">{order.fp_instance || "-"}</td>
-                                    <td className="p-3 text-black max-w-xs truncate">{order.errorReason || "-"}</td>
+                                    <td className="p-3 text-black max-w-xs">{order.errorReason || "-"}</td>
 
                                 </tr>
                             ))

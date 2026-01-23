@@ -3494,7 +3494,7 @@ def get_jobs(
         query["approved"] = False
 
     if filter_book_style:
-        query["book_style"] = filter_book_style
+        query["book_id"] = filter_book_style
 
     # NEW: Search functionality
     if q and q.strip():
