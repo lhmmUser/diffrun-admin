@@ -156,7 +156,7 @@ async def lifespan(app: FastAPI):
 
         scheduler.add_job(
             _kick_feedback_emails,
-            trigger=CronTrigger(hour="12", minute="0", timezone=IST_TZ),
+            trigger=CronTrigger(hour="12", minute="00", timezone=IST_TZ),
             id="feedback_emails_job",
             replace_existing=True,
             coalesce=True,
@@ -3538,7 +3538,8 @@ def get_jobs(
         "pp_instance":1,
         "fp_instance":1,
         "printer": 1,
-        "_id": 0
+        "_id": 0,
+        "error_reason": 1,
     }
 
     skip = (page - 1) * limit
@@ -3577,6 +3578,7 @@ def get_jobs(
             "pp_instance":doc.get("pp_instance", "") or "",
             "fp_instance":doc.get("fp_instance", "") or "",
             "printer": doc.get("printer", "") or "",
+            "error_reason": doc.get("error_reason", ""), 
         })
 
     return {

@@ -19,7 +19,8 @@ type RawOrder = {
     partial_preview?: string;
     final_preview?: string;
     pp_instance?: string;
-    fp_instance?: string
+    fp_instance?: string;
+    error_reason?: string;
 };
 
 type Order = {
@@ -35,7 +36,8 @@ type Order = {
     partialPreview: string;
     finalPreview: string;
     pp_instance: string;
-    fp_instance: string
+    fp_instance: string;
+    errorReason: string;
 };
 
 const formatDate = (dateInput: any) => {
@@ -115,7 +117,7 @@ export default function JobsPage() {
             if (filterBookStyle !== "all") params.append("filter_book_style", filterBookStyle);
             params.append("sort_by", sortBy);
             params.append("sort_dir", sortDir);
-            
+
             // Server-side pagination and search
             params.append("page", currentPage.toString());
             params.append("limit", itemsPerPage.toString());
@@ -123,11 +125,11 @@ export default function JobsPage() {
 
             const res = await fetch(`${baseUrl}/jobs?${params.toString()}`);
             console.log('Fetching jobs from:', `${baseUrl}/jobs?${params.toString()}`);
-            
+
             if (!res.ok) {
                 throw new Error(`Failed to fetch jobs: ${res.status}`);
             }
-            
+
             const data = await res.json();
             const rawData: RawOrder[] = data.jobs; // Extract from data.jobs
 
@@ -146,6 +148,7 @@ export default function JobsPage() {
                 finalPreview: (order.final_preview ?? "").toString(),
                 pp_instance: (order.pp_instance ?? "").toString(),
                 fp_instance: (order.fp_instance ?? "").toString(),
+                errorReason: order.error_reason || "",
             }));
 
             console.log("Transformed orders:", transformed);
@@ -210,12 +213,12 @@ export default function JobsPage() {
 
             {/* Search bar */}
             <div className="relative">
-                <input 
+                <input
                     type="text"
                     value={searchJobId}
                     onChange={(e) => setSearchJobId(e.target.value)}
                     placeholder="Search by Job ID, Order ID, Name, or Book ID..."
-                    className="sm:w-72 rounded border border-gray-300 px-3 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" 
+                    className="sm:w-72 rounded border border-gray-300 px-3 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
                 {searchJobId && (
                     <button
@@ -230,13 +233,13 @@ export default function JobsPage() {
             </div>
 
             <div className="relative">
-                <input 
+                <input
                     type="text"
                     value={search}
                     onChange={(e) => setSearch(e.target.value)}
                     onKeyDown={handleSearch}
                     placeholder="Quick jump to job detail (Enter to search)..."
-                    className="sm:w-72 rounded border border-gray-300 px-3 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" 
+                    className="sm:w-72 rounded border border-gray-300 px-3 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
                 {search && (
                     <button
@@ -267,6 +270,8 @@ export default function JobsPage() {
                             <th className="p-3">PP Ins</th>
                             <th className="p-3">Final Preview</th>
                             <th className="p-3">FP Ins</th>
+                            <th className="p-3">Error Reason</th>
+
                         </tr>
                     </thead>
                     <tbody>
@@ -289,8 +294,8 @@ export default function JobsPage() {
                                     className="border-t hover:bg-gray-50"
                                 >
                                     <td className="p-3">
-                                        <button 
-                                            className="text-blue-600 hover:text-blue-800 hover:cursor-pointer" 
+                                        <button
+                                            className="text-blue-600 hover:text-blue-800 hover:cursor-pointer"
                                             onClick={() => openJobDetail(order.jobId)}
                                         >
                                             {order.jobId}
@@ -329,6 +334,8 @@ export default function JobsPage() {
                                     <td className="p-3 text-black">{order.pp_instance || "-"}</td>
                                     <td className="p-3 text-black">{order.finalPreview || "-"}</td>
                                     <td className="p-3 text-black">{order.fp_instance || "-"}</td>
+                                    <td className="p-3 text-black max-w-xs truncate">{order.errorReason || "-"}</td>
+
                                 </tr>
                             ))
                         )}
