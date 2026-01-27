@@ -1245,19 +1245,34 @@ def stats_ship_status_v2(
     # 2) Base order query
     # --------------------------------------------------
     base_match = {
-        "paid": True,
-        "processed_at": {"$exists": True, "$ne": None},
+        "$and": [
+            {"paid": True},
+            {"processed_at": {"$exists": True, "$ne": None}},
+            {
+                "$or": [
+                    {"current_status": {"$exists": False}},
+                    {"current_status": {"$not": {"$regex": "cancelled|refunded", "$options": "i"}}},
+                ]
+            },
+            {
+                "$or": [
+                    {"order_status": {"$exists": False}},
+                    {"order_status": {"$not": {"$regex": "cancelled|refunded", "$options": "i"}}},
+                ]
+            },
+        ]
     }
 
+
     if loc_match:
-        base_match = {"$and": [base_match, loc_match]}
+        base_match["$and"].append(loc_match)
+
 
     if cs and ce:
-        date_filter = {"processed_at": {"$gte": cs, "$lt": ce}}
-        if "$and" in base_match:
-            base_match["$and"].append(date_filter)
-        else:
-            base_match = {"$and": [base_match, date_filter]}
+        base_match["$and"].append(
+            {"processed_at": {"$gte": cs, "$lt": ce}}
+        )
+
 
     projection = {
         "order_id": 1,
@@ -1265,6 +1280,7 @@ def stats_ship_status_v2(
         "printer": 1,
         "discount_code": 1,
         "current_status": 1,
+        "order_status": 1,
         "_id": 0,
     }
 
@@ -1510,7 +1526,6 @@ def stats_order_status(
         "printer": 1,
         "discount_code": 1,
         "current_status": 1,
-        "order_status": 1,   # ✅ IMPORTANT
         "_id": 0,
     }
 
@@ -7222,7 +7237,7 @@ def _parse_iso_utc(dt):
 
     return None
 
-@app.get("/stats/sla-cohorts")
+@app.get("/stats/sla-cohorts") #Delivery vs Undelivered in 8 days
 def stats_sla_cohorts(
     start_date: str = Query(..., description="YYYY-MM-DD (processed_at cohort)"),
     end_date: str = Query(..., description="YYYY-MM-DD (processed_at cohort)"),
@@ -7240,11 +7255,27 @@ def stats_sla_cohorts(
     # Mongo query
     # -------------------------------------------------
     base_query = {
-        "paid": True,
-        "processed_at": {"$gte": start_utc, "$lt": end_utc},
-        "printer": {"$in": ["Genesis", "Yara"]},
-        "order_id": {"$regex": r"^#\d+(_\d+)?$"},
+        "$and": [
+            {"paid": True},
+            {"processed_at": {"$gte": start_utc, "$lt": end_utc}},
+            {"printer": {"$in": ["Genesis", "Yara"]}},
+            {"order_id": {"$regex": r"^#\d+(_\d+)?$"}},
+
+            {
+                "$or": [
+                    {"current_status": {"$exists": False}},
+                    {"current_status": {"$not": {"$regex": "cancelled", "$options": "i"}}},
+                ]
+            },
+            {
+                "$or": [
+                    {"order_status": {"$exists": False}},
+                    {"order_status": {"$not": {"$regex": "cancelled", "$options": "i"}}},
+                ]
+            },
+        ]
     }
+
 
     projection = {
         "_id": 0,
@@ -7343,7 +7374,7 @@ def stats_sla_cohorts(
 
     return response
 
-@app.get("/stats/sla-summary")
+@app.get("/stats/sla-summary") #“Orders delivered within 8 days”, “Not delivered within 8 days”)
 def stats_sla_summary(
     start_date: str = Query(...),
     end_date: str = Query(...)
@@ -7355,11 +7386,27 @@ def stats_sla_summary(
     end_utc = end_ist.astimezone(timezone.utc)
 
     query = {
-        "paid": True,
-        "processed_at": {"$gte": start_utc, "$lt": end_utc},
-        "printer": {"$in": ["Genesis", "Yara"]},
-        "order_id": {"$regex": r"^#\d+(_\d+)?$"},
+        "$and": [
+            {"paid": True},
+            {"processed_at": {"$gte": start_utc, "$lt": end_utc}},
+            {"printer": {"$in": ["Genesis", "Yara"]}},
+            {"order_id": {"$regex": r"^#\d+(_\d+)?$"}},
+
+            {
+                "$or": [
+                    {"current_status": {"$exists": False}},
+                    {"current_status": {"$not": {"$regex": "cancelled", "$options": "i"}}},
+                ]
+            },
+            {
+                "$or": [
+                    {"order_status": {"$exists": False}},
+                    {"order_status": {"$not": {"$regex": "cancelled", "$options": "i"}}},
+                ]
+            },
+        ]
     }
+
 
     projection = {
         "_id": 0,
@@ -7396,7 +7443,7 @@ def stats_sla_summary(
     }
 
 
-@app.get("/stats/delivery-latency-cohorts")
+@app.get("/stats/delivery-latency-cohorts") #Delivery Time Cohort table
 def delivery_latency_cohorts(
     start_date: str = Query(..., description="YYYY-MM-DD"),
     end_date: str = Query(..., description="YYYY-MM-DD"),
@@ -7414,10 +7461,25 @@ def delivery_latency_cohorts(
     # Mongo query — ALL orders
     # -----------------------------
     query = {
-        "paid": True,
-        "processed_at": {"$gte": start_utc, "$lt": end_utc},
-        "printer": {"$in": ["Genesis", "Yara"]},
-        "order_id": {"$regex": r"^#\d+(_\d+)?$"},
+        "$and": [
+            {"paid": True},
+            {"processed_at": {"$gte": start_utc, "$lt": end_utc}},
+            {"printer": {"$in": ["Genesis", "Yara"]}},
+            {"order_id": {"$regex": r"^#\d+(_\d+)?$"}},
+
+            {
+                "$or": [
+                    {"current_status": {"$exists": False}},
+                    {"current_status": {"$not": {"$regex": "cancelled", "$options": "i"}}},
+                ]
+            },
+            {
+                "$or": [
+                    {"order_status": {"$exists": False}},
+                    {"order_status": {"$not": {"$regex": "cancelled", "$options": "i"}}},
+                ]
+            },
+        ]
     }
 
     projection = {
@@ -7575,10 +7637,26 @@ SHIPPED_STATUSES = {
 @app.get("/stats/production-kpis")
 def production_kpis():
     query = {
-        "paid": True,
-        "printer": {"$in": ["Genesis", "Yara"]},
-        "order_id": {"$regex": r"^#\d+(_\d+)?$"},
+        "$and": [
+            {"paid": True},
+            {"printer": {"$in": ["Genesis", "Yara"]}},
+            {"order_id": {"$regex": r"^#\d+(_\d+)?$"}},
+
+            {
+                "$or": [
+                    {"current_status": {"$exists": False}},
+                    {"current_status": {"$not": {"$regex": "cancelled", "$options": "i"}}},
+                ]
+            },
+            {
+                "$or": [
+                    {"order_status": {"$exists": False}},
+                    {"order_status": {"$not": {"$regex": "cancelled", "$options": "i"}}},
+                ]
+            },
+        ]
     }
+
 
     projection = {
         "_id": 0,
@@ -7657,10 +7735,25 @@ def production_kpis_graph(
     # Mongo query
     # -----------------------------
     query = {
-        "paid": True,
-        "processed_at": {"$gte": start_utc, "$lt": end_utc},
-        "printer": {"$in": ["Genesis", "Yara"]},
-        "order_id": {"$regex": r"^#\d+(_\d+)?$"},
+        "$and": [
+            {"paid": True},
+            {"processed_at": {"$gte": start_utc, "$lt": end_utc}},
+            {"printer": {"$in": ["Genesis", "Yara"]}},
+            {"order_id": {"$regex": r"^#\d+(_\d+)?$"}},
+
+            {
+                "$or": [
+                    {"current_status": {"$exists": False}},
+                    {"current_status": {"$not": {"$regex": "cancelled", "$options": "i"}}},
+                ]
+            },
+            {
+                "$or": [
+                    {"order_status": {"$exists": False}},
+                    {"order_status": {"$not": {"$regex": "cancelled", "$options": "i"}}},
+                ]
+            },
+        ]
     }
 
     projection = {
