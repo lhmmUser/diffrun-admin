@@ -101,6 +101,30 @@ export default function SLACohortsPage() {
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [latencyData, setLatencyData] = useState<LatencyRow[]>([]);
+  const [weeklySla, setWeeklySla] = useState<{
+    timeline: string[];
+    weeks: {
+      week: number;
+      year: number;
+      from_date: string;
+      to_date: string;
+      total_orders: number;
+      total_delivered: number;
+      delivered_pct: number;
+      avg_days: number;
+      sla_counts: {
+        le_3: number;
+        d4_8: number;
+        ge_9: number;
+      };
+      sla_pct: {
+        le_3: number;
+        d4_8: number;
+        ge_9: number;
+      };
+    }[];
+  } | null>(null);
+
   const [slaSummary, setSlaSummary] = useState<{
     delivered: number;
     undelivered: number;
@@ -119,6 +143,16 @@ export default function SLACohortsPage() {
       yara: number;
     };
   } | null>(null);
+
+  /* ---- Weekly SLA Controls ---- */
+  type WeeklyRangeType = "last_6" | "last_8" | "custom";
+
+  const [weeklyRange, setWeeklyRange] =
+    useState<WeeklyRangeType>("last_6");
+
+  const [weeklyStartDate, setWeeklyStartDate] = useState("");
+  const [weeklyEndDate, setWeeklyEndDate] = useState("");
+
 
   // ---- Production Graph (ONLY) ----
   const [prodRange, setProdRange] =
@@ -233,6 +267,39 @@ export default function SLACohortsPage() {
     const data = await res.json();
     setLatencyData(Array.isArray(data) ? data : []);
   };
+  const fetchWeeklySla = async () => {
+    try {
+      const params = new URLSearchParams();
+
+      if (weeklyRange === "last_6") {
+        params.set("weeks", "6");
+      }
+
+      if (weeklyRange === "last_8") {
+        params.set("weeks", "8");
+      }
+
+      if (weeklyRange === "custom" && weeklyStartDate && weeklyEndDate) {
+        params.set("start_date", weeklyStartDate);
+        params.set("end_date", weeklyEndDate);
+      }
+
+
+      const url = `${API_BASE}/stats/shipment-weekly-sla?${params.toString()}`;
+
+      const res = await fetch(url);
+
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+
+      const data = await res.json();
+      setWeeklySla(data);
+    } catch (err) {
+      console.error("Weekly SLA fetch failed:", err);
+    }
+  };
+
 
   const fetchTable = async (date: string) => {
     setSelectedDate(date);
@@ -313,6 +380,11 @@ export default function SLACohortsPage() {
   useEffect(() => {
     fetchProductionGraphKpis();
   }, [prodStartDate, prodEndDate]);
+
+  useEffect(() => {
+    fetchWeeklySla();
+  }, [weeklyRange, weeklyStartDate, weeklyEndDate]);
+
 
 
   const notDeliveredForSelectedDate = tableRows.filter(
@@ -679,6 +751,168 @@ export default function SLACohortsPage() {
             )}
           </div>
         </div>
+        <div className="flex gap-3 items-center mb-4">
+          <select
+            value={weeklyRange}
+            onChange={(e) => setWeeklyRange(e.target.value as WeeklyRangeType)}
+            className="border px-3 py-2 rounded text-sm"
+          >
+            <option value="last_6">Last 6 Weeks</option>
+            <option value="last_8">Last 8 Weeks</option>
+            <option value="custom">Custom</option>
+          </select>
+
+          {weeklyRange === "custom" && (
+            <>
+              <input
+                type="date"
+                value={weeklyStartDate}
+                onChange={(e) => setWeeklyStartDate(e.target.value)}
+                className="border px-3 py-2 rounded text-sm"
+              />
+
+              <input
+                type="date"
+                value={weeklyEndDate}
+                onChange={(e) => setWeeklyEndDate(e.target.value)}
+                className="border px-3 py-2 rounded text-sm"
+              />
+            </>
+          )}
+
+        </div>
+
+        {/* ================= Weekly Shipment SLA (NEW) ================= */}
+        {weeklySla && (
+          <div className="col-span-12 bg-white p-4 border rounded">
+            <h2 className="font-medium mb-4">
+              Weekly Shipment Analysis
+            </h2>
+
+            <div className="overflow-x-auto">
+              <table className="border-collapse text-sm w-full">
+                <thead>
+                  <tr>
+                    <th className="border px-3 py-2 text-left">Metric</th>
+                    {weeklySla.weeks.map((w) => {
+                      const from = new Date(w.from_date).toLocaleDateString("en-GB", {
+                        day: "2-digit",
+                        month: "short",
+                      });
+
+                      const to = new Date(w.to_date).toLocaleDateString("en-GB", {
+                        day: "2-digit",
+                        month: "short",
+                      });
+
+                      return (
+                        <th key={w.week} className="border px-3 py-2 text-right">
+                          <div className="font-medium">Week {w.week}</div>
+                          <div className="text-xs text-gray-500">
+                            ({from} to {to})
+                          </div>
+                        </th>
+                      );
+                    })}
+
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td className="border px-3 py-2 font-medium">Total Orders</td>
+                    {weeklySla.weeks.map((w) => (
+                      <td key={w.week} className="border px-3 py-2 text-right">
+                        {w.total_orders}
+                      </td>
+                    ))}
+                  </tr>
+
+                  <tr>
+                    <td className="border px-3 py-2 font-medium">Total Delivered</td>
+                    {weeklySla.weeks.map((w) => (
+                      <td key={w.week} className="border px-3 py-2 text-right">
+                        {w.total_delivered}
+                      </td>
+                    ))}
+                  </tr>
+
+                  <tr className="bg-green-50">
+                    <td className="border px-3 py-2 font-medium">% Delivered</td>
+                    {weeklySla.weeks.map((w) => (
+                      <td key={w.week} className="border px-3 py-2 text-right">
+                        {w.delivered_pct}%
+                      </td>
+                    ))}
+                  </tr>
+
+                  <tr>
+                    <td className="border px-3 py-2 font-medium">Avg Days</td>
+                    {weeklySla.weeks.map((w) => (
+                      <td key={w.week} className="border px-3 py-2 text-right">
+                        {w.avg_days}
+                      </td>
+                    ))}
+                  </tr>
+
+                  <tr>
+                    <td className="border px-3 py-2">≤ 3 days</td>
+                    {weeklySla.weeks.map((w) => (
+                      <td key={w.week} className="border px-3 py-2 text-right">
+                        {w.sla_counts.le_3}
+                      </td>
+                    ))}
+                  </tr>
+
+                  <tr>
+                    <td className="border px-3 py-2">4 – 8 days</td>
+                    {weeklySla.weeks.map((w) => (
+                      <td key={w.week} className="border px-3 py-2 text-right">
+                        {w.sla_counts.d4_8}
+                      </td>
+                    ))}
+                  </tr>
+
+                  <tr>
+                    <td className="border px-3 py-2">≥ 9 days</td>
+                    {weeklySla.weeks.map((w) => (
+                      <td key={w.week} className="border px-3 py-2 text-right">
+                        {w.sla_counts.ge_9}
+                      </td>
+                    ))}
+                  </tr>
+
+                  <tr className="bg-gray-50">
+                    <td className="border px-3 py-2">≤ 3 days %</td>
+                    {weeklySla.weeks.map((w) => (
+                      <td key={w.week} className="border px-3 py-2 text-right">
+                        {w.sla_pct.le_3}%
+                      </td>
+                    ))}
+                  </tr>
+
+                  <tr className="bg-gray-50">
+                    <td className="border px-3 py-2">4 – 8 days %</td>
+                    {weeklySla.weeks.map((w) => (
+                      <td key={w.week} className="border px-3 py-2 text-right">
+                        {w.sla_pct.d4_8}%
+                      </td>
+                    ))}
+                  </tr>
+
+                  <tr className="bg-gray-50">
+                    <td className="border px-3 py-2">≥ 9 days %</td>
+                    {weeklySla.weeks.map((w) => (
+                      <td key={w.week} className="border px-3 py-2 text-right">
+                        {w.sla_pct.ge_9}%
+                      </td>
+                    ))}
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
         <div className="inline-block bg-white p-4 border rounded overflow-x-auto">
           <h2 className="font-medium mb-3">
             Delivery Time Cohort (% of Orders)

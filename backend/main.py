@@ -167,7 +167,7 @@ async def lifespan(app: FastAPI):
             asyncio.run_coroutine_threadsafe(
                 send_nudge_batches(batch_size=200, days_window=7), loop
             )
-
+        '''
         scheduler.add_job(
             _kick_send_nudges,
             trigger=CronTrigger(hour="12", minute="45", timezone=IST_TZ),
@@ -176,7 +176,7 @@ async def lifespan(app: FastAPI):
             coalesce=True,
             max_instances=1,
         )
-
+        '''
     except Exception:
         logger.exception("Failed to start APScheduler")
 
@@ -7809,6 +7809,232 @@ def production_kpis_graph(
         "range": {
             "start_date": start_date,
             "end_date": end_date,
+        },
+    }
+
+# --------------------------------------------------
+# NEW API: Weekly Shipment SLA
+# --------------------------------------------------
+
+from datetime import datetime, timedelta, timezone
+from fastapi import Query
+from zoneinfo import ZoneInfo
+from typing import Optional
+
+IST_TZ = ZoneInfo("Asia/Kolkata")
+
+# --------------------------------------------------
+# Shared helpers (UNCHANGED)
+# --------------------------------------------------
+
+def _parse_iso_utc(dt):
+    if not dt:
+        return None
+    if isinstance(dt, datetime):
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    if isinstance(dt, str):
+        try:
+            parsed = datetime.fromisoformat(dt)
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        except Exception:
+            return None
+    return None
+
+
+def _sla_base_query(start_utc, end_utc):
+    return {
+        "$and": [
+            {"paid": True},
+            {"processed_at": {"$gte": start_utc, "$lt": end_utc}},
+            {"printer": {"$in": ["Genesis", "Yara"]}},
+            {"order_id": {"$regex": r"^#\d+(_\d+)?$"}},
+            {
+                "$or": [
+                    {"current_status": {"$exists": False}},
+                    {"current_status": {"$not": {"$regex": "cancelled", "$options": "i"}}},
+                ]
+            },
+            {
+                "$or": [
+                    {"order_status": {"$exists": False}},
+                    {"order_status": {"$not": {"$regex": "cancelled", "$options": "i"}}},
+                ]
+            },
+        ]
+    }
+
+
+def _last_iso_week(year: int) -> int:
+    return datetime(year, 12, 28).isocalendar()[1]
+
+
+def _iso_week_bounds(year: int, week: int):
+    start_ist = datetime.fromisocalendar(year, week, 1).replace(tzinfo=IST_TZ)
+    end_ist = start_ist + timedelta(days=7)
+    return start_ist.astimezone(timezone.utc), end_ist.astimezone(timezone.utc)
+
+
+# --------------------------------------------------
+# API: Weekly Shipment SLA
+# --------------------------------------------------
+
+@app.get("/stats/shipment-weekly-sla")
+def shipment_weekly_sla(
+    weeks: int = Query(6, ge=1, le=12),
+    exclude_weeks: int = Query(2, ge=0, le=4),
+
+    # ISO week params (optional)
+    start_year: Optional[int] = Query(None),
+    start_week: Optional[int] = Query(None, ge=1, le=53),
+    end_year: Optional[int] = Query(None),
+    end_week: Optional[int] = Query(None, ge=1, le=53),
+
+    # 🔹 Date params (USED BY FRONTEND)
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+):
+    """
+    Weekly Shipment SLA (ISO Week based)
+
+    MODES:
+    - Rolling (default)
+    - Custom (via start_date & end_date OR ISO weeks)
+    """
+
+    now_ist = datetime.now(IST_TZ)
+    iso_year, iso_week, _ = now_ist.isocalendar()
+
+    # --------------------------------------------------
+    # 🔹 DATE → ISO WEEK ADAPTER (KEY FIX)
+    # --------------------------------------------------
+    if start_date and end_date and not start_year:
+        try:
+            sd = datetime.fromisoformat(start_date).replace(tzinfo=IST_TZ)
+            ed = datetime.fromisoformat(end_date).replace(tzinfo=IST_TZ)
+
+            start_year, start_week, _ = sd.isocalendar()
+            end_year, end_week, _ = ed.isocalendar()
+        except Exception:
+            pass
+
+    # --------------------------------------------------
+    # 1) Determine target weeks
+    # --------------------------------------------------
+    target_weeks = []
+
+    # ---------- CUSTOM MODE ----------
+    if start_year and start_week and end_year and end_week:
+        year, week = start_year, start_week
+
+        while True:
+            target_weeks.append((year, week))
+
+            if year == end_year and week == end_week:
+                break
+
+            week += 1
+            if week > _last_iso_week(year):
+                week = 1
+                year += 1
+
+    # ---------- ROLLING MODE ----------
+    else:
+        year = iso_year
+        week = iso_week - exclude_weeks
+
+        while len(target_weeks) < weeks:
+            if week <= 0:
+                year -= 1
+                week = _last_iso_week(year)
+
+            target_weeks.insert(0, (year, week))
+            week -= 1
+
+    timeline = []
+    rows = []
+
+    # --------------------------------------------------
+    # 2) Process each week (UNCHANGED SLA LOGIC)
+    # --------------------------------------------------
+    for year, week in target_weeks:
+        timeline.append(week)
+
+        start_utc, end_utc = _iso_week_bounds(year, week)
+        start_ist = start_utc.astimezone(IST_TZ)
+        end_ist = (end_utc - timedelta(seconds=1)).astimezone(IST_TZ)
+
+        query = _sla_base_query(start_utc, end_utc)
+
+        projection = {
+            "_id": 0,
+            "processed_at": 1,
+            "current_status": 1,
+            "current_timestamp_iso": 1,
+        }
+
+        docs = list(orders_collection.find(query, projection))
+
+        total_orders = len(docs)
+        delivered_orders = 0
+        le_3 = d4_8 = ge_9 = 0
+        delivery_days = []
+
+        for d in docs:
+            if (d.get("current_status") or "").upper() != "DELIVERED":
+                continue
+
+            delivered_at = _parse_iso_utc(d.get("current_timestamp_iso"))
+            if not delivered_at:
+                continue
+
+            processed_at = d["processed_at"]
+            days = max((delivered_at - processed_at).days, 0)
+
+            delivered_orders += 1
+            delivery_days.append(days)
+
+            if days <= 3:
+                le_3 += 1
+            elif 4 <= days <= 8:
+                d4_8 += 1
+            else:
+                ge_9 += 1
+
+        avg_days = round(sum(delivery_days) / len(delivery_days), 2) if delivery_days else 0
+        delivered_pct = round(delivered_orders * 100 / total_orders, 2) if total_orders else 0
+
+        rows.append({
+            "week": week,
+            "year": year,
+            "from_date": start_ist.date().isoformat(),
+            "to_date": end_ist.date().isoformat(),
+            "total_orders": total_orders,
+            "total_delivered": delivered_orders,
+            "delivered_pct": delivered_pct,
+            "avg_days": avg_days,
+            "sla_counts": {
+                "le_3": le_3,
+                "d4_8": d4_8,
+                "ge_9": ge_9,
+            },
+            "sla_pct": {
+                "le_3": round(le_3 * 100 / delivered_orders, 2) if delivered_orders else 0,
+                "d4_8": round(d4_8 * 100 / delivered_orders, 2) if delivered_orders else 0,
+                "ge_9": round(ge_9 * 100 / delivered_orders, 2) if delivered_orders else 0,
+            },
+        })
+
+    # --------------------------------------------------
+    # 3) Final response
+    # --------------------------------------------------
+    return {
+        "timeline": timeline,
+        "weeks": rows,
+        "meta": {
+            "mode": "custom" if start_year else "rolling",
+            "weeks_shown": len(rows),
+            "excluded_recent_weeks": exclude_weeks if not start_year else None,
+            "generated_at": now_ist.isoformat(),
         },
     }
 
