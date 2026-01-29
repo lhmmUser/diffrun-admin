@@ -6836,7 +6836,9 @@ def _sr_order_payload_from_doc(doc: Dict[str, Any], order_id_override: str = Non
     else:
         length, breadth, height = 23.0, 23.0, 3.0
 
-    weight = float(doc.get("weight_kg", 0.5))
+    base_weight = float(doc.get("weight_kg", 0.5))
+    weight = round(base_weight * qty, 3)
+
 
     # book identity for item line
     order_id = order_id_override or doc.get("order_id")
